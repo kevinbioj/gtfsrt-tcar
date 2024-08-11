@@ -236,4 +236,6 @@ function sweepEntries() {
   setTimeout(sweepEntries, 60_000);
 }
 
+sweepEntries();
+
 serve({ fetch: server.fetch, port: +(process.env.PORT ?? 40409) });
