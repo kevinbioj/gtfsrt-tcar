@@ -110,12 +110,11 @@ connection.on("dataReceived", (_, payload) => {
       return;
     }
 
-    // const lastStopTime = vehicle.StopTimeList.at(-1)!;
-    // const timeSince = Temporal.Now.instant().since(Temporal.Instant.from(lastStopTime.AimedTime)).total("minutes");
-    // if (guessedTrip.routeId === "HLP" ? timeSince > 10 : timeSince > 10) return;
+    const lastStopTime = vehicle.StopTimeList.at(-1)!;
+    const timeSince = Temporal.Now.instant().since(Temporal.Instant.from(lastStopTime.AimedTime)).total("minutes");
+    if (guessedTrip.routeId === "HLP" ? timeSince > 40 : timeSince > 10) return;
 
     const recordedAt = Temporal.PlainDateTime.from(vehicle.RecordedAtTime).toZonedDateTime("Europe/Paris");
-    if (Temporal.Now.zonedDateTimeISO("Europe/Paris").since(recordedAt).total("minutes") > 15) return;
 
     const tripDescriptor = {
       tripId: guessedTrip.id,
