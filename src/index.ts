@@ -99,7 +99,6 @@ connection.on("dataReceived", (_, payload) => {
   const vehicle = JSON.parse(payload) as MonitoredVehicle;
   const parcNumber = vehicle.VehicleRef.split(":")[3];
   try {
-    if (parcNumber === "5505") console.log(vehicle);
     if (vehicle.StopTimeList.length === 0) {
       console.warn(`[${parcNumber}] No stops remaining, skipping.`);
       return;
