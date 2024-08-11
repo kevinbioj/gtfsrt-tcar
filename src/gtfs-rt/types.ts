@@ -26,7 +26,7 @@ export type TripUpdateEntity = {
       stopSequence: number;
       scheduleRelationship?: StopTimeScheduleRelationship;
     }>;
-    timestamp: string;
+    timestamp: number;
     trip: {
       tripId: string;
       routeId: string;

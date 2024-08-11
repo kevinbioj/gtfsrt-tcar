@@ -110,11 +110,12 @@ connection.on("dataReceived", (_, payload) => {
       return;
     }
 
-    const lastStopTime = vehicle.StopTimeList.at(-1)!;
-    const timeSince = Temporal.Now.instant().since(Temporal.Instant.from(lastStopTime.AimedTime)).total("minutes");
-    if (guessedTrip.routeId === "HLP" ? timeSince > 45 : timeSince > 10) return;
+    // const lastStopTime = vehicle.StopTimeList.at(-1)!;
+    // const timeSince = Temporal.Now.instant().since(Temporal.Instant.from(lastStopTime.AimedTime)).total("minutes");
+    // if (guessedTrip.routeId === "HLP" ? timeSince > 10 : timeSince > 10) return;
 
     const recordedAt = Temporal.PlainDateTime.from(vehicle.RecordedAtTime).toZonedDateTime("Europe/Paris");
+    if (Temporal.Now.zonedDateTimeISO("Europe/Paris").since(recordedAt).total("minutes") > 15) return;
 
     const tripDescriptor = {
       tripId: guessedTrip.id,
@@ -163,7 +164,7 @@ connection.on("dataReceived", (_, payload) => {
                   scheduleRelationship: StopTimeScheduleRelationship.SCHEDULED,
                 };
               }),
-        timestamp: recordedAt.epochSeconds.toString(),
+        timestamp: recordedAt.epochSeconds,
         trip: tripDescriptor,
         vehicle: vehicleDescriptor,
       },
@@ -196,5 +197,44 @@ connection.on("dataReceived", (_, payload) => {
     console.error(`[${parcNumber}] An error occurred while processing the vehicle:`, error);
   }
 });
+
+const SWEEP_THRESHOLD = 15;
+
+function sweepEntries() {
+  console.log("Sweeping old entries from trip updates and vehicle positions.");
+  [...tripUpdates.values()]
+    .filter((tripUpdate) => {
+      const lastStop = tripUpdate.tripUpdate.stopTimeUpdate.at(-1);
+      if (typeof lastStop === "undefined") {
+        return (
+          Temporal.Now.instant()
+            .since(Temporal.Instant.fromEpochSeconds(tripUpdate.tripUpdate.timestamp))
+            .total("minutes") > SWEEP_THRESHOLD
+        );
+        // return dayjs().diff(dayjs.unix(tripUpdate.tripUpdate.timestamp), "seconds") > sweepThreshold;
+      }
+      return (
+        Temporal.Now.instant().since(Temporal.Instant.fromEpochSeconds(lastStop.arrival!.time)).total("minutes") >
+        SWEEP_THRESHOLD
+      );
+    })
+    .forEach((tripUpdate) => tripUpdates.delete(tripUpdate.id));
+  [...vehiclePositions.values()]
+    .filter((vehiclePosition) => {
+      const associatedTrip = tripUpdates.get(vehiclePosition.vehicle.trip.tripId);
+      const lastStopTime = associatedTrip?.tripUpdate.stopTimeUpdate.at(-1);
+      if (lastStopTime) {
+        const lastStopTimestamp = Temporal.Instant.fromEpochSeconds(lastStopTime.arrival!.time);
+        if (Temporal.Instant.compare(Temporal.Now.instant(), lastStopTimestamp) < 0) return false;
+      }
+      return (
+        Temporal.Now.instant()
+          .since(Temporal.Instant.fromEpochSeconds(vehiclePosition.vehicle.timestamp))
+          .total("minutes") > SWEEP_THRESHOLD
+      );
+    })
+    .forEach((vehiclePosition) => vehiclePositions.delete(vehiclePosition.id));
+  setTimeout(sweepEntries, 60_000);
+}
 
 serve({ fetch: server.fetch, port: +(process.env.PORT ?? 40409) });
