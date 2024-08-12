@@ -1,10 +1,9 @@
-import { loadServices, loadTrips } from "./components.js";
+import { loadTrips } from "./components.js";
 import { disposeResource, downloadResource } from "./resource.js";
 
-export async function loadResource(href: string) {
+export async function loadGtfsResource(href: string) {
   const path = await downloadResource(href);
-  const services = await loadServices(path);
-  const trips = await loadTrips(path, services);
+  const trips = await loadTrips(path);
   await disposeResource(path);
   return trips;
 }

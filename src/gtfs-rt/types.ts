@@ -11,6 +11,13 @@ export type StopTimeEvent = {
   time: number;
 };
 
+export type TripDescriptor = {
+  tripId: string;
+  routeId?: string;
+  directionId?: number;
+  scheduleRelationship: "SCHEDULED";
+};
+
 export type VehicleDescriptor = {
   id: string;
   label: string;
@@ -23,14 +30,14 @@ export type TripUpdateEntity = {
       arrival?: StopTimeEvent;
       departure?: StopTimeEvent;
       stopId: string;
-      stopSequence: number;
+      stopSequence?: number;
       scheduleRelationship?: StopTimeScheduleRelationship;
     }>;
     timestamp: number;
     trip: {
       tripId: string;
-      routeId: string;
-      directionId: number;
+      routeId?: string;
+      directionId?: number;
       scheduleRelationship: "SCHEDULED" | "CANCELED";
     };
     vehicle: VehicleDescriptor;
@@ -49,12 +56,7 @@ export type VehiclePositionEntity = {
     };
     stopId?: string;
     timestamp: number;
-    trip: {
-      tripId: string;
-      routeId: string;
-      directionId: number;
-      scheduleRelationship: "SCHEDULED";
-    };
+    trip?: TripDescriptor;
     vehicle: VehicleDescriptor;
   };
 };
