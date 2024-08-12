@@ -132,6 +132,13 @@ connection.on("dataReceived", (line, payload) => {
 
     if (Temporal.Now.instant().since(recordedAt).total("minutes") > 15) return;
 
+    const lastStop = vehicle.StopTimeList.at(-1);
+    if (typeof lastStop !== "undefined") {
+      const lastStopAt = Temporal.Instant.from(lastStop.AimedTime);
+      // 45 minutes étant le HLP le + long (F3/F4)
+      if (Temporal.Now.instant().since(lastStopAt).total("minutes") > 45) return;
+    }
+
     const trip =
       hlpHeadsigns.get(vehicle.Destination) ?? resource.trips.get(resource.courseOperations.get(vehicle.VJourneyId)!);
 
@@ -208,44 +215,23 @@ connection.on("dataReceived", (line, payload) => {
   }
 });
 
-setInterval(() => {
+function sweepEntities() {
   console.debug(`[SWEEPER] Sweeping outdated trip updates and vehicle positions`);
   for (const [key, tripUpdate] of tripUpdates) {
     const recordedAt = Temporal.Instant.fromEpochSeconds(tripUpdate.tripUpdate.timestamp);
-    if (Temporal.Now.instant().since(recordedAt).total("minutes") > 10) {
-      let shouldDelete = true;
-      const lastStopTime = tripUpdate.tripUpdate.stopTimeUpdate?.at(-1);
-      if (typeof lastStopTime?.arrival !== "undefined") {
-        const arrivalScheduledTime = Temporal.Instant.fromEpochSeconds(lastStopTime.arrival.time).subtract({
-          seconds: lastStopTime.arrival!.delay ?? 0,
-        });
-        if (Temporal.Now.instant().since(arrivalScheduledTime).total("minutes") < 10) {
-          shouldDelete = false;
-        }
-      }
+    if (Temporal.Now.instant().since(recordedAt).total("minutes") > 45) {
       tripUpdates.delete(key);
     }
   }
 
   for (const [key, vehicle] of vehiclePositions) {
     const recordedAt = Temporal.Instant.fromEpochSeconds(vehicle.vehicle.timestamp);
-    if (Temporal.Now.instant().since(recordedAt).total("minutes") > 10) {
-      let shouldDelete = true;
-      if (typeof vehicle.vehicle.trip !== "undefined") {
-        const tripUpdate = tripUpdates.get(`SM:${vehicle.vehicle.trip.tripId}`);
-        if (typeof tripUpdate !== "undefined") {
-          const lastStopTime = tripUpdate.tripUpdate.stopTimeUpdate?.at(-1);
-          if (typeof lastStopTime?.arrival !== "undefined") {
-            const arrivalTime = Temporal.Instant.fromEpochSeconds(lastStopTime.arrival.time);
-            if (Temporal.Now.instant().since(arrivalTime).total("minutes") < 10) {
-              shouldDelete = false;
-            }
-          }
-        }
-      }
-      if (shouldDelete) vehiclePositions.delete(key);
+    if (Temporal.Now.instant().since(recordedAt).total("minutes") > 45) {
+      vehiclePositions.delete(key);
     }
   }
-}, 120_000);
+}
+
+setInterval(sweepEntities, 120_000);
 
 serve({ fetch: server.fetch, port: +(process.env.PORT ?? 40409) });
