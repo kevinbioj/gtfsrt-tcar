@@ -199,4 +199,44 @@ connection.on("dataReceived", (line, payload) => {
   }
 });
 
+setInterval(() => {
+  console.debug(`[SWEEPER] Sweeping outdated trip updates and vehicle positions`);
+  for (const [key, tripUpdate] of tripUpdates) {
+    const recordedAt = Temporal.Instant.fromEpochSeconds(tripUpdate.tripUpdate.timestamp);
+    if (Temporal.Now.instant().since(recordedAt).total("minutes") > 10) {
+      let shouldDelete = true;
+      const lastStopTime = tripUpdate.tripUpdate.stopTimeUpdate?.at(-1);
+      if (typeof lastStopTime !== "undefined") {
+        const arrivalScheduledTime = Temporal.Instant.fromEpochSeconds(lastStopTime.arrival!.time).subtract({
+          seconds: lastStopTime.arrival!.delay ?? 0,
+        });
+        if (Temporal.Now.instant().since(arrivalScheduledTime).total("minutes") < 10) {
+          shouldDelete = false;
+        }
+      }
+      tripUpdates.delete(key);
+    }
+  }
+
+  for (const [key, vehicle] of vehiclePositions) {
+    const recordedAt = Temporal.Instant.fromEpochSeconds(vehicle.vehicle.timestamp);
+    if (Temporal.Now.instant().since(recordedAt).total("minutes") > 10) {
+      let shouldDelete = true;
+      if (typeof vehicle.vehicle.trip !== "undefined") {
+        const tripUpdate = tripUpdates.get(`SM:${vehicle.vehicle.trip.tripId}`);
+        if (typeof tripUpdate !== "undefined") {
+          const lastStopTime = tripUpdate.tripUpdate.stopTimeUpdate?.at(-1);
+          if (typeof lastStopTime !== "undefined") {
+            const arrivalTime = Temporal.Instant.fromEpochSeconds(lastStopTime.arrival!.time);
+            if (Temporal.Now.instant().since(arrivalTime).total("minutes") < 10) {
+              shouldDelete = false;
+            }
+          }
+        }
+      }
+      if (shouldDelete) vehiclePositions.delete(key);
+    }
+  }
+}, 120_000);
+
 serve({ fetch: server.fetch, port: +(process.env.PORT ?? 40409) });
