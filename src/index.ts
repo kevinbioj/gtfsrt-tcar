@@ -120,7 +120,16 @@ connection.on("dataReceived", (line, payload) => {
       return;
     }
 
-    const recordedAt = Temporal.PlainDateTime.from(vehicle.RecordedAtTime).toZonedDateTime("Europe/Paris").toInstant();
+    let recordedAt = Temporal.PlainDateTime.from(vehicle.RecordedAtTime).toZonedDateTime("Europe/Paris").toInstant();
+
+    const existingRecord = vehiclePositions.get(`VM:${parcNumber}`);
+    if (existingRecord) {
+      const { latitude, longitude } = existingRecord.vehicle.position;
+      if (vehicle.Latitude === latitude && vehicle.Longitude === longitude) {
+        recordedAt = Temporal.Instant.fromEpochSeconds(existingRecord.vehicle.timestamp);
+      }
+    }
+
     if (Temporal.Now.instant().since(recordedAt).total("minutes") > 15) return;
 
     const trip =
