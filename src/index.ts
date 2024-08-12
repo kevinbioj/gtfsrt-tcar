@@ -212,10 +212,10 @@ function sweepEntries() {
         );
         // return dayjs().diff(dayjs.unix(tripUpdate.tripUpdate.timestamp), "seconds") > sweepThreshold;
       }
-      return (
-        Temporal.Now.instant().since(Temporal.Instant.fromEpochSeconds(lastStop.arrival!.time)).total("minutes") >
-        SWEEP_THRESHOLD
-      );
+      const time = (lastStop?.arrival ?? lastStop?.departure)?.time;
+      if (time)
+        return Temporal.Now.instant().since(Temporal.Instant.fromEpochSeconds(time)).total("minutes") > SWEEP_THRESHOLD;
+      return false;
     })
     .forEach((tripUpdate) => tripUpdates.delete(tripUpdate.id));
   [...vehiclePositions.values()]
