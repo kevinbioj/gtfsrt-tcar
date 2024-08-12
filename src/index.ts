@@ -202,7 +202,7 @@ connection.on("dataReceived", (line, payload) => {
       },
     });
 
-    console.debug(`[${parcNumber}] ${line} ${vehicle.VJourneyId} - ${vehicle.LineNumber} -> ${vehicle.Destination}`);
+    // console.debug(`[${parcNumber}] ${line} ${vehicle.VJourneyId} - ${vehicle.LineNumber} -> ${vehicle.Destination}`);
   } catch (error: unknown) {
     console.error(`[${parcNumber}] An error occurred while processing the vehicle:`, error);
   }
