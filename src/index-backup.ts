@@ -5,13 +5,15 @@ import { stream } from "hono/streaming";
 import "temporal-polyfill/global";
 
 import type { MonitoredVehicle } from "./cityway-types.js";
-import { type VehiclePositionEntity } from "./gtfs-rt/types.js";
+import { StopTimeScheduleRelationship, type TripUpdateEntity, type VehiclePositionEntity } from "./gtfs-rt/types.js";
+import { loadGtfsResource } from "./gtfs/index.js";
+import { loadHubResource } from "./hub/index.js";
 import { wrapEntities } from "./gtfs-rt/wrap-entities.js";
 import { encodePayload } from "./gtfs-rt/encode-payload.js";
 import type { Trip } from "./gtfs/types.js";
-import { downloadGtfsrt } from "./gtfs-rt/download-gtfsrt.js";
 
-const GTFSRT_URL = "https://tsi.tcar.cityway.fr/ftp/gtfsrt/Astuce.VehiclePosition.pb";
+const GTFS_URL = "https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=GTFS";
+const HUB_URL = "https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=HUB";
 const TRACKED_LINES = [
   "24211", // M
   "24210", // N
@@ -45,29 +47,37 @@ const TRACKED_LINES = [
 ];
 
 const server = new Hono();
+const tripUpdates = new Map<string, TripUpdateEntity>();
 const vehiclePositions = new Map<string, VehiclePositionEntity>();
 
-// 1- Load GTFS & HUB resources
-
-console.log("[MAIN] Loading GTFS & HUB resources");
-
-let officialVp = await downloadGtfsrt<VehiclePositionEntity>(GTFSRT_URL);
-setInterval(async () => {
-  officialVp = await downloadGtfsrt<VehiclePositionEntity>(GTFSRT_URL);
-}, 30_000);
-
-const getFullPayload = () => [
-  ...officialVp.filter((entity) => !vehiclePositions.has(`VM:${entity.vehicle.vehicle.id}`)),
-  ...vehiclePositions.values(),
-];
-server.get("/vehicle-positions", (c) =>
+server.get("/trip-updates", (c) =>
   stream(c, async (stream) => {
-    const payload = wrapEntities(getFullPayload());
+    const payload = wrapEntities([...tripUpdates.values()]);
     const serialized = encodePayload(payload);
     await stream.write(serialized);
   })
 );
-server.get("/vehicle-positions.json", (c) => c.json(wrapEntities(getFullPayload())));
+server.get("/trip-updates.json", (c) => c.json(wrapEntities([...tripUpdates.values()])));
+server.get("/vehicle-positions", (c) =>
+  stream(c, async (stream) => {
+    const payload = wrapEntities([...vehiclePositions.values()]);
+    const serialized = encodePayload(payload);
+    await stream.write(serialized);
+  })
+);
+server.get("/vehicle-positions.json", (c) => c.json(wrapEntities([...vehiclePositions.values()])));
+
+// 1- Load GTFS & HUB resources
+
+console.log("[MAIN] Loading GTFS & HUB resources");
+const loadResources = async () => ({
+  courseOperations: await loadHubResource(HUB_URL),
+  trips: await loadGtfsResource(GTFS_URL),
+});
+let resource = await loadResources();
+setInterval(async () => {
+  resource = await loadResources();
+}, 60_000 * 3600);
 
 // 2- Connect to web service
 
@@ -129,8 +139,8 @@ connection.on("dataReceived", (line, payload) => {
       if (Temporal.Now.instant().since(lastStopAt).total("minutes") > 45) return;
     }
 
-    const trip = hlpHeadsigns.get(vehicle.Destination);
-    if (typeof trip === "undefined") return;
+    const trip =
+      hlpHeadsigns.get(vehicle.Destination) ?? resource.trips.get(resource.courseOperations.get(vehicle.VJourneyId)!);
 
     const tripDescriptor = trip
       ? ({
@@ -145,6 +155,45 @@ connection.on("dataReceived", (line, payload) => {
       id: parcNumber,
       label: parcNumber,
     } as const;
+
+    if (typeof trip !== "undefined" && !["HLP", "DEP"].some((d) => trip.id.startsWith(d))) {
+      tripUpdates.set(`SM:${trip.id}`, {
+        id: `SM:${trip.id}`,
+        tripUpdate: {
+          stopTimeUpdate: vehicle.StopTimeList.map((stl) => {
+            const base = {
+              stopId: stl.StopPointId.toString(),
+              // stopSequence: stopTime!.stopSequence,
+            };
+            if (!stl.IsMonitored)
+              return {
+                ...base,
+                scheduleRelationship: StopTimeScheduleRelationship.NO_DATA,
+              };
+            if (stl.IsCancelled)
+              return {
+                ...base,
+                scheduleRelationship: StopTimeScheduleRelationship.SKIPPED,
+              };
+            const aimedTime = Temporal.Instant.from(stl.AimedTime);
+            const expectedTime = Temporal.Instant.from(stl.ExpectedTime);
+            const ste = {
+              delay: expectedTime.epochSeconds - aimedTime.epochSeconds,
+              time: expectedTime.epochSeconds,
+            };
+            return {
+              arrival: ste,
+              departure: ste,
+              ...base,
+              scheduleRelationship: StopTimeScheduleRelationship.SCHEDULED,
+            };
+          }),
+          timestamp: recordedAt.epochSeconds,
+          trip: tripDescriptor!,
+          vehicle: vehicleDescriptor,
+        },
+      });
+    }
 
     vehiclePositions.set(`VM:${vehicleDescriptor.id}`, {
       id: `VM:${vehicleDescriptor.id}`,
@@ -167,7 +216,13 @@ connection.on("dataReceived", (line, payload) => {
 });
 
 setInterval(() => {
-  console.debug(`[SWEEPER] Sweeping outdated vehicle positions`);
+  console.debug(`[SWEEPER] Sweeping outdated trip updates and vehicle positions`);
+  for (const [key, tripUpdate] of tripUpdates) {
+    const recordedAt = Temporal.Instant.fromEpochSeconds(tripUpdate.tripUpdate.timestamp);
+    if (Temporal.Now.instant().since(recordedAt).total("minutes") > 45) {
+      tripUpdates.delete(key);
+    }
+  }
 
   for (const [key, vehicle] of vehiclePositions) {
     const recordedAt = Temporal.Instant.fromEpochSeconds(vehicle.vehicle.timestamp);

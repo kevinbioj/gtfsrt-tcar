@@ -1,4 +1,5 @@
 import protobufjs from "protobufjs";
+import type { GtfsRt, TripUpdateEntity, VehiclePositionEntity } from "./types.js";
 
 const proto = `
 // Copyright 2015 The GTFS Specifications Authors.
@@ -645,4 +646,8 @@ const type = protobufjs.parse(proto).root.lookupType("transit_realtime.FeedMessa
 
 export function encodePayload(payload: any) {
   return type.encode(payload).finish();
+}
+
+export function decodePayload<T extends VehiclePositionEntity | TripUpdateEntity>(input: Buffer) {
+  return type.decode(input).toJSON() as GtfsRt<T>;
 }
