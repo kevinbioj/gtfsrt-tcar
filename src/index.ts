@@ -213,10 +213,12 @@ connection.on("dataReceived", (line, payload) => {
               stopId: stl.StopPointId.toString(),
               // stopSequence: stopTime!.stopSequence,
             };
+            const timeTo = Temporal.Instant.from(stl.AimedTime).since(Temporal.Now.instant()).total("minutes");
             if (!stl.IsMonitored)
               return {
                 ...base,
-                scheduleRelationship: StopTimeScheduleRelationship.SKIPPED,
+                scheduleRelationship:
+                  timeTo >= 60 ? StopTimeScheduleRelationship.NO_DATA : StopTimeScheduleRelationship.SKIPPED,
               };
             if (stl.IsCancelled)
               return {
