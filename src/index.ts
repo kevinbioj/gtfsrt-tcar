@@ -181,15 +181,13 @@ connection.on("dataReceived", (line, payload) => {
     const trip =
       hlpHeadsigns.get(vehicle.Destination) ?? resource.trips.get(resource.courseOperations.get(vehicle.VJourneyId)!);
 
-    if (trip?.routeId) {
-      const oldRtEntry = currentGtfsrt.find((vehicle) => vehicle.vehicle.vehicle.id === parcNumber);
-      if (oldRtEntry && oldRtEntry.vehicle.trip?.routeId !== trip?.routeId) {
-        console.warn(`[${parcNumber}] ${line} ${vehicle.VJourneyId} - ${vehicle.LineNumber} -> ${vehicle.Destination}`);
-        console.warn(
-          `[${parcNumber}] Old GTFS-RT returned route ${oldRtEntry.vehicle.trip?.routeId} while new GTFS-RT returned route ${trip?.routeId}, ignoring vehicle.`
-        );
-        return;
-      }
+    const oldRtEntry = currentGtfsrt.find((vehicle) => vehicle.vehicle.vehicle.id === parcNumber);
+    if (oldRtEntry && trip?.routeId && oldRtEntry.vehicle.trip?.routeId !== trip?.routeId) {
+      console.warn(`[${parcNumber}] ${line} ${vehicle.VJourneyId} - ${vehicle.LineNumber} -> ${vehicle.Destination}`);
+      console.warn(
+        `[${parcNumber}] Old GTFS-RT returned route ${oldRtEntry.vehicle.trip?.routeId} while new GTFS-RT returned route ${trip?.routeId}, ignoring vehicle.`
+      );
+      return;
     }
 
     const tripDescriptor = trip
@@ -286,5 +284,20 @@ setInterval(() => {
     }
   }
 }, 120_000);
+
+setInterval(() => {
+  // Lorsque un véhicule se situe dans une zone non-monitorée, sa position n'est plus
+  // mise à jour contrairement à l'ancienne infrastructure temps-réel. Alors toutes les
+  // 30 secondes, on regarde laquelle des positions entre le nouveau et l'ancien est la
+  // plus récente et on l'applique.
+  for (const vehicle of vehiclePositions.values()) {
+    const parcNumber = vehicle.vehicle.vehicle.id;
+    const oldRtEntry = currentGtfsrt.find((vehicle) => vehicle.vehicle.vehicle.id === parcNumber);
+    if (oldRtEntry && oldRtEntry.vehicle.timestamp > vehicle.vehicle.timestamp) {
+      vehicle.vehicle.position = oldRtEntry.vehicle.position;
+      vehicle.vehicle.timestamp = oldRtEntry.vehicle.timestamp;
+    }
+  }
+}, 30_000);
 
 serve({ fetch: server.fetch, port: +(process.env.PORT ?? 40409) });
