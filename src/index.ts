@@ -61,6 +61,7 @@ const server = new Hono();
 const tripUpdates = new Map<string, TripUpdateEntity>();
 const vehiclePositions = new Map<string, VehiclePositionEntity>();
 const currentVersions = new Map<string, MonitoredVehicle>();
+const lastPositions = new Map<string, { latitude: number; longitude: number; timestamp: Temporal.Instant }>();
 
 server.get("/trip-updates", (c) =>
   stream(c, async (stream) => {
@@ -161,13 +162,18 @@ connection.on("dataReceived", (line, payload) => {
 
     let recordedAt = Temporal.PlainDateTime.from(vehicle.RecordedAtTime).toZonedDateTime("Europe/Paris").toInstant();
 
-    const existingRecord = vehiclePositions.get(`VM:${parcNumber}`);
-    if (existingRecord) {
-      const { latitude, longitude } = existingRecord.vehicle.position;
-      if (vehicle.Latitude === latitude && vehicle.Longitude === longitude) {
-        recordedAt = Temporal.Instant.fromEpochSeconds(existingRecord.vehicle.timestamp);
+    const lastPosition = lastPositions.get(parcNumber);
+    if (lastPosition) {
+      if (vehicle.Latitude === lastPosition.latitude && vehicle.Longitude === lastPosition.longitude) {
+        recordedAt = lastPosition.timestamp;
       }
     }
+
+    lastPositions.set(parcNumber, {
+      latitude: vehicle.Latitude,
+      longitude: vehicle.Longitude,
+      timestamp: recordedAt,
+    });
 
     if (Temporal.Now.instant().since(recordedAt).total("minutes") > 15) return;
 
