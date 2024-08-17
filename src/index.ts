@@ -48,20 +48,37 @@ const TRACKED_LINES = [
   "40874", // NOCT
 ];
 
-let currentGtfsrt = await downloadGtfsrt<VehiclePositionEntity>(GTFSRT_URL);
-setInterval(async () => {
-  try {
-    currentGtfsrt = await downloadGtfsrt<VehiclePositionEntity>(GTFSRT_URL);
-  } catch {
-    // C'est pas grave, on réessaye 30 secondes plus tard.
-  }
-}, 30_000);
-
 const server = new Hono();
 const tripUpdates = new Map<string, TripUpdateEntity>();
 const vehiclePositions = new Map<string, VehiclePositionEntity>();
 const currentVersions = new Map<string, MonitoredVehicle>();
 const lastPositions = new Map<string, { latitude: number; longitude: number; timestamp: Temporal.Instant }>();
+
+let currentGtfsrt = await downloadGtfsrt<VehiclePositionEntity>(GTFSRT_URL);
+setInterval(async () => {
+  try {
+    currentGtfsrt = await downloadGtfsrt<VehiclePositionEntity>(GTFSRT_URL);
+    for (const entity of currentGtfsrt) {
+      const parcNumber = entity.vehicle.vehicle.id;
+      const trip = entity.vehicle.trip!;
+      const existing = vehiclePositions.get(`VM:${parcNumber}`);
+      if (
+        !existing &&
+        !lastPositions.has(parcNumber) &&
+        Temporal.Now.instant().since(Temporal.Instant.fromEpochSeconds(entity.vehicle.timestamp)).total("minutes") < 3
+      ) {
+        console.warn(
+          `[${parcNumber}] Injecting from old GTFS-RT - trip:${trip.tripId} | route:${trip.routeId} | direction:${
+            trip.directionId ?? 0
+          }`
+        );
+        vehiclePositions.set(`VM:${parcNumber}`, entity);
+      }
+    }
+  } catch {
+    // C'est pas grave, on réessaye 30 secondes plus tard.
+  }
+}, 30_000);
 
 server.get("/trip-updates", (c) =>
   stream(c, async (stream) => {
