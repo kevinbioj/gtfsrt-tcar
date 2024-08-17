@@ -184,16 +184,31 @@ connection.on("dataReceived", (line, payload) => {
       if (Temporal.Now.instant().since(lastStopAt).total("minutes") > 45) return;
     }
 
-    const trip =
+    let trip =
       hlpHeadsigns.get(vehicle.Destination) ?? resource.trips.get(resource.courseOperations.get(vehicle.VJourneyId)!);
+    let handleTripUpdate = true;
 
-    const oldRtEntry = currentGtfsrt.find((vehicle) => vehicle.vehicle.vehicle.id === parcNumber);
-    if (oldRtEntry && trip?.routeId && oldRtEntry.vehicle.trip?.routeId !== trip?.routeId) {
+    const oldRtEntryTrip = currentGtfsrt.find((vehicle) => vehicle.vehicle.vehicle.id === parcNumber)?.vehicle.trip;
+    if (oldRtEntryTrip && trip?.routeId && oldRtEntryTrip.routeId !== trip?.routeId) {
       console.warn(`[${parcNumber}] ${line} ${vehicle.VJourneyId} - ${vehicle.LineNumber} -> ${vehicle.Destination}`);
       console.warn(
-        `[${parcNumber}] Old GTFS-RT returned route ${oldRtEntry.vehicle.trip?.routeId} while new GTFS-RT returned route ${trip?.routeId}, ignoring vehicle.`
+        `[${parcNumber}] Old GTFS-RT returned route ${oldRtEntryTrip?.routeId} while new GTFS-RT returned route ${trip?.routeId}.`
       );
-      return;
+      const matchableTrip = resource.trips.get(oldRtEntryTrip!.tripId);
+      if (
+        matchableTrip?.routeId !== oldRtEntryTrip.routeId ||
+        matchableTrip?.directionId !== (oldRtEntryTrip.directionId ?? 0)
+      ) {
+        console.warn(
+          `[${parcNumber}] Failed to match old GTFS-RT trip information with current GTFS information, ignoring vehicle.`
+        );
+        return;
+      }
+      trip = matchableTrip;
+      handleTripUpdate = false;
+      console.warn(
+        `[${parcNumber}] Using old GTFS-RT data to process this vehicle – trip update entity will not be updated.`
+      );
     }
 
     const tripDescriptor = trip
@@ -210,7 +225,7 @@ connection.on("dataReceived", (line, payload) => {
       label: parcNumber,
     } as const;
 
-    if (typeof trip !== "undefined" && !["HLP", "DEP"].some((d) => trip.id.startsWith(d))) {
+    if (handleTripUpdate && typeof trip !== "undefined" && !["HLP", "DEP"].some((d) => trip.id.startsWith(d))) {
       tripUpdates.set(`SM:${trip.id}`, {
         id: `SM:${trip.id}`,
         tripUpdate: {
@@ -251,7 +266,7 @@ connection.on("dataReceived", (line, payload) => {
       });
     }
 
-    const nextStop = vehicle.StopTimeList.at(0);
+    const nextStop = handleTripUpdate ? vehicle.StopTimeList.at(0) : undefined;
     // : vehicle.StopTimeList.at(1) ?? vehicle.StopTimeList.at(0);
 
     vehiclePositions.set(`VM:${vehicleDescriptor.id}`, {
