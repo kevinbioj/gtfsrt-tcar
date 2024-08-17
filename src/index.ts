@@ -12,6 +12,7 @@ import { wrapEntities } from "./gtfs-rt/wrap-entities.js";
 import { encodePayload } from "./gtfs-rt/encode-payload.js";
 import type { Trip } from "./gtfs/types.js";
 import { downloadGtfsrt } from "./gtfs-rt/download-gtfsrt.js";
+import { destinationsMap } from "./destinations-map.js";
 
 const GTFS_URL = "https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=GTFS";
 const HUB_URL = "https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=HUB";
@@ -60,20 +61,18 @@ setInterval(async () => {
     currentGtfsrt = await downloadGtfsrt<VehiclePositionEntity>(GTFSRT_URL);
     for (const entity of currentGtfsrt) {
       const parcNumber = entity.vehicle.vehicle.id;
-      const trip = entity.vehicle.trip!;
-      const existing = vehiclePositions.get(`VM:${parcNumber}`);
       if (
-        !existing &&
-        (!lastPositions.has(parcNumber) ||
-          Temporal.Now.instant().since(lastPositions.get(parcNumber)!.timestamp).total("minutes") > 10) &&
-        Temporal.Now.instant().since(Temporal.Instant.fromEpochSeconds(entity.vehicle.timestamp)).total("minutes") < 3
+        lastPositions.has(parcNumber) &&
+        Temporal.Now.instant().since(lastPositions.get(parcNumber)!.timestamp).total("minutes") < 10
       ) {
-        console.warn(
-          `[${parcNumber}] Injecting from old GTFS-RT - trip:${trip.tripId} | route:${trip.routeId} | direction:${
-            trip.directionId ?? 0
-          }`
-        );
-        tripUpdates.delete(`SM:${trip.tripId}`);
+        continue;
+      }
+
+      const trip = entity.vehicle.trip!;
+      if (
+        Temporal.Now.instant().since(Temporal.Instant.fromEpochSeconds(entity.vehicle.timestamp)).total("minutes") < 5
+      ) {
+        console.warn(`[${parcNumber}] Injecting from old GTFS-RT with trip ${trip.tripId} and route ${trip.routeId}`);
         vehiclePositions.set(`VM:${parcNumber}`, entity);
       }
     }
@@ -174,6 +173,8 @@ connection.on("dataReceived", (line, payload) => {
   currentVersions.set(parcNumber, vehicle);
 
   try {
+    console.debug(`[${parcNumber}] ${line} ${vehicle.VJourneyId} - ${vehicle.LineNumber} -> ${vehicle.Destination}`);
+
     if (vehicle.StopTimeList.length === 0) {
       console.warn(`[${parcNumber}] No stops remaining, skipping.`);
       return;
@@ -203,32 +204,81 @@ connection.on("dataReceived", (line, payload) => {
       if (Temporal.Now.instant().since(lastStopAt).total("minutes") > 45) return;
     }
 
-    let trip =
-      hlpHeadsigns.get(vehicle.Destination) ?? resource.trips.get(resource.courseOperations.get(vehicle.VJourneyId)!);
+    let trip: Trip | undefined = hlpHeadsigns.get(vehicle.Destination);
     let handleTripUpdate = true;
 
-    const oldRtEntryTrip = currentGtfsrt.find((vehicle) => vehicle.vehicle.vehicle.id === parcNumber)?.vehicle.trip;
-    if (oldRtEntryTrip && trip?.routeId && oldRtEntryTrip.routeId !== trip?.routeId) {
-      console.warn(`[${parcNumber}] ${line} ${vehicle.VJourneyId} - ${vehicle.LineNumber} -> ${vehicle.Destination}`);
-      console.warn(
-        `[${parcNumber}] Old GTFS-RT returned route ${oldRtEntryTrip?.routeId} while new GTFS-RT returned route ${trip?.routeId}.`
-      );
-      const matchableTrip = resource.trips.get(oldRtEntryTrip!.tripId);
-      if (
-        matchableTrip?.routeId !== oldRtEntryTrip.routeId ||
-        matchableTrip?.directionId !== (oldRtEntryTrip.directionId ?? 0)
-      ) {
-        console.warn(
-          `[${parcNumber}] Failed to match old GTFS-RT trip information with current GTFS information, ignoring vehicle.`
-        );
-        return;
+    if (typeof trip === "undefined") {
+      const routeDestinations = destinationsMap.get(vehicle.LineNumber);
+      if (routeDestinations?.includes(vehicle.Destination)) {
+        // Cas n°1 : destination valide – on utilise le VJourneyId du véhicule
+        const operationCode = resource.courseOperations.get(vehicle.VJourneyId);
+        if (typeof operationCode === "undefined") {
+          console.warn(`[${parcNumber}] No operation code for journey id ${vehicle.VJourneyId}, aborting.`);
+          return;
+        }
+        const matchedTrip = resource.trips.get(operationCode);
+        if (typeof matchedTrip === "undefined") {
+          console.warn(`[${parcNumber}] No trip was found with operation code ${operationCode}, aborting.`);
+          return;
+        }
+        trip = matchedTrip;
+      } else if (currentGtfsrt.some((entity) => entity.vehicle.vehicle.id === parcNumber)) {
+        // Cas n°2 : destination inconnue – on regarde si l'ancien GTFS-RT est raccord
+        const entity = currentGtfsrt.find((entity) => entity.vehicle.vehicle.id)!;
+        const entityTrip = entity.vehicle.trip!;
+
+        const operationCode = resource.courseOperations.get(vehicle.VJourneyId);
+        const matchedTrip = resource.trips.get(operationCode!);
+
+        if (typeof matchedTrip !== "undefined") {
+          if (matchedTrip.routeId === entityTrip.routeId && matchedTrip.directionId === (entityTrip.directionId ?? 0)) {
+            // Cas n°2a : old GTFS-RT matches new GTFS-RT > we rely on the trip
+            console.warn(`[${parcNumber}] Matching from old GTFS-RT with route ${matchedTrip.routeId}.`);
+            trip = matchedTrip;
+          } else {
+            // Cas n°2b : mismatch between the sources, we do not continue
+            console.warn(
+              `[${parcNumber}] Mismatch between old GTFS-RT (route ${entityTrip.routeId}) and current GTFS-RT (${matchedTrip.routeId}), skipping vehicle.`
+            );
+            return;
+          }
+        }
+      } else {
+        // Cas n°3 : failed to match the trip... we skip
+        console.warn(`[${parcNumber}] Unable to find vehicle's trip, skipping vehicle.`);
       }
-      trip = matchableTrip;
-      handleTripUpdate = false;
-      console.warn(
-        `[${parcNumber}] Using old GTFS-RT data to process this vehicle – trip update entity will not be updated.`
-      );
     }
+
+    // let trip =
+    //   hlpHeadsigns.get(vehicle.Destination) ?? resource.trips.get(resource.courseOperations.get(vehicle.VJourneyId)!);
+    // let handleTripUpdate = true;
+
+    // const oldRtEntryTrip = currentGtfsrt.find((vehicle) => vehicle.vehicle.vehicle.id === parcNumber)?.vehicle.trip;
+    // if (oldRtEntryTrip && trip?.routeId && oldRtEntryTrip.routeId !== trip?.routeId) {
+    //   console.warn(`[${parcNumber}] ${line} ${vehicle.VJourneyId} - ${vehicle.LineNumber} -> ${vehicle.Destination}`);
+    //   console.warn(
+    //     `[${parcNumber}] Old GTFS-RT returned route ${oldRtEntryTrip?.routeId} while new GTFS-RT returned route ${trip?.routeId}.`
+    //   );
+    //   const matchableTrip = resource.trips.get(oldRtEntryTrip!.tripId);
+    //   if (
+    //     matchableTrip?.routeId !== oldRtEntryTrip.routeId ||
+    //     matchableTrip?.directionId !== (oldRtEntryTrip.directionId ?? 0)
+    //   ) {
+    //     console.warn(
+    //       `[${parcNumber}] Failed to match old GTFS-RT trip information with current GTFS information, ignoring vehicle.`
+    //     );
+    //     return;
+    //   }
+    //   trip = matchableTrip;
+    //   handleTripUpdate = false;
+    //   console.warn(
+    //     `[${parcNumber}] Using old GTFS-RT data to process this vehicle – trip update entity will not be updated.`
+    //   );
+    // }
+
+    // if (typeof trip === 'undefined') {
+
+    // }
 
     const tripDescriptor = trip
       ? ({
@@ -303,8 +353,6 @@ connection.on("dataReceived", (line, payload) => {
         vehicle: vehicleDescriptor,
       },
     });
-
-    console.debug(`[${parcNumber}] ${line} ${vehicle.VJourneyId} - ${vehicle.LineNumber} -> ${vehicle.Destination}`);
   } catch (error: unknown) {
     console.error(`[${parcNumber}] An error occurred while processing the vehicle:`, error);
   }
