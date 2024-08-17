@@ -64,7 +64,8 @@ setInterval(async () => {
       const existing = vehiclePositions.get(`VM:${parcNumber}`);
       if (
         !existing &&
-        !lastPositions.has(parcNumber) &&
+        (!lastPositions.has(parcNumber) ||
+          Temporal.Now.instant().since(lastPositions.get(parcNumber)!.timestamp).total("minutes") > 10) &&
         Temporal.Now.instant().since(Temporal.Instant.fromEpochSeconds(entity.vehicle.timestamp)).total("minutes") < 3
       ) {
         console.warn(
@@ -72,6 +73,7 @@ setInterval(async () => {
             trip.directionId ?? 0
           }`
         );
+        tripUpdates.delete(`SM:${trip.tripId}`);
         vehiclePositions.set(`VM:${parcNumber}`, entity);
       }
     }
