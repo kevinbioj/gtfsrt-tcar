@@ -228,7 +228,7 @@ connection.on("dataReceived", (line, payload) => {
         const oldEntity = currentGtfsrt.find((entity) => entity.vehicle.vehicle.id === parcNumber);
         if (oldEntity) {
           const oldTrip = oldEntity.vehicle.trip!;
-          if (matchedTrip.routeId !== oldTrip.routeId && matchedTrip.directionId !== (oldTrip.directionId ?? 0)) {
+          if (matchedTrip.routeId !== oldTrip.routeId) {
             console.warn(`[${parcNumber}] Destination seems valid but old GTFS-RT is mismatching -> skipping.`);
             return;
           }
