@@ -233,6 +233,8 @@ connection.on("dataReceived", (line, payload) => {
             return;
           }
         }
+
+        trip = matchedTrip;
       } else if (currentGtfsrt.some((entity) => entity.vehicle.vehicle.id === parcNumber)) {
         // Cas n°2 : la destination est inconnue, mais on a quand même une entrée dans l'ancien GTFS-RT.
         // Alors si les informations sont cohérentes entre les deux sources, on l'utilise.
