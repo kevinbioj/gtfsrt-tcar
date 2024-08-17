@@ -1,6 +1,6 @@
 export const destinationsMap = new Map([
   ["Métro", ["Boulingrin B", "Boulingrin C", "Théâtre des Arts", "Georges Braque", "Technopôle"]],
-  ["T1", ["Mont aux Malades", "CHU Charles Nicolle"]],
+  ["T1", ["Mont aux Malades", "CHU Ch. Nicolle"]],
   ["T2", ["Tamarelle", "V. Schoelcher"]],
   ["T3", ["Monet", "Durécu-Lavoisier"]],
   ["T4", ["Marie Curie-MTC", "Zénith-Parc Expo"]],

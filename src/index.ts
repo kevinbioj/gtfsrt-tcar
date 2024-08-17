@@ -79,7 +79,7 @@ setInterval(async () => {
   } catch {
     // C'est pas grave, on réessaye 30 secondes plus tard.
   }
-}, 30_000);
+}, 60_000);
 
 server.get("/trip-updates", (c) =>
   stream(c, async (stream) => {
@@ -210,21 +210,33 @@ connection.on("dataReceived", (line, payload) => {
     if (typeof trip === "undefined") {
       const routeDestinations = destinationsMap.get(vehicle.LineNumber);
       if (routeDestinations?.includes(vehicle.Destination)) {
-        // Cas n°1 : destination valide – on utilise le VJourneyId du véhicule
+        // Cas n°1 : si la destination est valide, on part du principe que c'est valide.
+        // En revanche, si on dispose de l'entité provenant de l'ancien GTFS-RT, on compare
+        // les informations : si incohérence il y a, alors on s'arrête ici.
         const operationCode = resource.courseOperations.get(vehicle.VJourneyId);
         if (typeof operationCode === "undefined") {
-          console.warn(`[${parcNumber}] No operation code for journey id ${vehicle.VJourneyId}, aborting.`);
+          console.warn(`[${parcNumber}] Failed to find operation code from journey ${vehicle.VJourneyId} -> skipping.`);
           return;
         }
+
         const matchedTrip = resource.trips.get(operationCode);
         if (typeof matchedTrip === "undefined") {
-          console.warn(`[${parcNumber}] No trip was found with operation code ${operationCode}, aborting.`);
+          console.warn(`[${parcNumber}] Failed to find trip from operation code ${operationCode} -> skipping.`);
           return;
         }
-        trip = matchedTrip;
+
+        const oldEntity = currentGtfsrt.find((entity) => entity.vehicle.vehicle.id === parcNumber);
+        if (oldEntity) {
+          const oldTrip = oldEntity.vehicle.trip!;
+          if (matchedTrip.routeId !== oldTrip.routeId && matchedTrip.directionId !== (oldTrip.directionId ?? 0)) {
+            console.warn(`[${parcNumber}] Destination seems valid but old GTFS-RT is mismatching -> skipping.`);
+            return;
+          }
+        }
       } else if (currentGtfsrt.some((entity) => entity.vehicle.vehicle.id === parcNumber)) {
-        // Cas n°2 : destination inconnue – on regarde si l'ancien GTFS-RT est raccord
-        const entity = currentGtfsrt.find((entity) => entity.vehicle.vehicle.id)!;
+        // Cas n°2 : la destination est inconnue, mais on a quand même une entrée dans l'ancien GTFS-RT.
+        // Alors si les informations sont cohérentes entre les deux sources, on l'utilise.
+        const entity = currentGtfsrt.find((entity) => entity.vehicle.vehicle.id === parcNumber)!;
         const entityTrip = entity.vehicle.trip!;
 
         const operationCode = resource.courseOperations.get(vehicle.VJourneyId);
@@ -232,20 +244,31 @@ connection.on("dataReceived", (line, payload) => {
 
         if (typeof matchedTrip !== "undefined") {
           if (matchedTrip.routeId === entityTrip.routeId && matchedTrip.directionId === (entityTrip.directionId ?? 0)) {
-            // Cas n°2a : old GTFS-RT matches new GTFS-RT > we rely on the trip
-            console.warn(`[${parcNumber}] Matching from old GTFS-RT with route ${matchedTrip.routeId}.`);
+            console.warn(
+              `[${parcNumber}] Unknown destination (${vehicle.Destination}), but both old and new GTFS-RT are valid -> allowing.`
+            );
             trip = matchedTrip;
           } else {
-            // Cas n°2b : mismatch between the sources, we do not continue
             console.warn(
-              `[${parcNumber}] Mismatch between old GTFS-RT (route ${entityTrip.routeId}) and current GTFS-RT (${matchedTrip.routeId}), skipping vehicle.`
+              `[${parcNumber}] Unknown destination (${vehicle.Destination}), and sources do mismatch -> skipping.`
+            );
+            console.warn(
+              `[${parcNumber}] Old GTFS-RT: ${entityTrip.routeId}:${entityTrip.directionId ?? 0} | New GTFS-RT: ${
+                matchedTrip.routeId
+              }:${matchedTrip.directionId}
+              `
             );
             return;
           }
+        } else {
+          console.warn(
+            `[${parcNumber}] Unknown destination (${vehicle.Destination}) and missing in old GTFS-RT -> skipping.`
+          );
+          return;
         }
       } else {
-        // Cas n°3 : failed to match the trip... we skip
-        console.warn(`[${parcNumber}] Unable to find vehicle's trip, skipping vehicle.`);
+        console.warn(`[${parcNumber}] Failed to find ongoing trip -> skipping.`);
+        return;
       }
     }
 
