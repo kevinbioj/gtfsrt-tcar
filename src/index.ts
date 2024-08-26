@@ -216,6 +216,8 @@ connection.on("dataReceived", (line, payload) => {
         const operationCode = resource.courseOperations.get(vehicle.VJourneyId);
         if (typeof operationCode === "undefined") {
           console.warn(`[${parcNumber}] Failed to find operation code from journey ${vehicle.VJourneyId} -> skipping.`);
+          console.error("This is not normal - crashing ☠️");
+          process.exit(1);
           return;
         }
 
