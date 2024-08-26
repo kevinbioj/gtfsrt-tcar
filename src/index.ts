@@ -330,12 +330,11 @@ connection.on("dataReceived", (line, payload) => {
               stopId: stl.StopPointId.toString(),
               // stopSequence: stopTime!.stopSequence,
             };
-            const timeTo = Temporal.Instant.from(stl.AimedTime).since(Temporal.Now.instant()).total("minutes");
+            // const timeTo = Temporal.Instant.from(stl.AimedTime).since(Temporal.Now.instant()).total("minutes");
             if (!stl.IsMonitored)
               return {
                 ...base,
-                scheduleRelationship:
-                  timeTo >= 60 ? StopTimeScheduleRelationship.NO_DATA : StopTimeScheduleRelationship.SKIPPED,
+                scheduleRelationship: StopTimeScheduleRelationship.NO_DATA,
               };
             if (stl.IsCancelled)
               return {
