@@ -184,6 +184,10 @@ connection.on("dataReceived", (line, payload) => {
 
     const lastPosition = lastPositions.get(parcNumber);
     if (lastPosition) {
+      if (Temporal.Instant.compare(recordedAt, lastPosition.timestamp) < 0) {
+        console.warn(`[${parcNumber}] The position of this entry is older than the cached position, ignoring.`);
+        return;
+      }
       if (vehicle.Latitude === lastPosition.latitude && vehicle.Longitude === lastPosition.longitude) {
         recordedAt = lastPosition.timestamp;
       }
