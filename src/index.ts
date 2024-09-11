@@ -164,16 +164,16 @@ function handleVehicle(line: string, vehicle: Vehicle) {
 
   const lastPosition = lastPositionCache.get(vehicleId);
   if (typeof lastPosition !== "undefined") {
-    if (
-      vehicle.Latitude === lastPosition.position.latitude &&
-      vehicle.Longitude === lastPosition.position.longitude &&
-      vehicle.Bearing === lastPosition.position.bearing
-    ) {
+    if (recordedAt < lastPosition.recordedAt) {
+      console.warn("The position of this entry is older than the cached position, ignoring.");
+      return;
+    }
+    if (vehicle.Latitude === lastPosition.position.latitude && vehicle.Longitude === lastPosition.position.longitude) {
       recordedAt = lastPosition.recordedAt;
     }
-  } else {
-    lastPositionCache.set(vehicleId, { position, recordedAt });
   }
+
+  lastPositionCache.set(vehicleId, { position, recordedAt });
 
   const monitoredStop = vehicle.StopTimeList.at(0);
   if (typeof monitoredStop === "undefined") return console.warn("No monitored stop for this vehicle, ignoring.");
