@@ -65,6 +65,20 @@ setInterval(async () => {
   oldVehiclePositions = (await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[];
   const now = Temporal.Now.instant();
 
+  // For every active vehicle, we check if old GTFS-RT has a newer position.
+  for (const vehiclePosition of vehiclePositions.values()) {
+    const oldVehiclePosition = oldVehiclePositions.find((vp) => vp.vehicle.vehicle.id === vehiclePosition.vehicle.id);
+    if (typeof oldVehiclePosition !== "undefined" && oldVehiclePosition.vehicle.timestamp > vehiclePosition.timestamp) {
+      vehiclePosition.position = {
+        latitude: oldVehiclePosition.vehicle.position.latitude,
+        longitude: oldVehiclePosition.vehicle.position.longitude,
+        bearing: oldVehiclePosition.vehicle.position.bearing,
+      };
+      vehiclePosition.timestamp = oldVehiclePosition.vehicle.timestamp;
+    }
+  }
+
+  // We fill the holes of missing vehicles by consuming the old GTFS-RT.
   for (const vehiclePosition of oldVehiclePositions) {
     const parcNumber = vehiclePosition.vehicle.vehicle.id;
     const vehicleTrip = vehiclePosition.vehicle.trip!;
@@ -87,7 +101,6 @@ setInterval(async () => {
 
       vehiclePositions.set(parcNumber, {
         currentStatus: vehiclePosition.vehicle.currentStatus,
-        currentStopSequence: vehiclePosition.vehicle.currentStopSequence,
         position: {
           latitude: vehiclePosition.vehicle.position.latitude,
           longitude: vehiclePosition.vehicle.position.longitude,
@@ -104,7 +117,7 @@ setInterval(async () => {
       );
     }
   }
-}, 60 * 1_000);
+}, 30 * 1_000);
 
 // II - Connecting to the vehicle service
 
@@ -237,7 +250,6 @@ function handleVehicle(line: string, vehicle: Vehicle) {
   vehiclePositions.set(vehicleId, {
     ...(tripDescriptor
       ? {
-          currentStopSequence: monitoredStop.StopPointOrder,
           currentStatus: vehicle.VehicleAtStop
             ? "STOPPED_AT"
             : monitoredStop.WaitingTime < 1
