@@ -55,32 +55,6 @@ const vehiclePositions = new Map<string, VehiclePositionEntity>();
 const currentVersions = new Map<string, MonitoredVehicle>();
 const lastPositions = new Map<string, { latitude: number; longitude: number; timestamp: Temporal.Instant }>();
 
-let currentGtfsrt = await downloadGtfsrt<VehiclePositionEntity>(GTFSRT_URL);
-setInterval(async () => {
-  try {
-    currentGtfsrt = await downloadGtfsrt<VehiclePositionEntity>(GTFSRT_URL);
-    for (const entity of currentGtfsrt) {
-      const parcNumber = entity.vehicle.vehicle.id;
-      if (
-        lastPositions.has(parcNumber) &&
-        Temporal.Now.instant().since(lastPositions.get(parcNumber)!.timestamp).total("minutes") < 10
-      ) {
-        continue;
-      }
-
-      const trip = entity.vehicle.trip!;
-      if (
-        Temporal.Now.instant().since(Temporal.Instant.fromEpochSeconds(entity.vehicle.timestamp)).total("minutes") < 5
-      ) {
-        console.warn(`[${parcNumber}] Injecting from old GTFS-RT with trip ${trip.tripId} and route ${trip.routeId}`);
-        vehiclePositions.set(`VM:${parcNumber}`, entity);
-      }
-    }
-  } catch {
-    // C'est pas grave, on réessaye 30 secondes plus tard.
-  }
-}, 60_000);
-
 server.get("/trip-updates", (c) =>
   stream(c, async (stream) => {
     const payload = wrapEntities([...tripUpdates.values()]);
@@ -111,6 +85,46 @@ let resource = await loadResources();
 setInterval(async () => {
   resource = await loadResources();
 }, 60_000 * 3600);
+
+// RESCUE IF MAIN SOURCE IS ☠️
+
+let currentGtfsrt = await downloadGtfsrt<VehiclePositionEntity>(GTFSRT_URL);
+setInterval(async () => {
+  try {
+    currentGtfsrt = await downloadGtfsrt<VehiclePositionEntity>(GTFSRT_URL);
+    for (const entity of currentGtfsrt) {
+      const parcNumber = entity.vehicle.vehicle.id;
+      if (
+        lastPositions.has(parcNumber) &&
+        Temporal.Now.instant().since(lastPositions.get(parcNumber)!.timestamp).total("minutes") < 10
+      ) {
+        continue;
+      }
+
+      if (
+        Temporal.Now.instant().since(Temporal.Instant.fromEpochSeconds(entity.vehicle.timestamp)).total("minutes") < 5
+      ) {
+        const trip = entity.vehicle.trip!;
+        const matchingTrip = resource.trips.get(trip.tripId);
+        if (
+          typeof matchingTrip === "undefined" ||
+          matchingTrip.routeId !== trip.routeId ||
+          matchingTrip.directionId !== (trip.directionId ?? 0)
+        ) {
+          console.warn(`[${parcNumber}] Could have been injected but GTFS trip does not match the stated one.`);
+          return;
+        }
+        console.warn(`[${parcNumber}] Injecting from old GTFS-RT with trip ${trip.tripId} and route ${trip.routeId}`);
+        vehiclePositions.set(`VM:${parcNumber}`, {
+          id: `VM:${parcNumber}`,
+          vehicle: entity.vehicle,
+        });
+      }
+    }
+  } catch {
+    // C'est pas grave, on réessaye 30 secondes plus tard.
+  }
+}, 60_000);
 
 // 2- Connect to web service
 
