@@ -2,15 +2,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import "temporal-polyfill/global";
 
-import {
-  GTFS_FEED,
-  HUB_FEED,
-  LINES_DATASET,
-  MONITORED_LINES,
-  OLD_GTFSRT_TU_FEED,
-  OLD_GTFSRT_VP_FEED,
-  VEHICLE_WS,
-} from "./config.js";
+import { GTFS_FEED, HUB_FEED, LINES_DATASET, MONITORED_LINES, OLD_GTFSRT_VP_FEED, VEHICLE_WS } from "./config.js";
 import { createVehicleProvider, type Vehicle } from "./providers/vehicle-provider.js";
 import { importGtfs } from "./resources/import-gtfs.js";
 import { importHub } from "./resources/import-hub.js";
@@ -19,7 +11,6 @@ import {
   type Position,
   type StopTimeEvent,
   type TripDescriptor,
-  type TripUpdateEntity,
   type VehicleDescriptor,
   type VehiclePositionEntity,
 } from "./types/gtfs-rt.js";
@@ -70,7 +61,6 @@ setInterval(
 
 console.log("|> Initiating backup GTFS-RT.");
 setInterval(async () => {
-  const oldTripUpdates = (await fetchOldGtfsrt(OLD_GTFSRT_TU_FEED)).entity as TripUpdateEntity[];
   const oldVehiclePositions = (await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[];
   const now = Temporal.Now.instant();
 
@@ -92,22 +82,6 @@ setInterval(async () => {
       ) {
         console.warn(`[OLD RT INJECTOR] ${parcNumber}\tUnable to match with current GTFS resource, skipping.`);
         continue;
-      }
-
-      const tripUpdate = oldTripUpdates.find((tu) => tu.tripUpdate.trip.tripId === vehicleTrip.tripId);
-      if (typeof tripUpdate !== "undefined") {
-        tripUpdates.set(trip.tripId, {
-          stopTimeUpdate: tripUpdate.tripUpdate.stopTimeUpdate.map((stu) => ({
-            arrival: { delay: stu.arrival?.delay ?? 0, time: stu.arrival!.time },
-            departure: { delay: stu.departure?.delay ?? 0, time: stu.departure!.time },
-            stopId: stu.stopId,
-            stopSequence: stu.stopSequence,
-            scheduleRelationship: "SCHEDULED",
-          })),
-          timestamp: tripUpdate.tripUpdate.timestamp,
-          trip: { ...trip, scheduleRelationship: "SCHEDULED" },
-          vehicle: { id: parcNumber, label: parcNumber },
-        });
       }
 
       vehiclePositions.set(parcNumber, {

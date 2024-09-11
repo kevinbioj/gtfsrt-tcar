@@ -3,7 +3,6 @@ export const GTFS_FEED = "https://api.mrn.cityway.fr/dataflow/offre-tc/download?
 export const HUB_FEED = "https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=HUB";
 export const VEHICLE_WS = "https://api.mrn.cityway.fr/sdh/vehicles";
 export const OLD_GTFSRT_VP_FEED = "https://tsi.tcar.cityway.fr/ftp/gtfsrt/Astuce.VehiclePosition.pb";
-export const OLD_GTFSRT_TU_FEED = "https://tsi.tcar.cityway.fr/ftp/gtfsrt/Astuce.TripUpdate.pb";
 
 //- Monitored lines
 export const MONITORED_LINES = [
