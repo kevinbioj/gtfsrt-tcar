@@ -56,7 +56,7 @@ export type StopTimeScheduleRelationship = "SCHEDULED" | "SKIPPED" | "NO_DATA";
 export type StopTimeUpdate = {
   arrival?: StopTimeEvent;
   departure?: StopTimeEvent;
-  stopSequence: number;
+  stopSequence?: number;
   stopId: string;
   scheduleRelationship: StopTimeScheduleRelationship;
 };

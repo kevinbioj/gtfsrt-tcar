@@ -86,7 +86,7 @@ setInterval(async () => {
       }
 
       vehiclePositions.set(parcNumber, {
-        currentStatus: vehiclePosition.vehicle.currentStatus === "STOPPED_AT" ? "STOPPED_AT" : "IN_TRANSIT_TO",
+        currentStatus: vehiclePosition.vehicle.currentStatus,
         currentStopSequence: vehiclePosition.vehicle.currentStopSequence,
         position: {
           latitude: vehiclePosition.vehicle.position.latitude,
@@ -173,6 +173,9 @@ function handleVehicle(line: string, vehicle: Vehicle) {
     if (vehicle.Latitude === lastPosition.position.latitude && vehicle.Longitude === lastPosition.position.longitude) {
       recordedAt = lastPosition.recordedAt;
     }
+    if (Temporal.Now.instant().since(Temporal.Instant.fromEpochSeconds(recordedAt)).minutes > 10) {
+      return;
+    }
   }
 
   lastPositionCache.set(vehicleId, { position, recordedAt });
@@ -198,7 +201,8 @@ function handleVehicle(line: string, vehicle: Vehicle) {
     tripUpdates.set(trip.tripId, {
       stopTimeUpdate: vehicle.StopTimeList.map((stopTime) => {
         const partialStopTimeUpdate = {
-          stopSequence: stopTime.StopPointOrder,
+          // Stop sequences are broken af
+          // stopSequence: stopTime.StopPointOrder,
           stopId: stopTime.StopPointId.toString(),
         };
 
