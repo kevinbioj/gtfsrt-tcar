@@ -60,8 +60,9 @@ setInterval(
 );
 
 console.log("|> Initiating backup GTFS-RT.");
+let oldVehiclePositions = (await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[];
 setInterval(async () => {
-  const oldVehiclePositions = (await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[];
+  oldVehiclePositions = (await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[];
   const now = Temporal.Now.instant();
 
   for (const vehiclePosition of oldVehiclePositions) {
@@ -136,6 +137,19 @@ function handleVehicle(line: string, vehicle: Vehicle) {
 
   const lineData = LINES_DATASET.get(vehicle.LineNumber);
   if (typeof lineData !== "undefined") {
+    if (!lineData.destinations.includes(vehicle.Destination) && isCommercialTrip(vehicle.Destination)) {
+      const oldVehiclePosition = oldVehiclePositions.find((vp) => vp.vehicle.vehicle.id === vehicleId);
+      if (typeof oldVehiclePosition !== "undefined") {
+        const routeId = oldVehiclePosition.vehicle.trip!.routeId;
+        if (routeId !== lineData.code) {
+          return console.warn(`Route ${lineData.code} mismatching with the old GTFS-RT (route ${routeId}), skipping.`);
+        } else {
+          console.warn(`Matching route with old GTFS-RT - unknown destination: ${vehicle.Destination}, allowing.`);
+        }
+      } else {
+        console.warn(`Missing vehicle from old GTFS-RT with unknown destination (${vehicle.Destination}), allowing.`);
+      }
+    }
     if (trip.routeId !== lineData.code || trip.directionId !== vehicle.Direction - 1)
       return console.warn(`Inconsistency with the GTFS resource, waiting for next refresh.`);
   }
