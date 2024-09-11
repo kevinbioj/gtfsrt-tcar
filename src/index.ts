@@ -278,4 +278,4 @@ hono.get("/vehicle-positions", (c) =>
   }),
 );
 hono.get("/vehicle-positions.json", (c) => c.json(buildGtfsRtFeed(vehiclePositions.values())));
-serve({ fetch: hono.fetch, port: 8080 });
+serve({ fetch: hono.fetch, port: +(process.env.PORT ?? 8080) });
