@@ -140,9 +140,11 @@ function handleVehicle(line: string, vehicle: Vehicle) {
     if (!lineData.destinations.includes(vehicle.Destination) && isCommercialTrip(vehicle.Destination)) {
       const oldVehiclePosition = oldVehiclePositions.find((vp) => vp.vehicle.vehicle.id === vehicleId);
       if (typeof oldVehiclePosition !== "undefined") {
-        const routeId = oldVehiclePosition.vehicle.trip!.routeId;
-        if (routeId !== lineData.code) {
-          return console.warn(`Route ${lineData.code} mismatching with the old GTFS-RT (route ${routeId}), skipping.`);
+        const oldTrip = oldVehiclePosition.vehicle.trip!;
+        if (trip.routeId !== oldTrip.routeId || trip.directionId !== (oldTrip.directionId ?? 0)) {
+          return console.warn(
+            `Mismatching data: old [${oldTrip.routeId}:${oldTrip.directionId ?? 0}] ; new [${trip.routeId}:${trip.directionId}], skipping.`,
+          );
         } else {
           console.warn(`Matching route with old GTFS-RT - unknown destination: ${vehicle.Destination}, allowing.`);
         }
