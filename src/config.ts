@@ -65,6 +65,9 @@ export const LINES_DATASET = new Map([
   ["22", { code: "22", destinations: ["P. de la Vatine", "Barr.de Darnétal"] }],
   ["27", { code: "27", destinations: ["Bel Air", "Théâtre des Arts"] }],
   ["28", { code: "28", destinations: ["Louise Michel", "Bois Tison"] }],
+  ["33", { code: "33", destinations: ["HDV Sotteville", "F. Truffaut"] }],
+  ["35", { code: "35", destinations: ["Ecole Moulin", "Mont-Riboudet", "Sente Houdeville"] }],
   ["41", { code: "41", destinations: ["Ancienne Mare", "La Bastille", "Vente Olivier"] }],
+  ["42", { code: "42", destinations: ["Lebon", "Centre Routier", "La Houssière"] }],
   ["43", { code: "43", destinations: ["Place du Vivier", "Longs Vallons"] }],
 ]);

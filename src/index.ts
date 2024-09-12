@@ -148,10 +148,10 @@ function handleVehicle(line: string, vehicle: Vehicle) {
   const trip = gtfsResource.trips.get(operationCode);
   if (typeof trip === "undefined") return console.warn(`Unknown trip for operation code '${operationCode}'.`);
 
+  const oldVehiclePosition = oldVehiclePositions.find((vp) => vp.vehicle.vehicle.id === vehicleId);
   const lineData = LINES_DATASET.get(vehicle.LineNumber);
   if (typeof lineData !== "undefined") {
     if (!lineData.destinations.includes(vehicle.Destination) && isCommercialTrip(vehicle.Destination)) {
-      const oldVehiclePosition = oldVehiclePositions.find((vp) => vp.vehicle.vehicle.id === vehicleId);
       if (typeof oldVehiclePosition !== "undefined") {
         const oldTrip = oldVehiclePosition.vehicle.trip!;
         if (trip.routeId !== oldTrip.routeId || trip.directionId !== (oldTrip.directionId ?? 0)) {
@@ -167,6 +167,13 @@ function handleVehicle(line: string, vehicle: Vehicle) {
     }
     if (trip.routeId !== lineData.code || trip.directionId !== vehicle.Direction - 1)
       return console.warn(`Inconsistency with the GTFS resource, waiting for next refresh.`);
+  } else if (typeof oldVehiclePosition !== "undefined") {
+    const oldTrip = oldVehiclePosition.vehicle.trip!;
+    if (trip.routeId !== oldTrip.routeId || trip.directionId !== (oldTrip.directionId ?? 0)) {
+      return console.warn(
+        `Mismatching data: old [${oldTrip.routeId}:${oldTrip.directionId ?? 0}] ; new [${trip.routeId}:${trip.directionId}], skipping.`,
+      );
+    }
   }
 
   const position: Position = {
