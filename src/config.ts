@@ -64,6 +64,7 @@ export const LINES_DATASET = new Map([
   ["20", { code: "20", destinations: ["Le Chapître", "Rue de l'Eglise", "Mairie St Aubin"] }],
   ["22", { code: "22", destinations: ["P. de la Vatine", "Barr.de Darnétal"] }],
   ["27", { code: "27", destinations: ["Bel Air", "Théâtre des Arts"] }],
+  ["28", { code: "28", destinations: ["Louise Michel", "Bois Tison"] }],
   ["41", { code: "41", destinations: ["Ancienne Mare", "La Bastille", "Vente Olivier"] }],
   ["43", { code: "43", destinations: ["Place du Vivier", "Longs Vallons"] }],
 ]);
