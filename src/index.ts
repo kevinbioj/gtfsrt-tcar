@@ -2,7 +2,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import "temporal-polyfill/global";
 
-import { GTFS_FEED, HUB_FEED, LINES_DATASET, MONITORED_LINES, OLD_GTFSRT_VP_FEED, VEHICLE_WS } from "./config.js";
+import { GTFS_FEED, HUB_FEED, MONITORED_LINES, OLD_GTFSRT_VP_FEED, VEHICLE_WS } from "./config.js";
 import { createVehicleProvider, type Vehicle } from "./providers/vehicle-provider.js";
 import { importGtfs } from "./resources/import-gtfs.js";
 import { importHub } from "./resources/import-hub.js";
@@ -19,6 +19,7 @@ import { buildGtfsRtFeed } from "./utils/build-gtfsrt-feed.js";
 import { fetchOldGtfsrt } from "./resources/fetch-old-gtfsrt.js";
 import { stream } from "hono/streaming";
 import { encodeGtfsRt } from "./utils/gtfsrt-coding.js";
+import { isSus } from "./utils/compute-sus-score.js";
 
 const REALTIME_STALE_TIME = 600; // seconds
 const RESOURCE_STALE_TIME = 3600 * 1000; // milliseconds
@@ -148,33 +149,8 @@ function handleVehicle(line: string, vehicle: Vehicle) {
   const trip = gtfsResource.trips.get(operationCode);
   if (typeof trip === "undefined") return console.warn(`Unknown trip for operation code '${operationCode}'.`);
 
-  const oldVehiclePosition = oldVehiclePositions.find((vp) => vp.vehicle.vehicle.id === vehicleId);
-  const lineData = LINES_DATASET.get(vehicle.LineNumber);
-  if (typeof lineData !== "undefined") {
-    if (!lineData.destinations.includes(vehicle.Destination) && isCommercialTrip(vehicle.Destination)) {
-      if (typeof oldVehiclePosition !== "undefined") {
-        const oldTrip = oldVehiclePosition.vehicle.trip!;
-        if (trip.routeId !== oldTrip.routeId || trip.directionId !== (oldTrip.directionId ?? 0)) {
-          return console.warn(
-            `Mismatching data: old [${oldTrip.routeId}:${oldTrip.directionId ?? 0}] ; new [${trip.routeId}:${trip.directionId}], skipping.`,
-          );
-        } else {
-          console.warn(`Matching route with old GTFS-RT - unknown destination: ${vehicle.Destination}, allowing.`);
-        }
-      } else {
-        console.warn(`Missing vehicle from old GTFS-RT with unknown destination (${vehicle.Destination}), allowing.`);
-      }
-    }
-    if (trip.routeId !== lineData.code || trip.directionId !== vehicle.Direction - 1)
-      return console.warn(`Inconsistency with the GTFS resource, waiting for next refresh.`);
-  } else if (typeof oldVehiclePosition !== "undefined") {
-    const oldTrip = oldVehiclePosition.vehicle.trip!;
-    if (trip.routeId !== oldTrip.routeId || trip.directionId !== (oldTrip.directionId ?? 0)) {
-      return console.warn(
-        `Mismatching data: old [${oldTrip.routeId}:${oldTrip.directionId ?? 0}] ; new [${trip.routeId}:${trip.directionId}], skipping.`,
-      );
-    }
-  }
+  const oldVehiclePosition = oldVehiclePositions.find((vp) => vp.vehicle.vehicle.id === vehicleId)?.vehicle;
+  if (isSus(vehicle, trip, oldVehiclePosition)) return;
 
   const position: Position = {
     latitude: vehicle.Latitude,
@@ -187,7 +163,7 @@ function handleVehicle(line: string, vehicle: Vehicle) {
   const lastPosition = lastPositionCache.get(vehicleId);
   if (typeof lastPosition !== "undefined") {
     if (recordedAt < lastPosition.recordedAt) {
-      console.warn("The position of this entry is older than the cached position, ignoring.");
+      console.warn("\t\t  The position of this entry is older than the cached position, ignoring.");
       return;
     }
     if (vehicle.Latitude === lastPosition.position.latitude && vehicle.Longitude === lastPosition.position.longitude) {

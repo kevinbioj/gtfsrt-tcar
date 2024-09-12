@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { downloadArchive } from "../utils/download-archive.js";
 import { loadCsv } from "../utils/load-csv.js";
 
-type Trip = {
+export type Trip = {
   tripId: string;
   routeId: string;
   directionId: number;
