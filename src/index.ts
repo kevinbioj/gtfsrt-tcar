@@ -83,12 +83,12 @@ setInterval(async () => {
   for (const vehiclePosition of oldVehiclePositions) {
     const parcNumber = vehiclePosition.vehicle.vehicle.id;
     const vehicleTrip = vehiclePosition.vehicle.trip!;
-    if (now.since(Temporal.Instant.fromEpochSeconds(vehiclePosition.vehicle.timestamp)).minutes > 5) continue;
+    if (now.since(Temporal.Instant.fromEpochSeconds(vehiclePosition.vehicle.timestamp)).total("minutes") > 5) continue;
 
     const lastPosition = lastPositionCache.get(parcNumber);
     if (
       typeof lastPosition === "undefined" ||
-      now.since(Temporal.Instant.fromEpochSeconds(lastPosition.recordedAt)).minutes > 10
+      now.since(Temporal.Instant.fromEpochSeconds(lastPosition.recordedAt)).total("minutes") > 10
     ) {
       const trip = gtfsResource.trips.get(vehicleTrip.tripId);
       if (
@@ -169,7 +169,7 @@ function handleVehicle(line: string, vehicle: Vehicle) {
     if (vehicle.Latitude === lastPosition.position.latitude && vehicle.Longitude === lastPosition.position.longitude) {
       recordedAt = lastPosition.recordedAt;
     }
-    if (Temporal.Now.instant().since(Temporal.Instant.fromEpochSeconds(recordedAt)).minutes > 10) {
+    if (Temporal.Now.instant().since(Temporal.Instant.fromEpochSeconds(recordedAt)).total("minutes") > 10) {
       return;
     }
   }

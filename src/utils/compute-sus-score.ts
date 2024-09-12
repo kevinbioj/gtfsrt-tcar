@@ -15,11 +15,9 @@ export function isSus(vehicle: Vehicle, trip: Trip, oldVehiclePosition?: Vehicle
 
   if (typeof oldVehiclePosition !== "undefined") {
     const oldTrip = oldVehiclePosition.trip!;
-    if (trip.routeId !== oldTrip.routeId || trip.directionId !== (oldTrip.directionId ?? 0)) {
-      console.warn(`\t\t  Mismatch between matched trip and old GTFS-RT: is sus.`);
-      console.warn(
-        `\t\t  Matched trip: {${trip.routeId}:${trip.directionId}} | Old GTFS-RT: {${oldTrip.routeId}:${oldTrip.directionId ?? 0}}`,
-      );
+    if (trip.routeId !== oldTrip.routeId) {
+      console.warn(`\t\t  Mismatch between matched trip and old GTFS-RT routes: is sus.`);
+      console.warn(`\t\t  Matched trip: ${trip.routeId} | Old GTFS-RT: ${oldTrip.routeId}`);
       return true;
     }
 
