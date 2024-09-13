@@ -49,12 +49,16 @@ console.log("|> Loading GTFS resource.");
 let gtfsResource = await importGtfs(GTFS_FEED);
 setInterval(
   async () => {
-    const mustUpdate =
-      (await isArchiveStale(GTFS_FEED, gtfsResource.version)) ||
-      Date.now() - gtfsResource.loadedAt > RESOURCE_STALE_TIME;
-    if (mustUpdate) {
-      console.log("|> Updating GTFS resource.");
-      gtfsResource = await importGtfs(GTFS_FEED);
+    try {
+      const mustUpdate =
+        (await isArchiveStale(GTFS_FEED, gtfsResource.version)) ||
+        Date.now() - gtfsResource.loadedAt > RESOURCE_STALE_TIME;
+      if (mustUpdate) {
+        console.log("|> Updating GTFS resource.");
+        gtfsResource = await importGtfs(GTFS_FEED);
+      }
+    } catch (e) {
+      console.error("Failed to ensure GTFS fresheness.", e);
     }
   },
   5 * 60 * 1_000,
@@ -63,7 +67,12 @@ setInterval(
 console.log("|> Initiating backup GTFS-RT.");
 let oldVehiclePositions = (await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[];
 setInterval(async () => {
-  oldVehiclePositions = (await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[];
+  try {
+    oldVehiclePositions = (await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[];
+  } catch (e) {
+    console.error("Failed to download old GTFS-RT resource.", e);
+  }
+
   const now = Temporal.Now.instant();
 
   // For every active vehicle, we check if old GTFS-RT has a newer position.
