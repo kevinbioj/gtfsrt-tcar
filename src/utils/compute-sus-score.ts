@@ -11,6 +11,11 @@ export function isSus(vehicle: Vehicle, trip: Trip, oldVehiclePosition?: Vehicle
       console.warn(`\t\t  Something looks wrong. Are the GTFS and HUB resources up-to-date? Definitely sus!`);
       return true;
     }
+
+    if (!lineData.destinations.includes(vehicle.Destination)) {
+      console.warn(`\t\t  Missing from old GTFS-RT, and destination is unknown: probably sus.`);
+      return true;
+    }
   }
 
   if (typeof oldVehiclePosition !== "undefined") {
