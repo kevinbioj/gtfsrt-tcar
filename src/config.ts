@@ -70,4 +70,5 @@ export const LINES_DATASET = new Map([
   ["41", { code: "41", destinations: ["Ancienne Mare", "La Bastille", "Vente Olivier"] }],
   ["42", { code: "42", destinations: ["Lebon", "Centre Routier", "La Houssière"] }],
   ["43", { code: "43", destinations: ["Place du Vivier", "Longs Vallons"] }],
+  ["44", { code: "44", destinations: ["E. Lacroix", "Chapelle St-Siméon"] }],
 ]);

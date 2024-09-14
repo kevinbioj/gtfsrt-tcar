@@ -19,7 +19,7 @@ import { buildGtfsRtFeed } from "./utils/build-gtfsrt-feed.js";
 import { fetchOldGtfsrt } from "./resources/fetch-old-gtfsrt.js";
 import { stream } from "hono/streaming";
 import { encodeGtfsRt } from "./utils/gtfsrt-coding.js";
-import { isSus } from "./utils/compute-sus-score.js";
+import { isSus } from "./utils/is-sus.js";
 
 const REALTIME_STALE_TIME = 600; // seconds
 const RESOURCE_STALE_TIME = 3600 * 1000; // milliseconds
@@ -159,7 +159,7 @@ function handleVehicle(line: string, vehicle: Vehicle) {
   if (typeof trip === "undefined") return console.warn(`Unknown trip for operation code '${operationCode}'.`);
 
   const oldVehiclePosition = oldVehiclePositions.find((vp) => vp.vehicle.vehicle.id === vehicleId)?.vehicle;
-  if (isSus(vehicle, trip, oldVehiclePosition)) return;
+  if (isCommercialTrip(vehicle.Destination) && isSus(vehicle, trip, oldVehiclePosition)) return;
 
   const position: Position = {
     latitude: vehicle.Latitude,

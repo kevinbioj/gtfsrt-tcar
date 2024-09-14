@@ -1,14 +1,16 @@
 {
-  "name": "gtfsrt-tcar",
+  "name": "@kevinbioj/tcar-producer",
   "description": "Producteur de données GTFS-RT pour Transdev Rouen (TCAR)",
   "version": "0.1.0",
   "main": "dist/index.js",
   "type": "module",
-  "author": "Kevin BIOJOUT <coucou@kevinbioj.fr>",
+  "license": "MIT",
+  "author": "Kevin BIOJOUT <biojoutk1106@gmail.com>",
   "scripts": {
     "build": "tsc",
     "start": "node .",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "format": "prettier --write --config .prettierrc src"
   },
   "devDependencies": {
     "@eslint/js": "^9.9.1",
