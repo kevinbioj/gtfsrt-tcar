@@ -35,11 +35,16 @@ console.log("|> Loading HUB resource.");
 let hubResource = await importHub(HUB_FEED);
 setInterval(
   async () => {
-    const mustUpdate =
-      (await isArchiveStale(HUB_FEED, hubResource.version)) || Date.now() - hubResource.loadedAt > RESOURCE_STALE_TIME;
-    if (mustUpdate) {
-      console.log("|> Updating HUB resource.");
-      hubResource = await importHub(HUB_FEED);
+    try {
+      const mustUpdate =
+        (await isArchiveStale(HUB_FEED, hubResource.version)) ||
+        Date.now() - hubResource.loadedAt > RESOURCE_STALE_TIME;
+      if (mustUpdate) {
+        console.log("|> Updating HUB resource.");
+        hubResource = await importHub(HUB_FEED);
+      }
+    } catch (e) {
+      console.error("Failed to ensure HUB fresheness.", e);
     }
   },
   5 * 60 * 1_000,
