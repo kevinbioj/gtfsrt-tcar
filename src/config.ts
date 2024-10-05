@@ -63,7 +63,7 @@ export const LINES_DATASET = new Map([
   ["15", { code: "15", destinations: ["Collège J. Verne", "Jules Verne", "Eude", "Grand Val"] }],
   ["20", { code: "20", destinations: ["Le Chapître", "Rue de l'Eglise", "Mairie St Aubin"] }],
   ["22", { code: "22", destinations: ["P. de la Vatine", "Barr.de Darnétal"] }],
-  ["27", { code: "27", destinations: ["Bel Air", "Théâtre des Arts"] }],
+  ["27", { code: "27", destinations: ["Bel Air", "Théâtre des Arts", "Boulingrin"] }],
   ["28", { code: "28", destinations: ["Louise Michel", "Bois Tison"] }],
   ["33", { code: "33", destinations: ["HDV Sotteville", "F. Truffaut"] }],
   ["35", { code: "35", destinations: ["Ecole Moulin", "Sente Houdeville"] }],
