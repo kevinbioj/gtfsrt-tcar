@@ -195,7 +195,7 @@ function handleVehicle(line: string, vehicle: Vehicle) {
 
   const vehicleDescriptor: VehicleDescriptor = {
     id: vehicleId,
-    label: vehicleId,
+    label: vehicle.Destination,
   };
 
   let tripDescriptor: TripDescriptor | undefined;
@@ -220,9 +220,9 @@ function handleVehicle(line: string, vehicle: Vehicle) {
           return { ...partialStopTimeUpdate, scheduleRelationship: "SKIPPED" };
         }
 
-        if (!stopTime.IsMonitored) {
-          return { ...partialStopTimeUpdate, scheduleRelationship: "NO_DATA" };
-        }
+        // if (!stopTime.IsMonitored) {
+        //   return { ...partialStopTimeUpdate, scheduleRelationship: "NO_DATA" };
+        // }
 
         const expectedTime = Temporal.Instant.from(stopTime.ExpectedTime).epochSeconds;
         const aimedTime = Temporal.Instant.from(stopTime.AimedTime).epochSeconds;
