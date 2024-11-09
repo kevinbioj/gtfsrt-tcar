@@ -54,7 +54,12 @@ export async function createVehicleProvider(
   }
 
   connection.on("dataReceived", (line, payload) => {
-    onVehicle(line, JSON.parse(payload));
+    try {
+      onVehicle(line, JSON.parse(payload));
+    } catch (cause) {
+      const error = new Error('An error occurred in the vehicle handling function', { cause });
+      console.error(error);
+    }
   });
 
   return connection;

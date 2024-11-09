@@ -209,7 +209,7 @@ function handleVehicle(line: string, vehicle: Vehicle) {
     };
 
     tripUpdates.set(trip.tripId, {
-      stopTimeUpdate: vehicle.StopTimeList.map((stopTime) => {
+      stopTimeUpdate: vehicle.StopTimeList.flatMap((stopTime) => {
         const partialStopTimeUpdate = {
           // Stop sequences are broken af
           // stopSequence: stopTime.StopPointOrder,
@@ -220,9 +220,10 @@ function handleVehicle(line: string, vehicle: Vehicle) {
           return { ...partialStopTimeUpdate, scheduleRelationship: "SKIPPED" };
         }
 
-        // if (!stopTime.IsMonitored) {
-        //   return { ...partialStopTimeUpdate, scheduleRelationship: "NO_DATA" };
-        // }
+        if (!stopTime.IsMonitored) {
+          return [];
+          // return { ...partialStopTimeUpdate, scheduleRelationship: "NO_DATA" };
+        }
 
         const expectedTime = Temporal.Instant.from(stopTime.ExpectedTime).epochSeconds;
         const aimedTime = Temporal.Instant.from(stopTime.AimedTime).epochSeconds;
