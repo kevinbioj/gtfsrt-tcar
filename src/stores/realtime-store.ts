@@ -19,6 +19,8 @@ export function createRealtimeStore(sweepInterval: number, staleThreshold: numbe
         } else if (now - tripUpdate.timestamp > staleThreshold) {
           tripUpdates.delete(key);
         }
+      } else {
+        tripUpdates.delete(key);
       }
     }
 
