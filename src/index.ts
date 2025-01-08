@@ -167,8 +167,6 @@ function handleVehicle(line: string, vehicle: Vehicle) {
   if (typeof trip === "undefined") return console.warn(`Unknown trip for operation code '${operationCode}'.`);
 
   const oldVehiclePosition = oldVehiclePositions.find((vp) => vp.vehicle.vehicle.id === vehicleId)?.vehicle;
-  if (isCommercialTrip(vehicle.Destination) && isSus(vehicle, trip, oldVehiclePosition)) return;
-
   const position: Position = {
     latitude: vehicle.Latitude,
     longitude: vehicle.Longitude,
@@ -192,6 +190,15 @@ function handleVehicle(line: string, vehicle: Vehicle) {
   }
 
   lastPositionCache.set(vehicleId, { position, recordedAt });
+
+  if (isCommercialTrip(vehicle.Destination) && isSus(vehicle, trip, oldVehiclePosition)) {
+    const existingVehicle = vehiclePositions.get(vehicleId);
+    if (existingVehicle) {
+      existingVehicle.position = position;
+      existingVehicle.timestamp = recordedAt;
+    }
+    return;
+  }
 
   const monitoredStop = vehicle.StopTimeList.at(0);
   if (typeof monitoredStop === "undefined") return console.warn("No monitored stop for this vehicle, ignoring.");
