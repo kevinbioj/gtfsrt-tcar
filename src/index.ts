@@ -104,31 +104,34 @@ setInterval(async () => {
       typeof lastPosition === "undefined" ||
       now.since(Temporal.Instant.fromEpochSeconds(lastPosition.recordedAt)).total("minutes") > 10
     ) {
-      const trip = gtfsResource.trips.get(vehicleTrip.tripId);
+      let trip = gtfsResource.trips.get(vehicleTrip.tripId);
       if (
         typeof trip === "undefined" ||
         trip.routeId !== vehicleTrip.routeId ||
         trip.directionId !== vehicleTrip.directionId
       ) {
-        console.warn(`[OLD RT INJECTOR] ${parcNumber}\tUnable to match with current GTFS resource, skipping.`);
-        continue;
+        console.warn(`[OLD RT INJECTOR] ${parcNumber}\tUnable to match with current GTFS resource, vehicle won't have trip data.`);
+        trip = undefined;
       }
 
       vehiclePositions.set(parcNumber, {
-        currentStatus: vehiclePosition.vehicle.currentStatus,
+        ...(trip ? { currentStatus: vehiclePosition.vehicle.currentStatus, } : {}),
         position: {
           latitude: vehiclePosition.vehicle.position.latitude,
           longitude: vehiclePosition.vehicle.position.longitude,
           bearing: vehiclePosition.vehicle.position.bearing,
         },
-        stopId: vehiclePosition.vehicle.stopId,
+        ...(trip ? { stopId: vehiclePosition.vehicle.stopId, } : {}),
         timestamp: vehiclePosition.vehicle.timestamp,
         vehicle: { id: parcNumber, label: parcNumber },
-        trip: { ...trip, scheduleRelationship: "SCHEDULED" },
+        ...(trip ? { trip: { ...trip, scheduleRelationship: "SCHEDULED" }, } : {
+          routeId: vehicleTrip.routeId,
+          directionId: vehicleTrip.directionId,
+        }),
       });
 
       console.warn(
-        `[OLD RT INJECTOR] ${parcNumber}\tLacking in new real-time source, injecting (route ${trip.routeId}).`,
+        `[OLD RT INJECTOR] ${parcNumber}\tLacking in new real-time source, injecting (route ${trip?.routeId ?? 'NONE'}).`,
       );
     }
   }
