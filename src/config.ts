@@ -1,41 +1,75 @@
 //- Feed URLs
-export const GTFS_FEED = "https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=GTFS";
-export const HUB_FEED = "https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=HUB";
-export const VEHICLE_WS = "https://api.mrn.cityway.fr/sdh/vehicles";
+export const GTFS_FEED = "https://preprod.api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=GTFS";
+export const HUB_FEED = "https://preprod.api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=HUB";
+export const VEHICLE_WS = "https://preprod.api.mrn.cityway.fr/sdh/vehicles";
 export const OLD_GTFSRT_VP_FEED = "https://tsi.tcar.cityway.fr/ftp/gtfsrt/Astuce.VehiclePosition.pb";
 
-//- Monitored lines
+//- Monitored lines - api.mrn.cityway.fr
+// export const MONITORED_LINES = [
+//   "24211", // M
+//   "24210", // N
+//   "24212", // T1
+//   "24213", // T2
+//   "24214", // T3
+//   "24215", // T4
+//   "24099", // F1
+//   "24100", // F2
+//   "24101", // F3
+//   "24102", // F4
+//   "24103", // F5
+//   "24104", // F6
+//   "24105", // F7
+//   "24106", // F8
+//   "24107", // F9
+//   "24108", // 10
+//   "24115", // 11
+//   "24116", // 13
+//   "24117", // 14
+//   "24118", // 15
+//   "24119", // 20
+//   "24133", // 22
+//   "24144", // 27
+//   "24145", // 28
+//   "24157", // 33
+//   "24169", // 35
+//   "24186", // 41
+//   "24192", // 42
+//   "24193", // 43
+//   "40874", // NOCT
+// ];
+
+//- Monitored lines - preprod.api.mrn.cityway.fr
 export const MONITORED_LINES = [
-  "24211", // M
+  "117", // M
   "24210", // N
-  "24212", // T1
-  "24213", // T2
-  "24214", // T3
-  "24215", // T4
-  "24099", // F1
-  "24100", // F2
-  "24101", // F3
-  "24102", // F4
-  "24103", // F5
-  "24104", // F6
-  "24105", // F7
-  "24106", // F8
+  "118", // T1
+  "119", // T2
+  "120", // T3
+  "121", // T4
+  "2989", // F1
+  "2990", // F2
+  "2991", // F3
+  "1", // F4
+  "2", // F5
+  "3", // F6
+  "4", // F7
+  "5", // F8
   "24107", // F9
-  "24108", // 10
-  "24115", // 11
-  "24116", // 13
-  "24117", // 14
-  "24118", // 15
-  "24119", // 20
-  "24133", // 22
-  "24144", // 27
-  "24145", // 28
-  "24157", // 33
-  "24169", // 35
-  "24186", // 41
-  "24192", // 42
-  "24193", // 43
-  "40874", // NOCT
+  "7", // 10
+  "15", // 11
+  "16", // 13
+  "2998", // 14
+  "2999", // 15
+  "18", // 20
+  "34", // 22
+  "45", // 27
+  "3001", // 28
+  "61", // 33
+  "74", // 35
+  "93", // 41
+  "99", // 42
+  "100", // 43
+  "122", // NOCT
 ];
 
 //- Control dataset
