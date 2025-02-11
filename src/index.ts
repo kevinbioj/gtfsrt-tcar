@@ -219,7 +219,7 @@ function handleVehicle(line: string, vehicle: Vehicle) {
     };
 
     tripUpdates.set(trip.tripId, {
-      stopTimeUpdate: vehicle.StopTimeList.flatMap((stopTime) => {
+      stopTimeUpdate: vehicle.StopTimeList.map((stopTime) => {
         const partialStopTimeUpdate = {
           // Stop sequences are broken af
           // stopSequence: stopTime.StopPointOrder,
@@ -231,8 +231,7 @@ function handleVehicle(line: string, vehicle: Vehicle) {
         }
 
         if (!stopTime.IsMonitored) {
-          return [];
-          // return { ...partialStopTimeUpdate, scheduleRelationship: "NO_DATA" };
+          return { ...partialStopTimeUpdate, scheduleRelationship: "NO_DATA" };
         }
 
         const expectedTime = Temporal.Instant.from(stopTime.ExpectedTime.endsWith('+01:00') ? stopTime.ExpectedTime : `${stopTime.ExpectedTime}+01:00`).epochSeconds;
