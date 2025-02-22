@@ -20,6 +20,7 @@ import { fetchOldGtfsrt } from "./resources/fetch-old-gtfsrt.js";
 import { stream } from "hono/streaming";
 import { encodeGtfsRt } from "./utils/gtfsrt-coding.js";
 import { isSus } from "./utils/is-sus.js";
+import { getVehicleOccupancyStatus } from "./utils/occupancy-fetcher.js";
 
 const REALTIME_STALE_TIME = 600; // seconds
 const RESOURCE_STALE_TIME = 3600 * 1000; // milliseconds
@@ -110,28 +111,33 @@ setInterval(async () => {
         trip.routeId !== vehicleTrip.routeId ||
         trip.directionId !== vehicleTrip.directionId
       ) {
-        console.warn(`[OLD RT INJECTOR] ${parcNumber}\tUnable to match with current GTFS resource, vehicle won't have trip data.`);
+        console.warn(
+          `[OLD RT INJECTOR] ${parcNumber}\tUnable to match with current GTFS resource, vehicle won't have trip data.`,
+        );
         trip = undefined;
       }
 
       vehiclePositions.set(parcNumber, {
-        ...(trip ? { currentStatus: vehiclePosition.vehicle.currentStatus, } : {}),
+        ...(trip ? { currentStatus: vehiclePosition.vehicle.currentStatus } : {}),
+        occupancyStatus: await getVehicleOccupancyStatus(parcNumber),
         position: {
           latitude: vehiclePosition.vehicle.position.latitude,
           longitude: vehiclePosition.vehicle.position.longitude,
           bearing: vehiclePosition.vehicle.position.bearing,
         },
-        ...(trip ? { stopId: vehiclePosition.vehicle.stopId, } : {}),
+        ...(trip ? { stopId: vehiclePosition.vehicle.stopId } : {}),
         timestamp: vehiclePosition.vehicle.timestamp,
         vehicle: { id: parcNumber, label: parcNumber },
-        ...(trip ? { trip: { ...trip, scheduleRelationship: "SCHEDULED" }, } : {
-          routeId: vehicleTrip.routeId,
-          directionId: vehicleTrip.directionId,
-        }),
+        ...(trip
+          ? { trip: { ...trip, scheduleRelationship: "SCHEDULED" } }
+          : {
+              routeId: vehicleTrip.routeId,
+              directionId: vehicleTrip.directionId,
+            }),
       });
 
       console.warn(
-        `[OLD RT INJECTOR] ${parcNumber}\tLacking in new real-time source, injecting (route ${trip?.routeId ?? 'NONE'}).`,
+        `[OLD RT INJECTOR] ${parcNumber}\tLacking in new real-time source, injecting (route ${trip?.routeId ?? "NONE"}).`,
       );
     }
   }
@@ -155,7 +161,7 @@ const lastPositionCache = new Map<string, { position: Position; recordedAt: numb
 const isCommercialTrip = (destination: string) =>
   !["Dépôt 2 Rivières", "Dépôt St-Julien", "ROUEN DEPOT", "Dépôt TNI Carnot"].includes(destination);
 
-function handleVehicle(line: string, vehicle: Vehicle) {
+async function handleVehicle(line: string, vehicle: Vehicle) {
   const vehicleId = vehicle.VehicleRef.split(":")[3]!;
   console.debug(`[${line}] ${vehicleId}\t${vehicle.VJourneyId}\t${vehicle.LineNumber} -> ${vehicle.Destination}`);
 
@@ -234,8 +240,12 @@ function handleVehicle(line: string, vehicle: Vehicle) {
           return { ...partialStopTimeUpdate, scheduleRelationship: "NO_DATA" };
         }
 
-        const expectedTime = Temporal.Instant.from(stopTime.ExpectedTime.endsWith('+01:00') ? stopTime.ExpectedTime : `${stopTime.ExpectedTime}+01:00`).epochSeconds;
-        const aimedTime = Temporal.Instant.from(stopTime.AimedTime.endsWith('+01:00') ? stopTime.AimedTime : `${stopTime.AimedTime}+01:00`).epochSeconds;
+        const expectedTime = Temporal.Instant.from(
+          stopTime.ExpectedTime.endsWith("+01:00") ? stopTime.ExpectedTime : `${stopTime.ExpectedTime}+01:00`,
+        ).epochSeconds;
+        const aimedTime = Temporal.Instant.from(
+          stopTime.AimedTime.endsWith("+01:00") ? stopTime.AimedTime : `${stopTime.AimedTime}+01:00`,
+        ).epochSeconds;
         const event: StopTimeEvent = {
           delay: expectedTime - aimedTime,
           time: expectedTime,
@@ -265,6 +275,9 @@ function handleVehicle(line: string, vehicle: Vehicle) {
           stopId: monitoredStop.StopPointId.toString(),
         }
       : {}),
+    occupancyStatus: isCommercialTrip(vehicle.Destination)
+      ? await getVehicleOccupancyStatus(vehicleId)
+      : "NOT_BOARDABLE",
     position,
     timestamp: recordedAt,
     trip: tripDescriptor,
