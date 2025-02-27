@@ -159,7 +159,7 @@ vehicleProvider.onclose((error) => {
 const lastPositionCache = new Map<string, { position: Position; recordedAt: number }>();
 
 const isCommercialTrip = (destination: string) =>
-  !["Dépôt 2 Rivières", "Dépôt St-Julien", "ROUEN DEPOT", "Dépôt TNI Carnot"].includes(destination);
+  !["Dépôt 2 Rivières", "Dépôt St-Julien", "ROUEN DEPOT", "Dépôt TNI Carnot", "Dépôt Lincoln"].includes(destination);
 
 async function handleVehicle(line: string, vehicle: Vehicle) {
   const vehicleId = vehicle.VehicleRef.split(":")[3]!;

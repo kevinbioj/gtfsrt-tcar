@@ -20,7 +20,11 @@ export async function getVehicleOccupancyStatus(vehicleNumber: string) {
         const endBoundary = document.indexOf("positions.addTo(myMap);</script>");
         return document.slice(startBoundary, endBoundary).split(/\r?\n/);
       })
-      .catch(() => undefined);
+      .catch((cause) => {
+        const error = new Error('Failed to fetch vehicle occupancies', { cause });
+        console.error(error);
+        return undefined;
+      });
     if (typeof cached !== "undefined") lastFetchAt = Date.now();
   }
 
