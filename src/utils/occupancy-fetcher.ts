@@ -11,6 +11,14 @@ const levels: Record<string, OccupancyStatus> = {
 let cached: string[] | undefined;
 let lastFetchAt: number | undefined;
 
+const vehicleCache = new Map<string, { status: OccupancyStatus; recordedAt: number }>();
+
+const getFromCache = (vehicleNumber: string) => {
+  const cached = vehicleCache.get(vehicleNumber);
+  if (typeof cached === 'undefined' || (Date.now() - cached.recordedAt) > 60_000 * 5) return;
+  return cached.status;
+}
+
 export async function getVehicleOccupancyStatus(vehicleNumber: string) {
   if (typeof lastFetchAt === "undefined" || Date.now() - lastFetchAt > 30_000) {
     cached = await fetch(url)
@@ -28,18 +36,26 @@ export async function getVehicleOccupancyStatus(vehicleNumber: string) {
     if (typeof cached !== "undefined") lastFetchAt = Date.now();
   }
 
-  if (typeof cached === "undefined") return;
+  if (typeof cached === "undefined") return getFromCache(vehicleNumber);
 
   const vehicleLine = cached?.find((line) => line.includes(`( ${vehicleNumber} )`));
-  if (typeof vehicleLine === "undefined") return;
+  if (typeof vehicleLine === "undefined") return getFromCache(vehicleNumber);
 
   const id = vehicleLine.slice(vehicleLine.indexOf("('") + 2, vehicleLine.indexOf("')"));
 
   const loadLine = cached?.find((line) => line.includes(`${id}_load`));
-  if (typeof loadLine === "undefined") return;
+  if (typeof loadLine === "undefined") return getFromCache(vehicleNumber);
 
   const [, backgroundColor] = /background-color:#([a-z0-9]{6});/.exec(loadLine) ?? [];
-  if (typeof backgroundColor === "undefined") return;
+  if (typeof backgroundColor === "undefined") return getFromCache(vehicleNumber);
 
-  return backgroundColor ? levels[backgroundColor] : undefined;
+  const status = backgroundColor ? levels[backgroundColor] : undefined;
+  if (!status) return getFromCache(vehicleNumber);
+
+  vehicleCache.set(vehicleNumber, {
+    status,
+    recordedAt: Date.now(),
+  });
+
+  return status;
 }
