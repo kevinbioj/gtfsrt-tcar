@@ -12,7 +12,7 @@ let cached: string[] | undefined;
 let lastFetchAt: number | undefined;
 
 export async function getVehicleOccupancyStatus(vehicleNumber: string) {
-  if (typeof lastFetchAt === "undefined" || Date.now() - lastFetchAt > 120_000) {
+  if (typeof lastFetchAt === "undefined" || Date.now() - lastFetchAt > 30_000) {
     cached = await fetch(url)
       .then((response) => response.text())
       .then((document) => {
