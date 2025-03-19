@@ -64,7 +64,7 @@ export type StopTimeUpdate = {
   scheduleRelationship: StopTimeScheduleRelationship;
 };
 
-export type TripScheduleRelationship = "SCHEDULED" | "CANCELED";
+export type TripScheduleRelationship = 'UNSCHEDULED' | "SCHEDULED" | "CANCELED";
 
 export type TripDescriptor = {
   tripId: string;
@@ -75,7 +75,7 @@ export type TripDescriptor = {
 
 export type VehicleDescriptor = {
   id: string;
-  label: string;
+  label?: string;
 };
 
 export type VehicleStopStatus = "INCOMING_AT" | "STOPPED_AT" | "IN_TRANSIT_TO";

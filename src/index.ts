@@ -84,7 +84,7 @@ setInterval(async () => {
   // For every active vehicle, we check if old GTFS-RT has a newer position.
   for (const vehiclePosition of vehiclePositions.values()) {
     const oldVehiclePosition = oldVehiclePositions.find((vp) => vp.vehicle.vehicle.id === vehiclePosition.vehicle.id);
-    if (typeof oldVehiclePosition !== "undefined" && oldVehiclePosition.vehicle.timestamp > vehiclePosition.timestamp) {
+    if (typeof oldVehiclePosition !== "undefined" && (oldVehiclePosition.vehicle.timestamp + 3600) > vehiclePosition.timestamp) {
       vehiclePosition.position = {
         latitude: oldVehiclePosition.vehicle.position.latitude,
         longitude: oldVehiclePosition.vehicle.position.longitude,
@@ -98,7 +98,8 @@ setInterval(async () => {
   for (const vehiclePosition of oldVehiclePositions) {
     const parcNumber = vehiclePosition.vehicle.vehicle.id;
     const vehicleTrip = vehiclePosition.vehicle.trip!;
-    if (now.since(Temporal.Instant.fromEpochSeconds(vehiclePosition.vehicle.timestamp)).total("minutes") > 5) continue;
+    // > 65 because they seem to not know about time zones
+    if (now.since(Temporal.Instant.fromEpochSeconds(vehiclePosition.vehicle.timestamp)).total("minutes") > 65) continue;
 
     const lastPosition = lastPositionCache.get(parcNumber);
     if (
@@ -126,14 +127,17 @@ setInterval(async () => {
           bearing: vehiclePosition.vehicle.position.bearing,
         },
         ...(trip ? { stopId: vehiclePosition.vehicle.stopId } : {}),
-        timestamp: vehiclePosition.vehicle.timestamp,
-        vehicle: { id: parcNumber, label: parcNumber },
+        timestamp: vehiclePosition.vehicle.timestamp + 3600, // see comment near if now.since...
+        vehicle: { id: parcNumber },
         ...(trip
           ? { trip: { ...trip, scheduleRelationship: "SCHEDULED" } }
-          : {
-              routeId: vehicleTrip.routeId,
-              directionId: vehicleTrip.directionId,
-            }),
+          : { trip: {
+            tripId: `${parcNumber}_OLDTRIP`,
+            routeId: vehicleTrip.routeId,
+            directionId: vehicleTrip.directionId,
+            scheduleRelationship: 'UNSCHEDULED',
+          }
+        }),
       });
 
       console.warn(
