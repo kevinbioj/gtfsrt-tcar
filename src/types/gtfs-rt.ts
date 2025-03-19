@@ -16,7 +16,7 @@ export type TripUpdateEntity = {
 
 export type TripUpdate = {
   trip: TripDescriptor;
-  vehicle: VehicleDescriptor;
+  vehicle?: VehicleDescriptor;
   stopTimeUpdate: StopTimeUpdate[];
   timestamp: number;
 };

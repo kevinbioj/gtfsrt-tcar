@@ -2,7 +2,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import "temporal-polyfill/global";
 
-import { GTFS_FEED, HUB_FEED, MONITORED_LINES, OLD_GTFSRT_VP_FEED, VEHICLE_WS } from "./config.js";
+import { GTFS_FEED, HUB_FEED, MONITORED_LINES, OLD_GTFSRT_TU_FEED, OLD_GTFSRT_VP_FEED, VEHICLE_WS } from "./config.js";
 import { createVehicleProvider, type Vehicle } from "./providers/vehicle-provider.js";
 import { importGtfs } from "./resources/import-gtfs.js";
 import { importHub } from "./resources/import-hub.js";
@@ -11,6 +11,7 @@ import {
   type Position,
   type StopTimeEvent,
   type TripDescriptor,
+  type TripUpdateEntity,
   type VehicleDescriptor,
   type VehiclePositionEntity,
 } from "./types/gtfs-rt.js";
@@ -72,9 +73,11 @@ setInterval(
 
 console.log("|> Initiating backup GTFS-RT.");
 let oldVehiclePositions = (await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[];
+let oldTripUpdates = (await fetchOldGtfsrt(OLD_GTFSRT_TU_FEED)).entity as TripUpdateEntity[];
 setInterval(async () => {
   try {
     oldVehiclePositions = (await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[];
+    oldTripUpdates = (await fetchOldGtfsrt(OLD_GTFSRT_TU_FEED)).entity as TripUpdateEntity[];
   } catch (e) {
     console.error("Failed to download old GTFS-RT resource.", e);
   }
@@ -116,6 +119,13 @@ setInterval(async () => {
           `[OLD RT INJECTOR] ${parcNumber}\tUnable to match with current GTFS resource, vehicle won't have trip data.`,
         );
         trip = undefined;
+      }
+
+      if (trip && !tripUpdates.has(trip.tripId)) {
+        const tripUpdate = oldTripUpdates.find((t) => t.tripUpdate.trip.tripId === trip.tripId);
+        if (tripUpdate) {
+          tripUpdates.set(trip.tripId, tripUpdate.tripUpdate);
+        }
       }
 
       vehiclePositions.set(parcNumber, {
