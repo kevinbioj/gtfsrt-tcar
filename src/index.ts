@@ -124,7 +124,25 @@ setInterval(async () => {
       if (trip && !tripUpdates.has(trip.tripId)) {
         const tripUpdate = oldTripUpdates.find((t) => t.tripUpdate.trip.tripId === trip.tripId);
         if (tripUpdate) {
-          tripUpdates.set(trip.tripId, tripUpdate.tripUpdate);
+          tripUpdates.set(trip.tripId, {
+            stopTimeUpdate: tripUpdate.tripUpdate.stopTimeUpdate?.map((stu) => ({
+              arrival: stu.arrival ? { delay: stu.arrival.delay ?? undefined, time: stu.arrival.time } : undefined,
+              departure: stu.departure ? { delay: stu.departure.delay ?? undefined, time: stu.departure.time } : undefined,
+              stopId: stu.stopId,
+              stopSequence: stu.stopSequence,
+              scheduleRelationship: stu.scheduleRelationship,
+            })),
+            timestamp: tripUpdate.tripUpdate.timestamp,
+            trip: {
+              tripId: tripUpdate.tripUpdate.trip.tripId,
+              routeId: tripUpdate.tripUpdate.trip.routeId,
+              directionId: tripUpdate.tripUpdate.trip.directionId ?? 0,
+              scheduleRelationship: tripUpdate.tripUpdate.trip.scheduleRelationship ?? 'SCHEDULED',
+            },
+            vehicle: {
+              id: vehiclePosition.vehicle.vehicle.id,
+            }
+          });
         }
       }
 
