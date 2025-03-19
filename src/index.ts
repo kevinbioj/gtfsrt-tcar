@@ -211,11 +211,12 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
     bearing: vehicle.Bearing,
   };
 
+  const existingVehicle = vehiclePositions.get(vehicleId);
   let recordedAt = Temporal.PlainDateTime.from(vehicle.RecordedAtTime).toZonedDateTime("Europe/Paris").epochSeconds;
 
   const lastPosition = lastPositionCache.get(vehicleId);
   if (typeof lastPosition !== "undefined") {
-    if (recordedAt < lastPosition.recordedAt) {
+    if (recordedAt < lastPosition.recordedAt || recordedAt < (existingVehicle?.timestamp ?? 0)) {
       console.warn("\t\t  The position of this entry is older than the cached position, ignoring.");
       return;
     }
@@ -229,12 +230,9 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 
   lastPositionCache.set(vehicleId, { position, recordedAt });
 
-  if (isCommercialTrip(vehicle.Destination) && isSus(vehicle, trip, oldVehiclePosition)) {
-    const existingVehicle = vehiclePositions.get(vehicleId);
-    if (existingVehicle) {
-      existingVehicle.position = position;
-      existingVehicle.timestamp = recordedAt;
-    }
+  if (isCommercialTrip(vehicle.Destination) && isSus(vehicle, trip, oldVehiclePosition) && existingVehicle) {
+    existingVehicle.position = position;
+    existingVehicle.timestamp = recordedAt;
     return;
   }
 
