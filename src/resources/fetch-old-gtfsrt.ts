@@ -6,7 +6,7 @@ export async function fetchOldGtfsrt(href: string) {
 
   const buffer = Buffer.from(await response.arrayBuffer());
   const feed = decodeGtfsRt(buffer);
-  if (Temporal.Now.instant().since(Temporal.Instant.fromEpochSeconds(feed.header.timestamp)).total("minutes") >= 5) {
+  if (Temporal.Now.instant().since(Temporal.Instant.fromEpochSeconds(feed.header.timestamp)).total("minutes") >= 10) {
     return { entity: [] };
   }
 
