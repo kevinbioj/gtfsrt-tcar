@@ -12,7 +12,7 @@ export function isSus(vehicle: Vehicle, trip: Trip, oldVehiclePosition?: Vehicle
       return true;
     }
 
-    if (!lineData.destinations.includes(vehicle.Destination)) {
+    if (typeof oldVehiclePosition === 'undefined' && !lineData.destinations.includes(vehicle.Destination)) {
       console.warn(`\t\t  Missing from old GTFS-RT, and destination is unknown: probably sus.`);
       return true;
     }
