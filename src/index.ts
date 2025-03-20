@@ -230,9 +230,11 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 
   lastPositionCache.set(vehicleId, { position, recordedAt });
 
-  if (isCommercialTrip(vehicle.Destination) && isSus(vehicle, trip, oldVehiclePosition) && existingVehicle) {
-    existingVehicle.position = position;
-    existingVehicle.timestamp = recordedAt;
+  if (isCommercialTrip(vehicle.Destination) && isSus(vehicle, trip, oldVehiclePosition)) {
+    if (existingVehicle) {
+      existingVehicle.position = position;
+      existingVehicle.timestamp = recordedAt;
+    }
     return;
   }
 
