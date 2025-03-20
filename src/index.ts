@@ -181,7 +181,7 @@ setInterval(async () => {
       );
     }
   }
-}, 30 * 1_000);
+}, 10 * 1_000);
 
 // II - Connecting to the vehicle service
 
