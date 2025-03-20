@@ -71,23 +71,31 @@ setInterval(
   5 * 60 * 1_000,
 );
 
+const patchOldVehiclePositions = (data: VehiclePositionEntity[]) => {
+  for (const vehicle of data) vehicle.vehicle.timestamp += 3600;
+  return data;
+}
+
 console.log("|> Initiating backup GTFS-RT.");
-let oldVehiclePositions = (await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[];
+let oldVehiclePositions = patchOldVehiclePositions((await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[]);
 let oldTripUpdates = (await fetchOldGtfsrt(OLD_GTFSRT_TU_FEED)).entity as TripUpdateEntity[];
 setInterval(async () => {
   try {
-    oldVehiclePositions = (await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[];
+    oldVehiclePositions = patchOldVehiclePositions((await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[]);
     oldTripUpdates = (await fetchOldGtfsrt(OLD_GTFSRT_TU_FEED)).entity as TripUpdateEntity[];
   } catch (e) {
     console.error("Failed to download old GTFS-RT resource.", e);
   }
+
+  //
 
   const now = Temporal.Now.instant();
 
   // For every active vehicle, we check if old GTFS-RT has a newer position.
   for (const vehiclePosition of vehiclePositions.values()) {
     const oldVehiclePosition = oldVehiclePositions.find((vp) => vp.vehicle.vehicle.id === vehiclePosition.vehicle.id);
-    if (typeof oldVehiclePosition !== "undefined" && (oldVehiclePosition.vehicle.timestamp + 3600) > vehiclePosition.timestamp) {
+    if (typeof oldVehiclePosition !== "undefined" && oldVehiclePosition.vehicle.timestamp > vehiclePosition.timestamp) {
+      console.log(`[OLD RT INJECTOR] ${vehiclePosition.vehicle.id} Updated position for existing WS vehicle using old GTFS-RT (${oldVehiclePosition.vehicle.timestamp - vehiclePosition.timestamp}s newer)`);
       vehiclePosition.position = {
         latitude: oldVehiclePosition.vehicle.position.latitude,
         longitude: oldVehiclePosition.vehicle.position.longitude,
@@ -155,7 +163,7 @@ setInterval(async () => {
           bearing: vehiclePosition.vehicle.position.bearing,
         },
         ...(trip ? { stopId: vehiclePosition.vehicle.stopId } : {}),
-        timestamp: vehiclePosition.vehicle.timestamp + 3600, // see comment near if now.since...
+        timestamp: vehiclePosition.vehicle.timestamp, // see comment near if now.since...
         vehicle: { id: parcNumber },
         ...(trip
           ? { trip: { ...trip, scheduleRelationship: "SCHEDULED" } }
