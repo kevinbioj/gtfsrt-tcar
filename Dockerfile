@@ -1,23 +1,28 @@
-# STAGE 0 - Building
-FROM node:22.8.0 AS build
+FROM node:22.14.0 AS base
+RUN corepack enable
+
+# ---
+
+FROM base AS builder
 WORKDIR /app
 
-COPY package.json package-lock.json tsconfig.json ./
-RUN npm ci
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .
+RUN pnpm install --frozen-lockfile
 
-COPY src/ ./src/
-RUN npm run build
+COPY ./src/ .
+COPY tsconfig.json .
+RUN pnpm build
 
-# STAGE 1 - Runtime
-FROM node:22.8.0-alpine
+# ---
+
+FROM base AS runtime
+WORKDIR /app
 ENV NODE_ENV=production
-WORKDIR /app
 
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist/ ./dist
 
-COPY assets/ ./assets/
-COPY --from=build /app/dist ./dist/
+COPY ./assets/ ./dist
 
 EXPOSE 8080
 CMD ["node", "/app/dist/index.js"]
