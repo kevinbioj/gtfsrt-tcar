@@ -120,6 +120,8 @@ setInterval(async () => {
 				bearing: oldVehiclePosition.vehicle.position.bearing,
 			};
 			vehiclePosition.timestamp = oldVehiclePosition.vehicle.timestamp;
+			vehiclePosition.currentStopSequence = oldVehiclePosition.vehicle.currentStopSequence;
+			vehiclePosition.stopId = oldVehiclePosition.vehicle.stopId;
 		}
 	}
 
