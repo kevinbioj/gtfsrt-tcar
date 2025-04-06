@@ -282,7 +282,6 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 		tripUpdates.set(trip.tripId, {
 			stopTimeUpdate: vehicle.StopTimeList.flatMap((stopTime) => {
 				const partialStopTimeUpdate = {
-					stopSequence: stopTime.StopPointOrder,
 					stopId: stopTime.StopPointId.toString(),
 				};
 
