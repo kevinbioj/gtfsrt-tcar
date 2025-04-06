@@ -2,6 +2,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import "temporal-polyfill/global";
 
+import { stream } from "hono/streaming";
 import {
 	GTFS_FEED,
 	HUB_FEED,
@@ -10,7 +11,8 @@ import {
 	OLD_GTFSRT_VP_FEED,
 	VEHICLE_WS,
 } from "./config.js";
-import { createVehicleProvider, type Vehicle } from "./providers/vehicle-provider.js";
+import { type Vehicle, createVehicleProvider } from "./providers/vehicle-provider.js";
+import { fetchOldGtfsrt } from "./resources/fetch-old-gtfsrt.js";
 import { importGtfs } from "./resources/import-gtfs.js";
 import { importHub } from "./resources/import-hub.js";
 import { createRealtimeStore } from "./stores/realtime-store.js";
@@ -22,10 +24,8 @@ import type {
 	VehicleDescriptor,
 	VehiclePositionEntity,
 } from "./types/gtfs-rt.js";
-import { isArchiveStale } from "./utils/download-archive.js";
 import { buildGtfsRtFeed } from "./utils/build-gtfsrt-feed.js";
-import { fetchOldGtfsrt } from "./resources/fetch-old-gtfsrt.js";
-import { stream } from "hono/streaming";
+import { isArchiveStale } from "./utils/download-archive.js";
 import { encodeGtfsRt } from "./utils/gtfsrt-coding.js";
 import { isSus } from "./utils/is-sus.js";
 import { getVehicleOccupancyStatus } from "./utils/occupancy-fetcher.js";
@@ -79,7 +79,7 @@ setInterval(
 );
 
 const patchOldVehiclePositions = (data: VehiclePositionEntity[]) => {
-	for (const vehicle of data) vehicle.vehicle.timestamp += 3600;
+	for (const vehicle of data) vehicle.vehicle.timestamp += 3600 + 3600;
 	return data;
 };
 
@@ -127,11 +127,10 @@ setInterval(async () => {
 	for (const vehiclePosition of oldVehiclePositions) {
 		const parcNumber = vehiclePosition.vehicle.vehicle.id;
 		const vehicleTrip = vehiclePosition.vehicle.trip!;
-		// > 65 because they seem to not know about time zones
 		if (
 			now
 				.since(Temporal.Instant.fromEpochSeconds(vehiclePosition.vehicle.timestamp))
-				.total("minutes") > 65
+				.total("minutes") > 5
 		)
 			continue;
 
