@@ -327,15 +327,11 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 					return { ...partialStopTimeUpdate, scheduleRelationship: "NO_DATA" };
 				}
 
-				const expectedTime = Temporal.Instant.from(
-					stopTime.ExpectedTime.endsWith("+01:00")
-						? stopTime.ExpectedTime
-						: `${stopTime.ExpectedTime}+01:00`,
+				const expectedTime = Temporal.ZonedDateTime.from(
+					`${stopTime.ExpectedTime}[Europe/Paris]`,
 				).epochSeconds;
-				const aimedTime = Temporal.Instant.from(
-					stopTime.AimedTime.endsWith("+01:00")
-						? stopTime.AimedTime
-						: `${stopTime.AimedTime}+01:00`,
+				const aimedTime = Temporal.ZonedDateTime.from(
+					`${stopTime.AimedTime}[Europe/Paris]`,
 				).epochSeconds;
 				const event: StopTimeEvent = {
 					delay: expectedTime - aimedTime,
