@@ -108,8 +108,6 @@ setInterval(async () => {
 				bearing: oldVehiclePosition.vehicle.position.bearing,
 			};
 			vehiclePosition.timestamp = oldVehiclePosition.vehicle.timestamp;
-			vehiclePosition.currentStopSequence = oldVehiclePosition.vehicle.currentStopSequence;
-			vehiclePosition.stopId = oldVehiclePosition.vehicle.stopId;
 		}
 	}
 
@@ -149,7 +147,6 @@ setInterval(async () => {
 								? { delay: stu.departure.delay ?? undefined, time: stu.departure.time }
 								: undefined,
 							stopId: stu.stopId,
-							stopSequence: stu.stopSequence,
 							scheduleRelationship: stu.scheduleRelationship,
 						})),
 						timestamp: tripUpdate.tripUpdate.timestamp,
