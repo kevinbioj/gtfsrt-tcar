@@ -312,7 +312,7 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 		};
 
 		tripUpdates.set(trip.tripId, {
-			stopTimeUpdate: vehicle.StopTimeList.map((stopTime) => {
+			stopTimeUpdate: vehicle.StopTimeList.flatMap((stopTime) => {
 				const partialStopTimeUpdate = {
 					// Stop sequences are broken af
 					// stopSequence: stopTime.StopPointOrder,
@@ -324,7 +324,9 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 				}
 
 				if (!stopTime.IsMonitored) {
-					return { ...partialStopTimeUpdate, scheduleRelationship: "NO_DATA" };
+					// 2025-04-06 : let's assume we "forget" those, just like the official TU
+					return [];
+					// return { ...partialStopTimeUpdate, scheduleRelationship: "NO_DATA" };
 				}
 
 				const expectedTime = Temporal.ZonedDateTime.from(
