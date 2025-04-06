@@ -1,9 +1,6 @@
 import type { OccupancyStatus } from "../types/gtfs-rt.js";
 
-const url = Buffer.from(
-	"aHR0cHM6Ly90Y2FyLmZsb3dseS5yZS9Qb3J0YWwvTWFwRGV2aWNlcy5hc3B4",
-	"base64",
-).toString("utf-8");
+const url = Buffer.from("aHR0cHM6Ly90Y2FyLmZsb3dseS5yZS9Qb3J0YWwvTWFwRGV2aWNlcy5hc3B4", "base64").toString("utf-8");
 
 const levels: Record<string, OccupancyStatus> = {
 	"1cc88a": "MANY_SEATS_AVAILABLE",

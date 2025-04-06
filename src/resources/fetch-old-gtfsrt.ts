@@ -8,7 +8,7 @@ export async function fetchOldGtfsrt(href: string) {
 	const feed = decodeGtfsRt(buffer);
 	if (
 		Temporal.Now.instant()
-			.since(Temporal.Instant.fromEpochSeconds(feed.header.timestamp))
+			.since(Temporal.Instant.fromEpochMilliseconds(feed.header.timestamp * 1000))
 			.total("minutes") >= 10
 	) {
 		return { entity: [] };

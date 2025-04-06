@@ -3,14 +3,7 @@ import { Hono } from "hono";
 import "temporal-polyfill/global";
 
 import { stream } from "hono/streaming";
-import {
-	GTFS_FEED,
-	HUB_FEED,
-	MONITORED_LINES,
-	OLD_GTFSRT_TU_FEED,
-	OLD_GTFSRT_VP_FEED,
-	VEHICLE_WS,
-} from "./config.js";
+import { GTFS_FEED, HUB_FEED, MONITORED_LINES, OLD_GTFSRT_TU_FEED, OLD_GTFSRT_VP_FEED, VEHICLE_WS } from "./config.js";
 import { type Vehicle, createVehicleProvider } from "./providers/vehicle-provider.js";
 import { fetchOldGtfsrt } from "./resources/fetch-old-gtfsrt.js";
 import { importGtfs } from "./resources/import-gtfs.js";
@@ -104,13 +97,8 @@ setInterval(async () => {
 
 	// For every active vehicle, we check if old GTFS-RT has a newer position.
 	for (const vehiclePosition of vehiclePositions.values()) {
-		const oldVehiclePosition = oldVehiclePositions.find(
-			(vp) => vp.vehicle.vehicle.id === vehiclePosition.vehicle.id,
-		);
-		if (
-			typeof oldVehiclePosition !== "undefined" &&
-			oldVehiclePosition.vehicle.timestamp > vehiclePosition.timestamp
-		) {
+		const oldVehiclePosition = oldVehiclePositions.find((vp) => vp.vehicle.vehicle.id === vehiclePosition.vehicle.id);
+		if (typeof oldVehiclePosition !== "undefined" && oldVehiclePosition.vehicle.timestamp > vehiclePosition.timestamp) {
 			console.log(
 				`[OLD RT INJECTOR] ${vehiclePosition.vehicle.id} Updated position for existing WS vehicle using old GTFS-RT (${oldVehiclePosition.vehicle.timestamp - vehiclePosition.timestamp}s newer)`,
 			);
@@ -130,16 +118,14 @@ setInterval(async () => {
 		const parcNumber = vehiclePosition.vehicle.vehicle.id;
 		const vehicleTrip = vehiclePosition.vehicle.trip!;
 		if (
-			now
-				.since(Temporal.Instant.fromEpochSeconds(vehiclePosition.vehicle.timestamp))
-				.total("minutes") > 5
+			now.since(Temporal.Instant.fromEpochMilliseconds(vehiclePosition.vehicle.timestamp * 1000)).total("minutes") > 5
 		)
 			continue;
 
 		const lastPosition = lastPositionCache.get(parcNumber);
 		if (
 			typeof lastPosition === "undefined" ||
-			now.since(Temporal.Instant.fromEpochSeconds(lastPosition.recordedAt)).total("minutes") > 10
+			now.since(Temporal.Instant.fromEpochMilliseconds(lastPosition.recordedAt * 1000)).total("minutes") > 10
 		) {
 			let trip = gtfsResource.trips.get(vehicleTrip.tripId);
 			if (
@@ -158,9 +144,7 @@ setInterval(async () => {
 				if (tripUpdate) {
 					tripUpdates.set(trip.tripId, {
 						stopTimeUpdate: tripUpdate.tripUpdate.stopTimeUpdate?.map((stu) => ({
-							arrival: stu.arrival
-								? { delay: stu.arrival.delay ?? undefined, time: stu.arrival.time }
-								: undefined,
+							arrival: stu.arrival ? { delay: stu.arrival.delay ?? undefined, time: stu.arrival.time } : undefined,
 							departure: stu.departure
 								? { delay: stu.departure.delay ?? undefined, time: stu.departure.time }
 								: undefined,
@@ -191,7 +175,7 @@ setInterval(async () => {
 					bearing: vehiclePosition.vehicle.position.bearing,
 				},
 				...(trip ? { stopId: vehiclePosition.vehicle.stopId } : {}),
-				timestamp: vehiclePosition.vehicle.timestamp, // see comment near if now.since...
+				timestamp: vehiclePosition.vehicle.timestamp,
 				vehicle: { id: parcNumber },
 				...(trip
 					? { trip: { ...trip, scheduleRelationship: "SCHEDULED" } }
@@ -228,31 +212,20 @@ vehicleProvider.onclose((error) => {
 const lastPositionCache = new Map<string, { position: Position; recordedAt: number }>();
 
 const isCommercialTrip = (destination: string) =>
-	![
-		"Dépôt 2 Rivières",
-		"Dépôt St-Julien",
-		"ROUEN DEPOT",
-		"Dépôt TNI Carnot",
-		"Dépôt Lincoln",
-	].includes(destination);
+	!["Dépôt 2 Rivières", "Dépôt St-Julien", "ROUEN DEPOT", "Dépôt TNI Carnot", "Dépôt Lincoln"].includes(destination);
 
 async function handleVehicle(line: string, vehicle: Vehicle) {
 	const vehicleId = vehicle.VehicleRef.split(":")[3]!;
-	console.debug(
-		`[${line}] ${vehicleId}\t${vehicle.VJourneyId}\t${vehicle.LineNumber} -> ${vehicle.Destination}`,
-	);
+	console.debug(`[${line}] ${vehicleId}\t${vehicle.VJourneyId}\t${vehicle.LineNumber} -> ${vehicle.Destination}`);
 
 	const operationCode = hubResource.courseOperation.get(vehicle.VJourneyId);
 	if (typeof operationCode === "undefined")
 		return console.warn(`Unknown operation code for journey id '${vehicle.VJourneyId}'.`);
 
 	const trip = gtfsResource.trips.get(operationCode);
-	if (typeof trip === "undefined")
-		return console.warn(`Unknown trip for operation code '${operationCode}'.`);
+	if (typeof trip === "undefined") return console.warn(`Unknown trip for operation code '${operationCode}'.`);
 
-	const oldVehiclePosition = oldVehiclePositions.find(
-		(vp) => vp.vehicle.vehicle.id === vehicleId,
-	)?.vehicle;
+	const oldVehiclePosition = oldVehiclePositions.find((vp) => vp.vehicle.vehicle.id === vehicleId)?.vehicle;
 	const position: Position = {
 		latitude: vehicle.Latitude,
 		longitude: vehicle.Longitude,
@@ -260,43 +233,36 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 	};
 
 	const existingVehicle = vehiclePositions.get(vehicleId);
-	let recordedAt = Temporal.PlainDateTime.from(vehicle.RecordedAtTime).toZonedDateTime(
-		"Europe/Paris",
-	).epochSeconds;
+
+	let recordedAt = Temporal.PlainDateTime.from(vehicle.RecordedAtTime).toZonedDateTime("Europe/Paris").toInstant();
+	const recordedAtEpoch = () => Math.floor(recordedAt.epochMilliseconds / 1000);
 
 	const lastPosition = lastPositionCache.get(vehicleId);
 	if (typeof lastPosition !== "undefined") {
-		if (recordedAt < lastPosition.recordedAt || recordedAt < (existingVehicle?.timestamp ?? 0)) {
+		if (recordedAtEpoch() < lastPosition.recordedAt || recordedAtEpoch() < (existingVehicle?.timestamp ?? 0)) {
 			console.warn("\t\t  The position of this entry is older than the cached position, ignoring.");
 			return;
 		}
-		if (
-			vehicle.Latitude === lastPosition.position.latitude &&
-			vehicle.Longitude === lastPosition.position.longitude
-		) {
-			recordedAt = lastPosition.recordedAt;
+		if (vehicle.Latitude === lastPosition.position.latitude && vehicle.Longitude === lastPosition.position.longitude) {
+			recordedAt = Temporal.Instant.fromEpochMilliseconds(lastPosition.recordedAt * 1000);
 		}
-		if (
-			Temporal.Now.instant().since(Temporal.Instant.fromEpochSeconds(recordedAt)).total("minutes") >
-			10
-		) {
+		if (Temporal.Now.instant().since(recordedAt).total("minutes") > 10) {
 			return;
 		}
 	}
 
-	lastPositionCache.set(vehicleId, { position, recordedAt });
+	lastPositionCache.set(vehicleId, { position, recordedAt: recordedAtEpoch() });
 
 	if (isCommercialTrip(vehicle.Destination) && isSus(vehicle, trip, oldVehiclePosition)) {
 		if (existingVehicle) {
 			existingVehicle.position = position;
-			existingVehicle.timestamp = recordedAt;
+			existingVehicle.timestamp = recordedAtEpoch();
 		}
 		return;
 	}
 
 	const monitoredStop = vehicle.StopTimeList.at(0);
-	if (typeof monitoredStop === "undefined")
-		return console.warn("No monitored stop for this vehicle, ignoring.");
+	if (typeof monitoredStop === "undefined") return console.warn("No monitored stop for this vehicle, ignoring.");
 
 	const vehicleDescriptor: VehicleDescriptor = {
 		id: vehicleId,
@@ -316,8 +282,7 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 		tripUpdates.set(trip.tripId, {
 			stopTimeUpdate: vehicle.StopTimeList.flatMap((stopTime) => {
 				const partialStopTimeUpdate = {
-					// Stop sequences are broken af
-					// stopSequence: stopTime.StopPointOrder,
+					stopSequence: stopTime.StopPointOrder,
 					stopId: stopTime.StopPointId.toString(),
 				};
 
@@ -326,20 +291,14 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 				}
 
 				if (!stopTime.IsMonitored) {
-					// 2025-04-06 : let's assume we "forget" those, just like the official TU
 					return [];
-					// return { ...partialStopTimeUpdate, scheduleRelationship: "NO_DATA" };
 				}
 
-				const expectedTime = Temporal.ZonedDateTime.from(
-					`${stopTime.ExpectedTime}[Europe/Paris]`,
-				).epochSeconds;
-				const aimedTime = Temporal.ZonedDateTime.from(
-					`${stopTime.AimedTime}[Europe/Paris]`,
-				).epochSeconds;
+				const aimedTime = Temporal.PlainDateTime.from(stopTime.AimedTime).toZonedDateTime("Europe/Paris");
+				const expectedTime = Temporal.Instant.from(stopTime.ExpectedTime).toZonedDateTimeISO("Europe/Paris");
 				const event: StopTimeEvent = {
-					delay: expectedTime - aimedTime,
-					time: expectedTime,
+					delay: expectedTime.since(aimedTime).total("seconds"),
+					time: Math.floor(expectedTime.epochMilliseconds / 1000),
 				};
 
 				return {
@@ -349,7 +308,7 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 					scheduleRelationship: "SCHEDULED",
 				};
 			}),
-			timestamp: recordedAt,
+			timestamp: recordedAtEpoch(),
 			trip: tripDescriptor,
 			vehicle: vehicleDescriptor,
 		});
@@ -370,7 +329,7 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 			? await getVehicleOccupancyStatus(vehicleId)
 			: "NOT_BOARDABLE",
 		position,
-		timestamp: recordedAt,
+		timestamp: recordedAtEpoch(),
 		trip: tripDescriptor,
 		vehicle: vehicleDescriptor,
 	});

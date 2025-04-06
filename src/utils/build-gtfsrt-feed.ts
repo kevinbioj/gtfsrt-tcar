@@ -4,7 +4,7 @@ export function buildGtfsRtFeed(items: Iterable<TripUpdate | VehiclePosition>) {
 	const header: Header = {
 		gtfsRealtimeVersion: "2.0",
 		incrementality: "FULL_DATASET",
-		timestamp: Temporal.Now.instant().epochSeconds,
+		timestamp: Math.floor(Temporal.Now.instant().epochMilliseconds / 1000),
 	};
 
 	return {

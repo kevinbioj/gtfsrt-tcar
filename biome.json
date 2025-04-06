@@ -27,7 +27,7 @@
 	},
 	"javascript": {
 		"formatter": {
-			"lineWidth": 100,
+			"lineWidth": 120,
 			"quoteStyle": "double"
 		}
 	}

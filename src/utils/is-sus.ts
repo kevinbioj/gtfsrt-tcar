@@ -8,16 +8,11 @@ export function isSus(vehicle: Vehicle, trip: Trip, oldVehiclePosition?: Vehicle
 
 	if (typeof lineData !== "undefined") {
 		if (lineData.code !== trip.routeId || vehicle.Direction - 1 !== trip.directionId) {
-			console.warn(
-				"\t\t  Something looks wrong. Are the GTFS and HUB resources up-to-date? Definitely sus!",
-			);
+			console.warn("\t\t  Something looks wrong. Are the GTFS and HUB resources up-to-date? Definitely sus!");
 			return true;
 		}
 
-		if (
-			typeof oldVehiclePosition === "undefined" &&
-			!lineData.destinations.includes(vehicle.Destination)
-		) {
+		if (typeof oldVehiclePosition === "undefined" && !lineData.destinations.includes(vehicle.Destination)) {
 			console.warn("\t\t  Missing from old GTFS-RT, and destination is unknown: probably sus.");
 			return true;
 		}
@@ -32,9 +27,7 @@ export function isSus(vehicle: Vehicle, trip: Trip, oldVehiclePosition?: Vehicle
 		}
 
 		if (typeof lineData !== "undefined" && !lineData.destinations.includes(vehicle.Destination)) {
-			console.warn(
-				"\t\t  Match between matched trip and old GTFS-RT, but destination is unknown: probably not sus.",
-			);
+			console.warn("\t\t  Match between matched trip and old GTFS-RT, but destination is unknown: probably not sus.");
 			return false;
 		}
 	}
@@ -45,9 +38,7 @@ export function isSus(vehicle: Vehicle, trip: Trip, oldVehiclePosition?: Vehicle
 			!lineData.destinations.includes(vehicle.Destination) &&
 			(trip.routeId !== oldTrip.routeId || trip.directionId !== (oldTrip.directionId ?? 0))
 		) {
-			console.warn(
-				"\t\t  Mismatch between matched trip and old GTFS-RT, plus destination is unknown: probably sus.",
-			);
+			console.warn("\t\t  Mismatch between matched trip and old GTFS-RT, plus destination is unknown: probably sus.");
 			return true;
 		}
 	}

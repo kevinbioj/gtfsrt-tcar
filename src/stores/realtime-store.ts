@@ -6,7 +6,7 @@ export function createRealtimeStore(sweepInterval: number, staleThreshold: numbe
 
 	setInterval(() => {
 		console.log("|> Sweeping outdated trip update and vehicle position entries.");
-		const now = Temporal.Now.instant().epochSeconds;
+		const now = Math.floor(Temporal.Now.instant().epochMilliseconds / 1000);
 
 		for (const [key, tripUpdate] of tripUpdates) {
 			const lastStopTime = tripUpdate.stopTimeUpdate.at(-1);

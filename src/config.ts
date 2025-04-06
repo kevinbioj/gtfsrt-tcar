@@ -1,11 +1,8 @@
 //- Feed URLs
-export const GTFS_FEED =
-	"https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=GTFS";
-export const HUB_FEED =
-	"https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=HUB";
+export const GTFS_FEED = "https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=GTFS";
+export const HUB_FEED = "https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=HUB";
 export const VEHICLE_WS = "https://api.mrn.cityway.fr/sdh/vehicles";
-export const OLD_GTFSRT_VP_FEED =
-	"https://tsi.tcar.cityway.fr/ftp/gtfsrt/Astuce.VehiclePosition.pb";
+export const OLD_GTFSRT_VP_FEED = "https://tsi.tcar.cityway.fr/ftp/gtfsrt/Astuce.VehiclePosition.pb";
 export const OLD_GTFSRT_TU_FEED = "https://tsi.tcar.cityway.fr/ftp/gtfsrt/Astuce.TripUpdate.pb";
 
 //- Monitored lines - api.mrn.cityway.fr
@@ -82,13 +79,7 @@ export const LINES_DATASET = new Map([
 		"Métro",
 		{
 			code: "90",
-			destinations: [
-				"Boulingrin B",
-				"Boulingrin C",
-				"Théâtre des Arts",
-				"Georges Braque",
-				"Technopôle",
-			],
+			destinations: ["Boulingrin B", "Boulingrin C", "Théâtre des Arts", "Georges Braque", "Technopôle"],
 		},
 	],
 	["T1", { code: "91", destinations: ["Mont aux Malades", "CHU Ch. Nicolle"] }],
