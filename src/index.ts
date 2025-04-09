@@ -153,15 +153,18 @@ setInterval(async () => {
 				const tripUpdate = oldTripUpdates.find((t) => t.tripUpdate.trip.tripId === trip.tripId);
 				if (tripUpdate) {
 					tripUpdates.set(trip.tripId, {
-						stopTimeUpdate: tripUpdate.tripUpdate.stopTimeUpdate?.map((stu) => ({
-							arrival: stu.arrival ? { delay: stu.arrival.delay ?? undefined, time: stu.arrival.time } : undefined,
-							departure: stu.departure
-								? { delay: stu.departure.delay ?? undefined, time: stu.departure.time }
-								: undefined,
-							stopId: stu.stopId,
-							stopSequence: stu.stopSequence,
-							scheduleRelationship: stu.scheduleRelationship,
-						})),
+						stopTimeUpdate: tripUpdate.tripUpdate.stopTimeUpdate?.map((stu) => {
+							const matchingStopId = gtfsResource.stopIdsByCode.get(stu.stopId);
+							return {
+								arrival: stu.arrival ? { delay: stu.arrival.delay ?? undefined, time: stu.arrival.time } : undefined,
+								departure: stu.departure
+									? { delay: stu.departure.delay ?? undefined, time: stu.departure.time }
+									: undefined,
+								stopId: matchingStopId!,
+								stopSequence: stu.stopSequence,
+								scheduleRelationship: stu.scheduleRelationship,
+							};
+						}),
 						timestamp: tripUpdate.tripUpdate.timestamp,
 						trip: {
 							tripId: tripUpdate.tripUpdate.trip.tripId,
