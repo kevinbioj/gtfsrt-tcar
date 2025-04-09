@@ -13,12 +13,21 @@ export async function importGtfs(href: string) {
 	const { directory, version } = await downloadArchive(href);
 	return {
 		trips: await loadTrips(directory),
+		stopIdsByCode: await loadStopIdsByCode(directory),
 		loadedAt: Date.now(),
 		version,
 	};
 }
 
 // ---
+
+async function loadStopIdsByCode(directory: string) {
+	const stopIdsByCode = new Map<string, string>();
+	await loadCsv<"stop_id" | "stop_code">(join(directory, "stops.txt"), (record) => {
+		stopIdsByCode.set(record.stop_code, record.stop_id);
+	});
+	return stopIdsByCode;
+}
 
 async function loadTrips(directory: string) {
 	const trips = new Map<string, Trip>();

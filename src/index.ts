@@ -102,6 +102,18 @@ setInterval(async () => {
 			console.log(
 				`[OLD RT INJECTOR] ${vehiclePosition.vehicle.id} Updated position for existing WS vehicle using old GTFS-RT (${oldVehiclePosition.vehicle.timestamp - vehiclePosition.timestamp}s newer)`,
 			);
+
+			const currentStopId =
+				typeof oldVehiclePosition.vehicle.stopId !== "undefined"
+					? gtfsResource.stopIdsByCode.get(oldVehiclePosition.vehicle.stopId)
+					: undefined;
+
+			if (typeof currentStopId !== "undefined") {
+				vehiclePosition.stopId = currentStopId;
+				vehiclePosition.currentStopSequence = oldVehiclePosition.vehicle.currentStopSequence;
+				vehiclePosition.currentStatus = oldVehiclePosition.vehicle.currentStatus;
+			}
+
 			vehiclePosition.position = {
 				latitude: oldVehiclePosition.vehicle.position.latitude,
 				longitude: oldVehiclePosition.vehicle.position.longitude,
@@ -164,6 +176,11 @@ setInterval(async () => {
 				}
 			}
 
+			const currentStopId =
+				typeof vehiclePosition.vehicle.stopId !== "undefined"
+					? gtfsResource.stopIdsByCode.get(vehiclePosition.vehicle.stopId)
+					: undefined;
+
 			vehiclePositions.set(parcNumber, {
 				...(trip ? { currentStatus: vehiclePosition.vehicle.currentStatus } : {}),
 				occupancyStatus: await getVehicleOccupancyStatus(parcNumber),
@@ -172,9 +189,7 @@ setInterval(async () => {
 					longitude: vehiclePosition.vehicle.position.longitude,
 					bearing: vehiclePosition.vehicle.position.bearing,
 				},
-				...(trip
-					? { stopId: vehiclePosition.vehicle.stopId, currentStopSequence: vehiclePosition.vehicle.currentStopSequence }
-					: {}),
+				...(trip ? { stopId: currentStopId, currentStopSequence: vehiclePosition.vehicle.currentStopSequence } : {}),
 				timestamp: vehiclePosition.vehicle.timestamp,
 				vehicle: { id: parcNumber },
 				...(trip
