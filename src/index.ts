@@ -217,11 +217,11 @@ setInterval(async () => {
 // II - Connecting to the vehicle service
 
 console.log("|> Connecting to the vehicle provider.");
-const vehicleProvider = await createVehicleProvider(VEHICLE_WS, MONITORED_LINES, handleVehicle);
-vehicleProvider.onclose((error) => {
+let vehicleProvider = await createVehicleProvider(VEHICLE_WS, MONITORED_LINES, handleVehicle);
+vehicleProvider.onclose(async (error) => {
 	if (error) {
-		console.error("|> Closing GTFS-RT producer down due to vehicle provider error.", error);
-		process.exit(1);
+		console.error("|> Creating another connection because of WebSocket error:", error);
+		vehicleProvider = await createVehicleProvider(VEHICLE_WS, MONITORED_LINES, handleVehicle);
 	}
 });
 

@@ -41,7 +41,12 @@ export async function createVehicleProvider(
 	lines: string[],
 	onVehicle: (line: string, vehicle: Vehicle) => void,
 ) {
-	const connection = new HubConnectionBuilder().withUrl(href).build();
+	const connection = new HubConnectionBuilder()
+		.withAutomaticReconnect()
+		.withKeepAliveInterval(60_000)
+		.withServerTimeout(60_000)
+		.withUrl(href)
+		.build();
 
 	try {
 		await connection.start();
