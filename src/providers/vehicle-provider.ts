@@ -48,12 +48,17 @@ export async function createVehicleProvider(
 		.withUrl(href)
 		.build();
 
-	try {
-		await connection.start();
+	const registerLines = async () => {
 		for (const line of lines) {
 			await connection.invoke("Join", `#lineId:${line}:1`);
 			await connection.invoke("Join", `#lineId:${line}:2`);
 		}
+	};
+
+	try {
+		await connection.start();
+		await registerLines();
+		connection.onreconnected(registerLines);
 	} catch (cause) {
 		throw new Error("Unable to connect to the vehicle provider.", { cause });
 	}
