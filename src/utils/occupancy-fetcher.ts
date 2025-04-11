@@ -20,7 +20,8 @@ const getFromCache = (vehicleNumber: string) => {
 };
 
 export async function getVehicleOccupancyStatus(vehicleNumber: string) {
-	if (typeof lastFetchAt === "undefined" || Date.now() - lastFetchAt > 60_000) {
+	if (typeof lastFetchAt === "undefined" || Date.now() - lastFetchAt > 30_000) {
+		lastFetchAt = Date.now();
 		cached = await fetch(url)
 			.then((response) => response.text())
 			.then((document) => {
@@ -33,7 +34,6 @@ export async function getVehicleOccupancyStatus(vehicleNumber: string) {
 				console.error(error);
 				return undefined;
 			});
-		if (typeof cached !== "undefined") lastFetchAt = Date.now();
 	}
 
 	if (typeof cached === "undefined") return getFromCache(vehicleNumber);
