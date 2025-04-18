@@ -134,83 +134,84 @@ setInterval(async () => {
 
 		const lastPosition = lastPositionCache.get(parcNumber);
 		if (
-			typeof lastPosition === "undefined" ||
-			now.since(Temporal.Instant.fromEpochMilliseconds(lastPosition.recordedAt * 1000)).total("minutes") > 10
+			typeof lastPosition !== "undefined" &&
+			now.since(Temporal.Instant.fromEpochMilliseconds(lastPosition.recordedAt * 1000)).total("minutes") < 10
+		)
+			continue;
+
+		let trip = gtfsResource.trips.get(vehicleTrip.tripId);
+		if (
+			typeof trip === "undefined" ||
+			trip.routeId !== vehicleTrip.routeId ||
+			trip.directionId !== vehicleTrip.directionId
 		) {
-			let trip = gtfsResource.trips.get(vehicleTrip.tripId);
-			if (
-				typeof trip === "undefined" ||
-				trip.routeId !== vehicleTrip.routeId ||
-				trip.directionId !== vehicleTrip.directionId
-			) {
-				console.warn(
-					`[OLD RT INJECTOR] ${parcNumber}\tUnable to match with current GTFS resource, vehicle won't have trip data.`,
-				);
-				trip = undefined;
-			}
-
-			if (trip && !tripUpdates.has(trip.tripId)) {
-				const tripUpdate = oldTripUpdates.find((t) => t.tripUpdate.trip.tripId === trip.tripId);
-				if (tripUpdate) {
-					tripUpdates.set(trip.tripId, {
-						stopTimeUpdate: tripUpdate.tripUpdate.stopTimeUpdate?.map((stu) => {
-							const matchingStopId = gtfsResource.stopIdsByCode.get(stu.stopId);
-							return {
-								arrival: stu.arrival ? { delay: stu.arrival.delay ?? undefined, time: stu.arrival.time } : undefined,
-								departure: stu.departure
-									? { delay: stu.departure.delay ?? undefined, time: stu.departure.time }
-									: undefined,
-								stopId: matchingStopId!,
-								stopSequence: stu.stopSequence,
-								scheduleRelationship: stu.scheduleRelationship,
-							};
-						}),
-						timestamp: tripUpdate.tripUpdate.timestamp,
-						trip: {
-							tripId: tripUpdate.tripUpdate.trip.tripId,
-							routeId: tripUpdate.tripUpdate.trip.routeId,
-							directionId: tripUpdate.tripUpdate.trip.directionId ?? 0,
-							scheduleRelationship: tripUpdate.tripUpdate.trip.scheduleRelationship ?? "SCHEDULED",
-						},
-						vehicle: {
-							id: vehiclePosition.vehicle.vehicle.id,
-						},
-					});
-				}
-			}
-
-			const currentStopId =
-				typeof vehiclePosition.vehicle.stopId !== "undefined"
-					? gtfsResource.stopIdsByCode.get(vehiclePosition.vehicle.stopId)
-					: undefined;
-
-			vehiclePositions.set(parcNumber, {
-				...(trip ? { currentStatus: vehiclePosition.vehicle.currentStatus } : {}),
-				occupancyStatus: await getVehicleOccupancyStatus(parcNumber),
-				position: {
-					latitude: vehiclePosition.vehicle.position.latitude,
-					longitude: vehiclePosition.vehicle.position.longitude,
-					bearing: vehiclePosition.vehicle.position.bearing,
-				},
-				...(trip ? { stopId: currentStopId, currentStopSequence: vehiclePosition.vehicle.currentStopSequence } : {}),
-				timestamp: vehiclePosition.vehicle.timestamp,
-				vehicle: { id: parcNumber },
-				...(trip
-					? { trip: { ...trip, scheduleRelationship: "SCHEDULED" } }
-					: {
-							trip: {
-								tripId: `${parcNumber}_OLDTRIP`,
-								routeId: vehicleTrip.routeId,
-								directionId: vehicleTrip.directionId,
-								scheduleRelationship: "UNSCHEDULED",
-							},
-						}),
-			});
-
 			console.warn(
-				`[OLD RT INJECTOR] ${parcNumber}\tLacking in new real-time source, injecting (route ${trip?.routeId ?? "NONE"}).`,
+				`[OLD RT INJECTOR] ${parcNumber}\tUnable to match with current GTFS resource, vehicle won't have trip data.`,
 			);
+			trip = undefined;
 		}
+
+		if (trip) {
+			const tripUpdate = oldTripUpdates.find((t) => t.tripUpdate.trip.tripId === trip.tripId);
+			if (tripUpdate) {
+				tripUpdates.set(trip.tripId, {
+					stopTimeUpdate: tripUpdate.tripUpdate.stopTimeUpdate?.map((stu) => {
+						const matchingStopId = gtfsResource.stopIdsByCode.get(stu.stopId);
+						return {
+							arrival: stu.arrival ? { delay: stu.arrival.delay ?? undefined, time: stu.arrival.time } : undefined,
+							departure: stu.departure
+								? { delay: stu.departure.delay ?? undefined, time: stu.departure.time }
+								: undefined,
+							stopId: matchingStopId!,
+							stopSequence: stu.stopSequence,
+							scheduleRelationship: stu.scheduleRelationship,
+						};
+					}),
+					timestamp: tripUpdate.tripUpdate.timestamp,
+					trip: {
+						tripId: tripUpdate.tripUpdate.trip.tripId,
+						routeId: tripUpdate.tripUpdate.trip.routeId,
+						directionId: tripUpdate.tripUpdate.trip.directionId ?? 0,
+						scheduleRelationship: tripUpdate.tripUpdate.trip.scheduleRelationship ?? "SCHEDULED",
+					},
+					vehicle: {
+						id: vehiclePosition.vehicle.vehicle.id,
+					},
+				});
+			}
+		}
+
+		const currentStopId =
+			typeof vehiclePosition.vehicle.stopId !== "undefined"
+				? gtfsResource.stopIdsByCode.get(vehiclePosition.vehicle.stopId)
+				: undefined;
+
+		vehiclePositions.set(parcNumber, {
+			...(trip ? { currentStatus: vehiclePosition.vehicle.currentStatus } : {}),
+			occupancyStatus: await getVehicleOccupancyStatus(parcNumber),
+			position: {
+				latitude: vehiclePosition.vehicle.position.latitude,
+				longitude: vehiclePosition.vehicle.position.longitude,
+				bearing: vehiclePosition.vehicle.position.bearing,
+			},
+			...(trip ? { stopId: currentStopId, currentStopSequence: vehiclePosition.vehicle.currentStopSequence } : {}),
+			timestamp: vehiclePosition.vehicle.timestamp,
+			vehicle: { id: parcNumber },
+			...(trip
+				? { trip: { ...trip, scheduleRelationship: "SCHEDULED" } }
+				: {
+						trip: {
+							tripId: `${parcNumber}_OLDTRIP`,
+							routeId: vehicleTrip.routeId,
+							directionId: vehicleTrip.directionId,
+							scheduleRelationship: "UNSCHEDULED",
+						},
+					}),
+		});
+
+		console.warn(
+			`[OLD RT INJECTOR] ${parcNumber}\tLacking in new real-time source, injecting (route ${trip?.routeId ?? "NONE"}).`,
+		);
 	}
 }, 10 * 1_000);
 
