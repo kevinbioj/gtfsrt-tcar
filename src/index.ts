@@ -108,7 +108,11 @@ setInterval(async () => {
 					? gtfsResource.stopIdsByCode.get(oldVehiclePosition.vehicle.stopId)
 					: undefined;
 
-			if (typeof currentStopId !== "undefined") {
+			if (
+				typeof currentStopId !== "undefined" &&
+				oldVehiclePosition.vehicle.trip?.routeId === vehiclePosition.trip?.routeId &&
+				(oldVehiclePosition.vehicle.trip?.directionId ?? 0) === vehiclePosition.trip?.directionId
+			) {
 				vehiclePosition.stopId = currentStopId;
 				vehiclePosition.currentStopSequence = oldVehiclePosition.vehicle.currentStopSequence;
 				vehiclePosition.currentStatus = oldVehiclePosition.vehicle.currentStatus;
