@@ -336,17 +336,16 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 		});
 	}
 
+	let currentStop = (vehicle.VehicleAtStop ? monitoredStop : vehicle.StopTimeList.at(1)) ?? monitoredStop;
+	if (monitoredStop.StopPointOrder === 1 && Temporal.Instant.compare(recordedAt, monitoredStop.ExpectedTime) < 0) {
+		currentStop = monitoredStop;
+	}
+
 	vehiclePositions.set(vehicleId, {
 		...(tripDescriptor
 			? {
-					currentStatus: vehicle.VehicleAtStop
-						? "STOPPED_AT"
-						: monitoredStop.WaitingTime < 1
-							? "INCOMING_AT"
-							: "IN_TRANSIT_TO",
-					stopId: (
-						vehicle.StopTimeList.at(vehicle.VehicleAtStop ? 0 : 1)?.StopPointId ?? monitoredStop.StopPointId
-					).toString(),
+					currentStatus: vehicle.VehicleAtStop ? "STOPPED_AT" : "IN_TRANSIT_TO",
+					stopId: currentStop.ExpectedTime,
 				}
 			: {}),
 		occupancyStatus: isCommercialTrip(vehicle.Destination)
