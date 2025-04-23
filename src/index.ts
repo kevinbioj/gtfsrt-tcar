@@ -344,7 +344,9 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 						: monitoredStop.WaitingTime < 1
 							? "INCOMING_AT"
 							: "IN_TRANSIT_TO",
-					stopId: monitoredStop.StopPointId.toString(),
+					stopId: (
+						vehicle.StopTimeList.at(vehicle.VehicleAtStop ? 0 : 1)?.StopPointId ?? monitoredStop.StopPointId
+					).toString(),
 				}
 			: {}),
 		occupancyStatus: isCommercialTrip(vehicle.Destination)
