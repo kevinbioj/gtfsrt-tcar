@@ -337,8 +337,13 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 	}
 
 	let currentStop = (vehicle.VehicleAtStop ? monitoredStop : vehicle.StopTimeList.at(1)) ?? monitoredStop;
-	if (monitoredStop.StopPointOrder === 1 && Temporal.Instant.compare(recordedAt, monitoredStop.ExpectedTime) < 0) {
-		currentStop = monitoredStop;
+	if (monitoredStop.StopPointOrder === 1) {
+		const departureTime = monitoredStop.IsMonitored
+			? Temporal.Instant.from(monitoredStop.ExpectedTime)
+			: Temporal.PlainDate.from(monitoredStop.AimedTime).toZonedDateTime("Europe/Paris").toInstant();
+		if (Temporal.Instant.compare(recordedAt, departureTime) < 0) {
+			currentStop = monitoredStop;
+		}
 	}
 
 	vehiclePositions.set(vehicleId, {
