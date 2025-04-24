@@ -336,15 +336,9 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 		});
 	}
 
-	let currentStop = (vehicle.VehicleAtStop ? monitoredStop : vehicle.StopTimeList.at(1)) ?? monitoredStop;
-	if (monitoredStop.StopPointOrder === 1) {
-		const departureTime = monitoredStop.IsMonitored
-			? Temporal.Instant.from(monitoredStop.ExpectedTime)
-			: Temporal.PlainDate.from(monitoredStop.AimedTime).toZonedDateTime("Europe/Paris").toInstant();
-		if (Temporal.Instant.compare(recordedAt, departureTime) < 0) {
-			currentStop = monitoredStop;
-		}
-	}
+	const currentStop =
+		(vehicle.VehicleAtStop || monitoredStop.StopPointOrder === 1 ? monitoredStop : vehicle.StopTimeList.at(1)) ??
+		monitoredStop;
 
 	vehiclePositions.set(vehicleId, {
 		...(tripDescriptor
