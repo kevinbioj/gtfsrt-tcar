@@ -344,7 +344,7 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 		...(tripDescriptor
 			? {
 					currentStatus: vehicle.VehicleAtStop ? "STOPPED_AT" : "IN_TRANSIT_TO",
-					stopId: currentStop.ExpectedTime,
+					stopId: currentStop.StopPointId.toString(),
 				}
 			: {}),
 		occupancyStatus: isCommercialTrip(vehicle.Destination)
