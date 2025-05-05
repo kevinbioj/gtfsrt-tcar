@@ -313,7 +313,7 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 				}
 
 				if (!stopTime.IsMonitored) {
-					return [];
+					return { ...partialStopTimeUpdate, scheduleRelationship: "NO_DATA" };
 				}
 
 				const aimedTime = Temporal.PlainDateTime.from(stopTime.AimedTime).toZonedDateTime("Europe/Paris");
