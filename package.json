@@ -13,21 +13,21 @@
 		"lint": "biome lint",
 		"format": "biome format --write"
 	},
-	"packageManager": "pnpm@10.7.1",
+	"packageManager": "pnpm@10.14.0+sha512.ad27a79641b49c3e481a16a805baa71817a04bbe06a38d17e60e2eaee83f6a146c6a688125f5792e48dd5ba30e7da52a5cda4c3992b9ccf333f9ce223af84748",
 	"devDependencies": {
-		"@biomejs/biome": "1.9.4",
+		"@biomejs/biome": "2.1.4",
 		"@types/decompress": "^4.2.7",
-		"@types/node": "^22.10.5",
-		"tsx": "^4.19.3",
-		"typescript": "^5.7.3"
+		"@types/node": "^24.2.1",
+		"tsx": "^4.20.4",
+		"typescript": "^5.9.2"
 	},
 	"dependencies": {
-		"@hono/node-server": "^1.14.0",
-		"@microsoft/signalr": "^8.0.7",
-		"csv-parse": "^5.6.0",
+		"@hono/node-server": "^1.18.2",
+		"@microsoft/signalr": "^9.0.6",
+		"csv-parse": "^6.1.0",
 		"decompress": "^4.2.1",
-		"hono": "^4.7.5",
-		"protobufjs": "^7.4.0",
+		"hono": "^4.9.1",
+		"protobufjs": "^7.5.3",
 		"temporal-polyfill": "^0.3.0"
 	}
 }

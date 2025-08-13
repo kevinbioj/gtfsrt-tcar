@@ -1,0 +1,8 @@
+services:
+  producer:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    container_name: gtfsrt-tcar
+    ports:
+      - "127.0.0.1:50001:3000"

@@ -1,8 +1,8 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
+import { stream } from "hono/streaming";
 import "temporal-polyfill/global";
 
-import { stream } from "hono/streaming";
 import { GTFS_FEED, HUB_FEED, MONITORED_LINES, OLD_GTFSRT_TU_FEED, OLD_GTFSRT_VP_FEED, VEHICLE_WS } from "./config.js";
 import { type Vehicle, createVehicleProvider } from "./providers/vehicle-provider.js";
 import { fetchOldGtfsrt } from "./resources/fetch-old-gtfsrt.js";
@@ -376,4 +376,4 @@ hono.get("/vehicle-positions", (c) =>
 	}),
 );
 hono.get("/vehicle-positions.json", (c) => c.json(buildGtfsRtFeed(vehiclePositions.values())));
-serve({ fetch: hono.fetch, port: +(process.env.PORT ?? 8080) });
+serve({ fetch: hono.fetch, port: +(process.env.PORT ?? 3000) });
