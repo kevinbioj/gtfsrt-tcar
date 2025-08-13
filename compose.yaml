@@ -6,3 +6,4 @@ services:
     container_name: gtfsrt-tcar
     ports:
       - "127.0.0.1:50001:3000"
+    restart: unless-stopped
