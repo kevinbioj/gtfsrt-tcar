@@ -24,5 +24,5 @@ COPY --from=builder /app/dist/ ./dist
 
 COPY ./assets ./assets
 
-EXPOSE 8080
+EXPOSE 3000
 CMD ["node", "/app/dist/index.js"]
