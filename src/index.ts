@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import { stream } from "hono/streaming";
 import "temporal-polyfill/global";
 
-import { GTFS_FEED, HUB_FEED, MONITORED_LINES, OLD_GTFSRT_TU_FEED, OLD_GTFSRT_VP_FEED, VEHICLE_WS } from "./config.js";
+import { GTFS_FEED, HUB_FEED, MONITORED_LINES, VEHICLE_WS } from "./config.js";
 import { type Vehicle, createVehicleProvider } from "./providers/vehicle-provider.js";
 import { fetchOldGtfsrt } from "./resources/fetch-old-gtfsrt.js";
 import { importGtfs } from "./resources/import-gtfs.js";
@@ -77,19 +77,21 @@ const patchOldVehiclePositions = (data: VehiclePositionEntity[]) => {
 };
 
 console.log("|> Initiating backup GTFS-RT.");
-let oldVehiclePositions = patchOldVehiclePositions(
-	(await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[],
-);
-let oldTripUpdates = (await fetchOldGtfsrt(OLD_GTFSRT_TU_FEED)).entity as TripUpdateEntity[];
+let oldVehiclePositions: VehiclePositionEntity[] = [];
+// let oldVehiclePositions = patchOldVehiclePositions(
+// 	(await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[],
+// );
+let oldTripUpdates: TripUpdateEntity[] = [];
+// let oldTripUpdates = (await fetchOldGtfsrt(OLD_GTFSRT_TU_FEED)).entity as TripUpdateEntity[];
 setInterval(async () => {
-	try {
-		oldVehiclePositions = patchOldVehiclePositions(
-			(await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[],
-		);
-		oldTripUpdates = (await fetchOldGtfsrt(OLD_GTFSRT_TU_FEED)).entity as TripUpdateEntity[];
-	} catch (e) {
-		console.error("Failed to download old GTFS-RT resource.", e);
-	}
+	// try {
+	// 	oldVehiclePositions = patchOldVehiclePositions(
+	// 		(await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[],
+	// 	);
+	// 	oldTripUpdates = (await fetchOldGtfsrt(OLD_GTFSRT_TU_FEED)).entity as TripUpdateEntity[];
+	// } catch (e) {
+	// 	console.error("Failed to download old GTFS-RT resource.", e);
+	// }
 
 	//
 
