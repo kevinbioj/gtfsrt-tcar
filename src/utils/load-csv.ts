@@ -10,7 +10,14 @@ export function loadCsv<T extends string>(
 	options: LoadCsvOptions = {},
 ) {
 	const stream = createReadStream(path, { encoding: options.encoding });
-	const parser = stream.pipe(parse({ bom: true, columns: true, delimiter: options.delimiter, skipEmptyLines: true }));
+	const parser = stream.pipe(
+		parse({
+			bom: true,
+			columns: true,
+			delimiter: options.delimiter,
+			skipEmptyLines: true,
+		}),
+	);
 	parser.on("data", (dataRow) => {
 		onRecord(dataRow as CsvRecord<T>);
 	});

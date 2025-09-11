@@ -42,9 +42,9 @@ export async function createVehicleProvider(
 	onVehicle: (line: string, vehicle: Vehicle) => void,
 ) {
 	const connection = new HubConnectionBuilder()
-		.withAutomaticReconnect()
-		.withKeepAliveInterval(60_000)
-		.withServerTimeout(60_000)
+		.withAutomaticReconnect({ nextRetryDelayInMilliseconds: () => 10_000 })
+		.withKeepAliveInterval(10_000)
+		.withServerTimeout(30_000)
 		.withUrl(href)
 		.build();
 
@@ -67,7 +67,10 @@ export async function createVehicleProvider(
 		try {
 			onVehicle(line, JSON.parse(payload));
 		} catch (cause) {
-			const error = new Error("An error occurred in the vehicle handling function", { cause });
+			const error = new Error(
+				"An error occurred in the vehicle handling function",
+				{ cause },
+			);
 			console.error(error);
 		}
 	});

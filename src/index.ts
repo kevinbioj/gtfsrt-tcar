@@ -1,10 +1,22 @@
 import { serve } from "@hono/node-server";
+import type { HubConnection } from "@microsoft/signalr";
 import { Hono } from "hono";
 import { stream } from "hono/streaming";
+import { setTimeout } from "node:timers/promises";
 import "temporal-polyfill/global";
 
-import { GTFS_FEED, HUB_FEED, MONITORED_LINES, OLD_GTFSRT_TU_FEED, OLD_GTFSRT_VP_FEED, VEHICLE_WS } from "./config.js";
-import { type Vehicle, createVehicleProvider } from "./providers/vehicle-provider.js";
+import {
+	GTFS_FEED,
+	HUB_FEED,
+	MONITORED_LINES,
+	OLD_GTFSRT_TU_FEED,
+	OLD_GTFSRT_VP_FEED,
+	VEHICLE_WS,
+} from "./config.js";
+import {
+	type Vehicle,
+	createVehicleProvider,
+} from "./providers/vehicle-provider.js";
 import { fetchOldGtfsrt } from "./resources/fetch-old-gtfsrt.js";
 import { importGtfs } from "./resources/import-gtfs.js";
 import { importHub } from "./resources/import-hub.js";
@@ -31,7 +43,14 @@ console.log("==> GTFS-RT Producer - Transdev Rouen (TCAR) <==");
 // I - Bootstrapping static resources
 
 console.log("|> Creating realtime data store.");
-const { tripUpdates, vehiclePositions } = createRealtimeStore(60, REALTIME_STALE_TIME);
+const { tripUpdates, vehiclePositions } = createRealtimeStore(
+	60,
+	REALTIME_STALE_TIME,
+);
+const lastPositionCache = new Map<
+	string,
+	{ position: Position; recordedAt: number }
+>();
 
 console.log("|> Loading HUB resource.");
 let hubResource = await importHub(HUB_FEED);
@@ -71,6 +90,60 @@ setInterval(
 	5 * 60 * 1_000,
 );
 
+// II - Provide data via an API
+
+console.log("|> Publishing data on port 8080.");
+
+const hono = new Hono();
+hono.get("/trip-updates", (c) =>
+	stream(c, async (stream) => {
+		const data = encodeGtfsRt(buildGtfsRtFeed(tripUpdates.values()));
+		await stream.write(data);
+	}),
+);
+hono.get("/trip-updates.json", (c) =>
+	c.json(buildGtfsRtFeed(tripUpdates.values())),
+);
+hono.get("/vehicle-positions", (c) =>
+	stream(c, async (stream) => {
+		const data = encodeGtfsRt(buildGtfsRtFeed(vehiclePositions.values()));
+		await stream.write(data);
+	}),
+);
+hono.get("/vehicle-positions.json", (c) =>
+	c.json(buildGtfsRtFeed(vehiclePositions.values())),
+);
+serve({ fetch: hono.fetch, port: +(process.env.PORT ?? 3000) });
+
+// III - Connecting to the vehicle service
+
+console.log("|> Connecting to the vehicle provider.");
+let vehicleProvider: HubConnection | undefined;
+
+async function plugVehicleProvider() {
+	while (typeof vehicleProvider === "undefined") {
+		try {
+			vehicleProvider = await createVehicleProvider(
+				VEHICLE_WS,
+				MONITORED_LINES,
+				handleVehicle,
+			);
+
+			vehicleProvider.onclose((e) => {
+				console.error(`✗ Vehicle provider connection failed:`, e);
+				plugVehicleProvider();
+			});
+		} catch (e) {
+			console.error(`✗ Failed to connect to vehicle provider:`, e);
+			await setTimeout(10_000);
+		}
+	}
+}
+
+plugVehicleProvider();
+
+// IVa - Handle backup GTFS-RT
+
 const patchOldVehiclePositions = (data: VehiclePositionEntity[]) => {
 	for (const vehicle of data) vehicle.vehicle.timestamp += 3600 + 3600;
 	return data;
@@ -80,13 +153,17 @@ console.log("|> Initiating backup GTFS-RT.");
 let oldVehiclePositions = patchOldVehiclePositions(
 	(await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[],
 );
-let oldTripUpdates = (await fetchOldGtfsrt(OLD_GTFSRT_TU_FEED)).entity as TripUpdateEntity[];
+let oldTripUpdates = (await fetchOldGtfsrt(OLD_GTFSRT_TU_FEED))
+	.entity as TripUpdateEntity[];
+
 setInterval(async () => {
 	try {
 		oldVehiclePositions = patchOldVehiclePositions(
-			(await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[],
+			(await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED))
+				.entity as VehiclePositionEntity[],
 		);
-		oldTripUpdates = (await fetchOldGtfsrt(OLD_GTFSRT_TU_FEED)).entity as TripUpdateEntity[];
+		oldTripUpdates = (await fetchOldGtfsrt(OLD_GTFSRT_TU_FEED))
+			.entity as TripUpdateEntity[];
 	} catch (e) {
 		console.error("Failed to download old GTFS-RT resource.", e);
 	}
@@ -97,8 +174,13 @@ setInterval(async () => {
 
 	// For every active vehicle, we check if old GTFS-RT has a newer position.
 	for (const vehiclePosition of vehiclePositions.values()) {
-		const oldVehiclePosition = oldVehiclePositions.find((vp) => vp.vehicle.vehicle.id === vehiclePosition.vehicle.id);
-		if (typeof oldVehiclePosition !== "undefined" && oldVehiclePosition.vehicle.timestamp > vehiclePosition.timestamp) {
+		const oldVehiclePosition = oldVehiclePositions.find(
+			(vp) => vp.vehicle.vehicle.id === vehiclePosition.vehicle.id,
+		);
+		if (
+			typeof oldVehiclePosition !== "undefined" &&
+			oldVehiclePosition.vehicle.timestamp > vehiclePosition.timestamp
+		) {
 			console.log(
 				`[OLD RT INJECTOR] ${vehiclePosition.vehicle.id} Updated position for existing WS vehicle using old GTFS-RT (${oldVehiclePosition.vehicle.timestamp - vehiclePosition.timestamp}s newer)`,
 			);
@@ -110,12 +192,16 @@ setInterval(async () => {
 
 			if (
 				typeof currentStopId !== "undefined" &&
-				oldVehiclePosition.vehicle.trip?.routeId === vehiclePosition.trip?.routeId &&
-				(oldVehiclePosition.vehicle.trip?.directionId ?? 0) === vehiclePosition.trip?.directionId
+				oldVehiclePosition.vehicle.trip?.routeId ===
+					vehiclePosition.trip?.routeId &&
+				(oldVehiclePosition.vehicle.trip?.directionId ?? 0) ===
+					vehiclePosition.trip?.directionId
 			) {
 				vehiclePosition.stopId = currentStopId;
-				vehiclePosition.currentStopSequence = oldVehiclePosition.vehicle.currentStopSequence;
-				vehiclePosition.currentStatus = oldVehiclePosition.vehicle.currentStatus;
+				vehiclePosition.currentStopSequence =
+					oldVehiclePosition.vehicle.currentStopSequence;
+				vehiclePosition.currentStatus =
+					oldVehiclePosition.vehicle.currentStatus;
 			}
 
 			vehiclePosition.position = {
@@ -132,14 +218,26 @@ setInterval(async () => {
 		const parcNumber = vehiclePosition.vehicle.vehicle.id;
 		const vehicleTrip = vehiclePosition.vehicle.trip!;
 		if (
-			now.since(Temporal.Instant.fromEpochMilliseconds(vehiclePosition.vehicle.timestamp * 1000)).total("minutes") > 5
+			now
+				.since(
+					Temporal.Instant.fromEpochMilliseconds(
+						vehiclePosition.vehicle.timestamp * 1000,
+					),
+				)
+				.total("minutes") > 5
 		)
 			continue;
 
 		const lastPosition = lastPositionCache.get(parcNumber);
 		if (
 			typeof lastPosition !== "undefined" &&
-			now.since(Temporal.Instant.fromEpochMilliseconds(lastPosition.recordedAt * 1000)).total("minutes") < 10
+			now
+				.since(
+					Temporal.Instant.fromEpochMilliseconds(
+						lastPosition.recordedAt * 1000,
+					),
+				)
+				.total("minutes") < 10
 		)
 			continue;
 
@@ -156,15 +254,25 @@ setInterval(async () => {
 		}
 
 		if (trip) {
-			const tripUpdate = oldTripUpdates.find((t) => t.tripUpdate.trip.tripId === trip.tripId);
+			const tripUpdate = oldTripUpdates.find(
+				(t) => t.tripUpdate.trip.tripId === trip.tripId,
+			);
 			if (tripUpdate) {
 				tripUpdates.set(trip.tripId, {
 					stopTimeUpdate: tripUpdate.tripUpdate.stopTimeUpdate?.map((stu) => {
 						const matchingStopId = gtfsResource.stopIdsByCode.get(stu.stopId);
 						return {
-							arrival: stu.arrival ? { delay: stu.arrival.delay ?? undefined, time: stu.arrival.time } : undefined,
+							arrival: stu.arrival
+								? {
+										delay: stu.arrival.delay ?? undefined,
+										time: stu.arrival.time,
+									}
+								: undefined,
 							departure: stu.departure
-								? { delay: stu.departure.delay ?? undefined, time: stu.departure.time }
+								? {
+										delay: stu.departure.delay ?? undefined,
+										time: stu.departure.time,
+									}
 								: undefined,
 							stopId: matchingStopId!,
 							stopSequence: stu.stopSequence,
@@ -176,7 +284,8 @@ setInterval(async () => {
 						tripId: tripUpdate.tripUpdate.trip.tripId,
 						routeId: tripUpdate.tripUpdate.trip.routeId,
 						directionId: tripUpdate.tripUpdate.trip.directionId ?? 0,
-						scheduleRelationship: tripUpdate.tripUpdate.trip.scheduleRelationship ?? "SCHEDULED",
+						scheduleRelationship:
+							tripUpdate.tripUpdate.trip.scheduleRelationship ?? "SCHEDULED",
 					},
 					vehicle: {
 						id: vehiclePosition.vehicle.vehicle.id,
@@ -198,7 +307,12 @@ setInterval(async () => {
 				longitude: vehiclePosition.vehicle.position.longitude,
 				bearing: vehiclePosition.vehicle.position.bearing,
 			},
-			...(trip ? { stopId: currentStopId, currentStopSequence: vehiclePosition.vehicle.currentStopSequence } : {}),
+			...(trip
+				? {
+						stopId: currentStopId,
+						currentStopSequence: vehiclePosition.vehicle.currentStopSequence,
+					}
+				: {}),
 			timestamp: vehiclePosition.vehicle.timestamp,
 			vehicle: { id: parcNumber },
 			...(trip
@@ -219,36 +333,36 @@ setInterval(async () => {
 	}
 }, 10 * 1_000);
 
-// II - Connecting to the vehicle service
-
-console.log("|> Connecting to the vehicle provider.");
-let vehicleProvider = await createVehicleProvider(VEHICLE_WS, MONITORED_LINES, handleVehicle);
-vehicleProvider.onclose(async (error) => {
-	if (error) {
-		console.error("|> Creating another connection because of WebSocket error:", error);
-		vehicleProvider = await createVehicleProvider(VEHICLE_WS, MONITORED_LINES, handleVehicle);
-	}
-});
-
-// III - Handle vehicle provisioning
-
-const lastPositionCache = new Map<string, { position: Position; recordedAt: number }>();
+// IVb - Handle vehicle provisioning
 
 const isCommercialTrip = (destination: string) =>
-	!["Dépôt 2 Rivières", "Dépôt St-Julien", "ROUEN DEPOT", "Dépôt TNI Carnot", "Dépôt Lincoln"].includes(destination);
+	![
+		"Dépôt 2 Rivières",
+		"Dépôt St-Julien",
+		"ROUEN DEPOT",
+		"Dépôt TNI Carnot",
+		"Dépôt Lincoln",
+	].includes(destination);
 
 async function handleVehicle(line: string, vehicle: Vehicle) {
 	const vehicleId = vehicle.VehicleRef.split(":")[3]!;
-	console.debug(`[${line}] ${vehicleId}\t${vehicle.VJourneyId}\t${vehicle.LineNumber} -> ${vehicle.Destination}`);
+	console.debug(
+		`[${line}] ${vehicleId}\t${vehicle.VJourneyId}\t${vehicle.LineNumber} -> ${vehicle.Destination}`,
+	);
 
 	const operationCode = hubResource.courseOperation.get(vehicle.VJourneyId);
 	if (typeof operationCode === "undefined")
-		return console.warn(`Unknown operation code for journey id '${vehicle.VJourneyId}'.`);
+		return console.warn(
+			`Unknown operation code for journey id '${vehicle.VJourneyId}'.`,
+		);
 
 	const trip = gtfsResource.trips.get(operationCode);
-	if (typeof trip === "undefined") return console.warn(`Unknown trip for operation code '${operationCode}'.`);
+	if (typeof trip === "undefined")
+		return console.warn(`Unknown trip for operation code '${operationCode}'.`);
 
-	const oldVehiclePosition = oldVehiclePositions.find((vp) => vp.vehicle.vehicle.id === vehicleId)?.vehicle;
+	const oldVehiclePosition = oldVehiclePositions.find(
+		(vp) => vp.vehicle.vehicle.id === vehicleId,
+	)?.vehicle;
 	const position: Position = {
 		latitude: vehicle.Latitude,
 		longitude: vehicle.Longitude,
@@ -257,17 +371,29 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 
 	const existingVehicle = vehiclePositions.get(vehicleId);
 
-	let recordedAt = Temporal.PlainDateTime.from(vehicle.RecordedAtTime).toZonedDateTime("Europe/Paris").toInstant();
+	let recordedAt = Temporal.PlainDateTime.from(vehicle.RecordedAtTime)
+		.toZonedDateTime("Europe/Paris")
+		.toInstant();
 	const recordedAtEpoch = () => Math.floor(recordedAt.epochMilliseconds / 1000);
 
 	const lastPosition = lastPositionCache.get(vehicleId);
 	if (typeof lastPosition !== "undefined") {
-		if (recordedAtEpoch() < lastPosition.recordedAt || recordedAtEpoch() < (existingVehicle?.timestamp ?? 0)) {
-			console.warn("\t\t  The position of this entry is older than the cached position, ignoring.");
+		if (
+			recordedAtEpoch() < lastPosition.recordedAt ||
+			recordedAtEpoch() < (existingVehicle?.timestamp ?? 0)
+		) {
+			console.warn(
+				"\t\t  The position of this entry is older than the cached position, ignoring.",
+			);
 			return;
 		}
-		if (vehicle.Latitude === lastPosition.position.latitude && vehicle.Longitude === lastPosition.position.longitude) {
-			recordedAt = Temporal.Instant.fromEpochMilliseconds(lastPosition.recordedAt * 1000);
+		if (
+			vehicle.Latitude === lastPosition.position.latitude &&
+			vehicle.Longitude === lastPosition.position.longitude
+		) {
+			recordedAt = Temporal.Instant.fromEpochMilliseconds(
+				lastPosition.recordedAt * 1000,
+			);
 		}
 		if (Temporal.Now.instant().since(recordedAt).total("minutes") > 10) {
 			return;
@@ -276,7 +402,10 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 
 	lastPositionCache.set(vehicleId, { position, recordedAt: recordedAtEpoch() });
 
-	if (isCommercialTrip(vehicle.Destination) && isSus(vehicle, trip, oldVehiclePosition)) {
+	if (
+		isCommercialTrip(vehicle.Destination) &&
+		isSus(vehicle, trip, oldVehiclePosition)
+	) {
 		if (existingVehicle) {
 			existingVehicle.position = position;
 			existingVehicle.timestamp = recordedAtEpoch();
@@ -285,7 +414,8 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 	}
 
 	const monitoredStop = vehicle.StopTimeList.at(0);
-	if (typeof monitoredStop === "undefined") return console.warn("No monitored stop for this vehicle, ignoring.");
+	if (typeof monitoredStop === "undefined")
+		return console.warn("No monitored stop for this vehicle, ignoring.");
 
 	const vehicleDescriptor: VehicleDescriptor = {
 		id: vehicleId,
@@ -316,8 +446,12 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 					return [];
 				}
 
-				const aimedTime = Temporal.PlainDateTime.from(stopTime.AimedTime).toZonedDateTime("Europe/Paris");
-				const expectedTime = Temporal.Instant.from(stopTime.ExpectedTime).toZonedDateTimeISO("Europe/Paris");
+				const aimedTime = Temporal.PlainDateTime.from(
+					stopTime.AimedTime,
+				).toZonedDateTime("Europe/Paris");
+				const expectedTime = Temporal.Instant.from(
+					stopTime.ExpectedTime,
+				).toZonedDateTimeISO("Europe/Paris");
 				const event: StopTimeEvent = {
 					delay: expectedTime.since(aimedTime).total("seconds"),
 					time: Math.floor(expectedTime.epochMilliseconds / 1000),
@@ -337,8 +471,9 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 	}
 
 	const currentStop =
-		(vehicle.VehicleAtStop || monitoredStop.StopPointOrder === 1 ? monitoredStop : vehicle.StopTimeList.at(1)) ??
-		monitoredStop;
+		(vehicle.VehicleAtStop || monitoredStop.StopPointOrder === 1
+			? monitoredStop
+			: vehicle.StopTimeList.at(1)) ?? monitoredStop;
 
 	vehiclePositions.set(vehicleId, {
 		...(tripDescriptor
@@ -356,24 +491,3 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 		vehicle: vehicleDescriptor,
 	});
 }
-
-// IV - Provide data via an API
-
-console.log("|> Publishing data on port 8080.");
-
-const hono = new Hono();
-hono.get("/trip-updates", (c) =>
-	stream(c, async (stream) => {
-		const data = encodeGtfsRt(buildGtfsRtFeed(tripUpdates.values()));
-		await stream.write(data);
-	}),
-);
-hono.get("/trip-updates.json", (c) => c.json(buildGtfsRtFeed(tripUpdates.values())));
-hono.get("/vehicle-positions", (c) =>
-	stream(c, async (stream) => {
-		const data = encodeGtfsRt(buildGtfsRtFeed(vehiclePositions.values()));
-		await stream.write(data);
-	}),
-);
-hono.get("/vehicle-positions.json", (c) => c.json(buildGtfsRtFeed(vehiclePositions.values())));
-serve({ fetch: hono.fetch, port: +(process.env.PORT ?? 3000) });

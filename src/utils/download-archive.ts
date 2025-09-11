@@ -15,7 +15,10 @@ export async function downloadArchive(href: string) {
 	const response = await fetch(href, {
 		signal: AbortSignal.timeout(REQUEST_TIMEOUT),
 	});
-	if (!response.ok) throw new Error(`Unable to download archive at '${href}': status code ${response.status}.`);
+	if (!response.ok)
+		throw new Error(
+			`Unable to download archive at '${href}': status code ${response.status}.`,
+		);
 	const version = await getArchiveStaleness(href);
 	const buffer = Buffer.from(await response.arrayBuffer());
 	await decompress(buffer, directory);

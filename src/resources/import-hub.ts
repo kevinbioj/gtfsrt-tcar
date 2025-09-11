@@ -19,7 +19,10 @@ async function loadCourseOperation(directory: string) {
 	await loadCsv<"Numero de course" | "Code opération">(
 		join(directory, "COURSE_OPERATION.TXT"),
 		(record) => {
-			courseOperation.set(+record["Numero de course"], record["Code opération"]);
+			courseOperation.set(
+				+record["Numero de course"],
+				record["Code opération"],
+			);
 		},
 		{
 			encoding: "latin1",

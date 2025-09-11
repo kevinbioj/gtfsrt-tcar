@@ -23,20 +23,26 @@ export async function importGtfs(href: string) {
 
 async function loadStopIdsByCode(directory: string) {
 	const stopIdsByCode = new Map<string, string>();
-	await loadCsv<"stop_id" | "stop_code">(join(directory, "stops.txt"), (record) => {
-		stopIdsByCode.set(record.stop_code, record.stop_id);
-	});
+	await loadCsv<"stop_id" | "stop_code">(
+		join(directory, "stops.txt"),
+		(record) => {
+			stopIdsByCode.set(record.stop_code, record.stop_id);
+		},
+	);
 	return stopIdsByCode;
 }
 
 async function loadTrips(directory: string) {
 	const trips = new Map<string, Trip>();
-	await loadCsv<"trip_id" | "route_id" | "direction_id">(join(directory, "trips.txt"), (record) => {
-		trips.set(record.trip_id, {
-			tripId: record.trip_id,
-			routeId: record.route_id,
-			directionId: +record.direction_id,
-		});
-	});
+	await loadCsv<"trip_id" | "route_id" | "direction_id">(
+		join(directory, "trips.txt"),
+		(record) => {
+			trips.set(record.trip_id, {
+				tripId: record.trip_id,
+				routeId: record.route_id,
+				directionId: +record.direction_id,
+			});
+		},
+	);
 	return trips;
 }

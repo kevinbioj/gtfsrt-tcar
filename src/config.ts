@@ -1,9 +1,13 @@
 //- Feed URLs
-export const GTFS_FEED = "https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=GTFS";
-export const HUB_FEED = "https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=HUB";
+export const GTFS_FEED =
+	"https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=GTFS";
+export const HUB_FEED =
+	"https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=HUB";
 export const VEHICLE_WS = "https://api.mrn.cityway.fr/sdh/vehicles";
-export const OLD_GTFSRT_VP_FEED = "https://reseau-astuce.fr/ftp/gtfsrt/Astuce.VehiclePosition.pb";
-export const OLD_GTFSRT_TU_FEED = "https://reseau-astuce.fr/ftp/gtfsrt/Astuce.TripUpdate.pb";
+export const OLD_GTFSRT_VP_FEED =
+	"https://reseau-astuce.fr/ftp/gtfsrt/Astuce.VehiclePosition.pb";
+export const OLD_GTFSRT_TU_FEED =
+	"https://reseau-astuce.fr/ftp/gtfsrt/Astuce.TripUpdate.pb";
 
 //- Monitored lines - api.mrn.cityway.fr
 export const MONITORED_LINES = [
@@ -79,7 +83,13 @@ export const LINES_DATASET = new Map([
 		"Métro",
 		{
 			code: "90",
-			destinations: ["Boulingrin B", "Boulingrin C", "Théâtre des Arts", "Georges Braque", "Technopôle"],
+			destinations: [
+				"Boulingrin B",
+				"Boulingrin C",
+				"Théâtre des Arts",
+				"Georges Braque",
+				"Technopôle",
+			],
 		},
 	],
 	["T1", { code: "91", destinations: ["Mont aux Malades", "CHU Ch. Nicolle"] }],
@@ -88,9 +98,21 @@ export const LINES_DATASET = new Map([
 	["T4", { code: "94", destinations: ["Marie Curie-MTC", "Zénith-Parc Expo"] }],
 	["F1", { code: "01", destinations: ["Pl. de la Ronce", "Stade Diochon"] }],
 	["F2", { code: "02", destinations: ["Tamarelle", "La Vatine-C.Cial"] }],
-	["F3", { code: "03", destinations: ["HDV Sotteville", "Pôle Multimodal", "C. Commercial"] }],
+	[
+		"F3",
+		{
+			code: "03",
+			destinations: ["HDV Sotteville", "Pôle Multimodal", "C. Commercial"],
+		},
+	],
 	["F4", { code: "04", destinations: ["Mont-Riboudet", "Hameau Frévaux"] }],
-	["F5", { code: "05", destinations: ["Lycée Galilée", "Théâtre des Arts", "Boulingrin"] }],
+	[
+		"F5",
+		{
+			code: "05",
+			destinations: ["Lycée Galilée", "Théâtre des Arts", "Boulingrin"],
+		},
+	],
 	["F6", { code: "06", destinations: ["Les Bouttières", "Gare St-Etienne"] }],
 	["F7", { code: "07", destinations: ["La Pléiade", "HDV Sotteville"] }],
 	["F8", { code: "08", destinations: ["Tamarelle", "Lycée du Cailly"] }],
@@ -102,23 +124,49 @@ export const LINES_DATASET = new Map([
 		"15",
 		{
 			code: "15",
-			destinations: ["Collège J. Verne", "Jules Verne", "Hôtel de Ville", "Eude", "Grand Val"],
+			destinations: [
+				"Collège J. Verne",
+				"Jules Verne",
+				"Hôtel de Ville",
+				"Eude",
+				"Grand Val",
+			],
 		},
 	],
 	[
 		"20",
 		{
 			code: "20",
-			destinations: ["Le Chapître", "Hôtel de Ville", "Rue de l'Eglise", "Mairie St Aubin"],
+			destinations: [
+				"Le Chapître",
+				"Hôtel de Ville",
+				"Rue de l'Eglise",
+				"Mairie St Aubin",
+			],
 		},
 	],
 	["22", { code: "22", destinations: ["P. de la Vatine", "Barr.de Darnétal"] }],
-	["27", { code: "27", destinations: ["Bel Air", "Théâtre des Arts", "Champlain", "Boulingrin"] }],
+	[
+		"27",
+		{
+			code: "27",
+			destinations: ["Bel Air", "Théâtre des Arts", "Champlain", "Boulingrin"],
+		},
+	],
 	["28", { code: "28", destinations: ["Louise Michel", "Bois Tison"] }],
 	["33", { code: "33", destinations: ["HDV Sotteville", "F. Truffaut"] }],
 	["35", { code: "35", destinations: ["Ecole Moulin", "Sente Houdeville"] }],
-	["41", { code: "41", destinations: ["Ancienne Mare", "La Bastille", "Vente Olivier"] }],
-	["42", { code: "42", destinations: ["Lebon", "Centre Routier", "La Houssière"] }],
+	[
+		"41",
+		{
+			code: "41",
+			destinations: ["Ancienne Mare", "La Bastille", "Vente Olivier"],
+		},
+	],
+	[
+		"42",
+		{ code: "42", destinations: ["Lebon", "Centre Routier", "La Houssière"] },
+	],
 	["43", { code: "43", destinations: ["Place du Vivier", "Longs Vallons"] }],
 	["44", { code: "44", destinations: ["E. Lacroix", "Chapelle St-Siméon"] }],
 ]);
