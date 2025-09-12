@@ -113,7 +113,13 @@ export const LINES_DATASET = new Map([
 			destinations: ["Lycée Galilée", "Théâtre des Arts", "Boulingrin"],
 		},
 	],
-	["F6", { code: "06", destinations: ["Les Bouttières", "Gare St-Etienne"] }],
+	[
+		"F6",
+		{
+			code: "06",
+			destinations: ["Les Bouttières", "Gare St-Etienne", "Georges Braque"],
+		},
+	],
 	["F7", { code: "07", destinations: ["La Pléiade", "HDV Sotteville"] }],
 	["F8", { code: "08", destinations: ["Tamarelle", "Lycée du Cailly"] }],
 	["10", { code: "10", destinations: ["Maromme La Maine", "Lycée Flaubert"] }],
