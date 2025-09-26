@@ -13,20 +13,20 @@
 		"lint": "biome lint",
 		"format": "biome format --write"
 	},
-	"packageManager": "pnpm@10.15.1+sha512.34e538c329b5553014ca8e8f4535997f96180a1d0f614339357449935350d924e22f8614682191264ec33d1462ac21561aff97f6bb18065351c162c7e8f6de67",
+	"packageManager": "pnpm@10.17.1+sha512.17c560fca4867ae9473a3899ad84a88334914f379be46d455cbf92e5cf4b39d34985d452d2583baf19967fa76cb5c17bc9e245529d0b98745721aa7200ecaf7a",
 	"devDependencies": {
 		"@biomejs/biome": "2.2.4",
 		"@types/decompress": "^4.2.7",
-		"@types/node": "^24.3.1",
-		"tsx": "^4.20.5",
+		"@types/node": "^24.5.2",
+		"tsx": "^4.20.6",
 		"typescript": "^5.9.2"
 	},
 	"dependencies": {
-		"@hono/node-server": "^1.19.2",
+		"@hono/node-server": "^1.19.4",
 		"@microsoft/signalr": "^9.0.6",
 		"csv-parse": "^6.1.0",
 		"decompress": "^4.2.1",
-		"hono": "^4.9.6",
+		"hono": "^4.9.8",
 		"protobufjs": "^7.5.4",
 		"temporal-polyfill": "^0.3.0"
 	}
