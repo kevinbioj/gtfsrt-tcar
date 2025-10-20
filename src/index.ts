@@ -97,21 +97,45 @@ console.log("|> Publishing data on port 8080.");
 const hono = new Hono();
 hono.get("/trip-updates", (c) =>
 	stream(c, async (stream) => {
-		const data = encodeGtfsRt(buildGtfsRtFeed(tripUpdates.values()));
+		const data = encodeGtfsRt(
+			buildGtfsRtFeed(
+				tripUpdates.values(),
+				hubResource,
+				c.req.query("id_format") !== "TCAR",
+			),
+		);
 		await stream.write(data);
 	}),
 );
 hono.get("/trip-updates.json", (c) =>
-	c.json(buildGtfsRtFeed(tripUpdates.values())),
+	c.json(
+		buildGtfsRtFeed(
+			tripUpdates.values(),
+			hubResource,
+			c.req.query("id_format") !== "TCAR",
+		),
+	),
 );
 hono.get("/vehicle-positions", (c) =>
 	stream(c, async (stream) => {
-		const data = encodeGtfsRt(buildGtfsRtFeed(vehiclePositions.values()));
+		const data = encodeGtfsRt(
+			buildGtfsRtFeed(
+				vehiclePositions.values(),
+				hubResource,
+				c.req.query("id_format") !== "TCAR",
+			),
+		);
 		await stream.write(data);
 	}),
 );
 hono.get("/vehicle-positions.json", (c) =>
-	c.json(buildGtfsRtFeed(vehiclePositions.values())),
+	c.json(
+		buildGtfsRtFeed(
+			vehiclePositions.values(),
+			hubResource,
+			c.req.query("id_format") !== "TCAR",
+		),
+	),
 );
 serve({ fetch: hono.fetch, port: +(process.env.PORT ?? 3000) });
 
@@ -350,7 +374,9 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 		`[${line}] ${vehicleId}\t${vehicle.VJourneyId}\t${vehicle.LineNumber} -> ${vehicle.Destination}`,
 	);
 
-	const operationCode = hubResource.courseOperation.get(vehicle.VJourneyId);
+	const operationCode = hubResource.courseOperation.get(
+		String(vehicle.VJourneyId),
+	);
 	if (typeof operationCode === "undefined")
 		return console.warn(
 			`Unknown operation code for journey id '${vehicle.VJourneyId}'.`,
