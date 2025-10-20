@@ -475,16 +475,24 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 					return { ...partialStopTimeUpdate, scheduleRelationship: "SKIPPED" };
 				}
 
-				if (!stopTime.IsMonitored) {
-					return [];
-				}
-
 				const aimedTime = Temporal.PlainDateTime.from(
 					stopTime.AimedTime,
 				).toZonedDateTime("Europe/Paris");
+
+				if (!stopTime.IsMonitored) {
+					if (
+						Temporal.Now.zonedDateTimeISO().until(aimedTime).total("minutes") >=
+						60
+					) {
+						return [];
+					}
+					return { ...partialStopTimeUpdate, scheduleRelationship: "SKIPPED" };
+				}
+
 				const expectedTime = Temporal.Instant.from(
 					stopTime.ExpectedTime,
 				).toZonedDateTimeISO("Europe/Paris");
+
 				const event: StopTimeEvent = {
 					delay: expectedTime.since(aimedTime).total("seconds"),
 					time: Math.floor(expectedTime.epochMilliseconds / 1000),
