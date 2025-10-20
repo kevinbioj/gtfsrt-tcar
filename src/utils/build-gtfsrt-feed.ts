@@ -44,8 +44,6 @@ export function buildGtfsRtFeed(
 						}
 					}
 				} else {
-					itemCopy.trip.routeId = `${IDS_PREFIX}:${itemCopy.trip.routeId}`;
-
 					for (const stopTimeUpdate of itemCopy.stopTimeUpdate) {
 						const mappedStopId = hubResource.arretIdapToCode.get(
 							+stopTimeUpdate.stopId,
