@@ -52,6 +52,8 @@ const lastPositionCache = new Map<
 	{ position: Position; recordedAt: number }
 >();
 
+const antiSpamCache = new Map<string, number>();
+
 console.log("|> Loading HUB resource.");
 let hubResource = await importHub(HUB_FEED);
 setInterval(
@@ -370,8 +372,13 @@ const isCommercialTrip = (destination: string) =>
 
 async function handleVehicle(line: string, vehicle: Vehicle) {
 	const vehicleId = vehicle.VehicleRef.split(":")[3]!;
+
+	const antiSpam = antiSpamCache.get(vehicleId);
+	if (typeof antiSpam !== "undefined" && Date.now() - antiSpam < 10_000) return;
+	antiSpamCache.set(vehicleId, Date.now());
+
 	console.debug(
-		`[${line}] ${vehicleId}\t${vehicle.VJourneyId}\t${vehicle.LineNumber} -> ${vehicle.Destination}`,
+		`[${line}] ${vehicleId}\t${vehicle.VJourneyId}\t${vehicle.RecordedAtTime}\t${vehicle.LineNumber} -> ${vehicle.Destination}`,
 	);
 
 	const operationCode = hubResource.courseOperation.get(
