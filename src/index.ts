@@ -464,7 +464,7 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 		tripUpdates.set(trip.tripId, {
 			stopTimeUpdate: vehicle.StopTimeList.flatMap((stopTime) => {
 				const partialStopTimeUpdate = {
-					stopId: stopTime.StopPointId.toString(),
+					stopId: gtfsResource.stopIdsByCode.get(String(stopTime.StopPointId))!,
 				};
 
 				if (stopTime.IsCancelled) {
@@ -516,7 +516,9 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 		...(tripDescriptor
 			? {
 					currentStatus: vehicle.VehicleAtStop ? "STOPPED_AT" : "IN_TRANSIT_TO",
-					stopId: currentStop.StopPointId.toString(),
+					stopId: gtfsResource.stopIdsByCode.get(
+						String(currentStop.StopPointId),
+					)!,
 				}
 			: {}),
 		occupancyStatus: isCommercialTrip(vehicle.Destination)
