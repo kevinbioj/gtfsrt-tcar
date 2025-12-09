@@ -477,13 +477,13 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 				).toZonedDateTime("Europe/Paris");
 
 				if (!stopTime.IsMonitored) {
-					if (
-						Temporal.Now.zonedDateTimeISO().until(aimedTime).total("minutes") >=
-						60
-					) {
-						return [];
-					}
-					return { ...partialStopTimeUpdate, scheduleRelationship: "SKIPPED" };
+					// if (
+					// 	Temporal.Now.zonedDateTimeISO().until(aimedTime).total("minutes") >=
+					// 	60
+					// ) {
+					// 	return [];
+					// }
+					return { ...partialStopTimeUpdate, scheduleRelationship: "NO_DATA" };
 				}
 
 				const expectedTime = Temporal.Instant.from(
