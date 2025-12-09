@@ -1,9 +1,11 @@
 import { decodeGtfsRt } from "../utils/gtfsrt-coding.js";
 
-export async function fetchOldGtfsrt(href: string) {
+export async function fetchGtfsrt(href: string) {
 	const response = await fetch(href, { signal: AbortSignal.timeout(30_000) });
 	if (!response.ok)
-		throw new Error(`Failed to fetch old GTFS-RT: ${response.status}.`);
+		throw new Error(
+			`Failed to fetch GTFS-RT at '${href}': ${response.status}.`,
+		);
 
 	const buffer = Buffer.from(await response.arrayBuffer());
 	const feed = decodeGtfsRt(buffer);

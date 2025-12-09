@@ -4,6 +4,8 @@ export const GTFS_FEED =
 export const HUB_FEED =
 	"https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=HUB";
 export const VEHICLE_WS = "https://api.mrn.cityway.fr/sdh/vehicles";
+export const CUR_GTFSRT_VP_FEED =
+	"https://api.mrn.cityway.fr/dataflow/vehicle-tc-tr/download?provider=TCAR&dataFormat=GTFS-RT";
 export const OLD_GTFSRT_VP_FEED =
 	"https://reseau-astuce.fr/ftp/gtfsrt/Astuce.VehiclePosition.pb";
 export const OLD_GTFSRT_TU_FEED =

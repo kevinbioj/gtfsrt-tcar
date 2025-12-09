@@ -7,7 +7,6 @@ import "temporal-polyfill/global";
 
 import {
 	GTFS_FEED,
-	HUB_FEED,
 	MONITORED_LINES,
 	OLD_GTFSRT_TU_FEED,
 	OLD_GTFSRT_VP_FEED,
@@ -17,9 +16,8 @@ import {
 	type Vehicle,
 	createVehicleProvider,
 } from "./providers/vehicle-provider.js";
-import { fetchOldGtfsrt } from "./resources/fetch-old-gtfsrt.js";
+import { fetchGtfsrt } from "./resources/fetch-gtfsrt.js";
 import { importGtfs } from "./resources/import-gtfs.js";
-import { importHub } from "./resources/import-hub.js";
 import { createRealtimeStore } from "./stores/realtime-store.js";
 import type {
 	Position,
@@ -34,6 +32,7 @@ import { isArchiveStale } from "./utils/download-archive.js";
 import { encodeGtfsRt } from "./utils/gtfsrt-coding.js";
 import { isSus } from "./utils/is-sus.js";
 import { getVehicleOccupancyStatus } from "./utils/occupancy-fetcher.js";
+import { getTripIdByVehicleId } from "./resources/trip-finder.js";
 
 const REALTIME_STALE_TIME = 600; // seconds
 const RESOURCE_STALE_TIME = 3600 * 1000; // milliseconds
@@ -54,24 +53,24 @@ const lastPositionCache = new Map<
 
 const antiSpamCache = new Map<string, string>();
 
-console.log("|> Loading HUB resource.");
-let hubResource = await importHub(HUB_FEED);
-setInterval(
-	async () => {
-		try {
-			const mustUpdate =
-				(await isArchiveStale(HUB_FEED, hubResource.version)) ||
-				Date.now() - hubResource.loadedAt > RESOURCE_STALE_TIME;
-			if (mustUpdate) {
-				console.log("|> Updating HUB resource.");
-				hubResource = await importHub(HUB_FEED);
-			}
-		} catch (e) {
-			console.error("Failed to ensure HUB fresheness.", e);
-		}
-	},
-	5 * 60 * 1_000,
-);
+// console.log("|> Loading HUB resource.");
+// let hubResource = await importHub(HUB_FEED);
+// setInterval(
+// 	async () => {
+// 		try {
+// 			const mustUpdate =
+// 				(await isArchiveStale(HUB_FEED, hubResource.version)) ||
+// 				Date.now() - hubResource.loadedAt > RESOURCE_STALE_TIME;
+// 			if (mustUpdate) {
+// 				console.log("|> Updating HUB resource.");
+// 				hubResource = await importHub(HUB_FEED);
+// 			}
+// 		} catch (e) {
+// 			console.error("Failed to ensure HUB fresheness.", e);
+// 		}
+// 	},
+// 	5 * 60 * 1_000,
+// );
 
 console.log("|> Loading GTFS resource.");
 let gtfsResource = await importGtfs(GTFS_FEED);
@@ -102,8 +101,8 @@ hono.get("/trip-updates", (c) =>
 		const data = encodeGtfsRt(
 			buildGtfsRtFeed(
 				tripUpdates.values(),
-				hubResource,
-				c.req.query("id_format") !== "TCAR",
+				// hubResource,
+				// c.req.query("id_format") !== "TCAR",
 			),
 		);
 		await stream.write(data);
@@ -113,8 +112,8 @@ hono.get("/trip-updates.json", (c) =>
 	c.json(
 		buildGtfsRtFeed(
 			tripUpdates.values(),
-			hubResource,
-			c.req.query("id_format") !== "TCAR",
+			// hubResource,
+			// c.req.query("id_format") !== "TCAR",
 		),
 	),
 );
@@ -123,8 +122,8 @@ hono.get("/vehicle-positions", (c) =>
 		const data = encodeGtfsRt(
 			buildGtfsRtFeed(
 				vehiclePositions.values(),
-				hubResource,
-				c.req.query("id_format") !== "TCAR",
+				// hubResource,
+				// c.req.query("id_format") !== "TCAR",
 			),
 		);
 		await stream.write(data);
@@ -134,8 +133,8 @@ hono.get("/vehicle-positions.json", (c) =>
 	c.json(
 		buildGtfsRtFeed(
 			vehiclePositions.values(),
-			hubResource,
-			c.req.query("id_format") !== "TCAR",
+			// hubResource,
+			// c.req.query("id_format") !== "TCAR",
 		),
 	),
 );
@@ -177,18 +176,17 @@ const patchOldVehiclePositions = (data: VehiclePositionEntity[]) => {
 
 console.log("|> Initiating backup GTFS-RT.");
 let oldVehiclePositions = patchOldVehiclePositions(
-	(await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[],
+	(await fetchGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[],
 );
-let oldTripUpdates = (await fetchOldGtfsrt(OLD_GTFSRT_TU_FEED))
+let oldTripUpdates = (await fetchGtfsrt(OLD_GTFSRT_TU_FEED))
 	.entity as TripUpdateEntity[];
 
 setInterval(async () => {
 	try {
 		oldVehiclePositions = patchOldVehiclePositions(
-			(await fetchOldGtfsrt(OLD_GTFSRT_VP_FEED))
-				.entity as VehiclePositionEntity[],
+			(await fetchGtfsrt(OLD_GTFSRT_VP_FEED)).entity as VehiclePositionEntity[],
 		);
-		oldTripUpdates = (await fetchOldGtfsrt(OLD_GTFSRT_TU_FEED))
+		oldTripUpdates = (await fetchGtfsrt(OLD_GTFSRT_TU_FEED))
 			.entity as TripUpdateEntity[];
 	} catch (e) {
 		console.error("Failed to download old GTFS-RT resource.", e);
@@ -381,12 +379,10 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 		`[${line}] ${vehicleId}\t${vehicle.VJourneyId}\t${vehicle.RecordedAtTime}\t${vehicle.LineNumber} -> ${vehicle.Destination}`,
 	);
 
-	const operationCode = hubResource.courseOperation.get(
-		String(vehicle.VJourneyId),
-	);
+	const operationCode = getTripIdByVehicleId(vehicle.VehicleRef);
 	if (typeof operationCode === "undefined")
 		return console.warn(
-			`Unknown operation code for journey id '${vehicle.VJourneyId}'.`,
+			`Unknown operation code for vehicle id '${vehicle.VehicleRef}'.`,
 		);
 
 	const trip = gtfsResource.trips.get(operationCode);
