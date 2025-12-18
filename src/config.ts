@@ -18,6 +18,7 @@ export const MONITORED_LINES = [
 	"24213", // 92 - T2
 	"24214", // 93 - T3
 	"24215", // 94 - T4
+	"61669", // 95 - T5
 	"24099", // 01 - F1
 	"24100", // 02 - F2
 	"24101", // 03 - F3
@@ -151,6 +152,7 @@ export const LINES_DATASET = new Map([
 	["T2", { code: "92", destinations: ["Tamarelle", "V. Schoelcher"] }],
 	["T3", { code: "93", destinations: ["Monet", "Durécu-Lavoisier"] }],
 	["T4", { code: "94", destinations: ["Marie Curie-MTC", "Zénith-Parc Expo"] }],
+	["T5", { code: "95", destinations: ["Champlain", "Mont aux Malades"] }],
 	["F1", { code: "01", destinations: ["Pl. de la Ronce", "Stade Diochon"] }],
 	["F2", { code: "02", destinations: ["Tamarelle", "La Vatine-C.Cial"] }],
 	[
