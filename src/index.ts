@@ -102,8 +102,7 @@ hono.get("/trip-updates", (c) =>
 		const data = encodeGtfsRt(
 			buildGtfsRtFeed(
 				tripUpdates.values(),
-				// hubResource,
-				// c.req.query("id_format") !== "TCAR",
+				c.req.query("id_format") !== "TCAR",
 			),
 		);
 		await stream.write(data);
@@ -111,11 +110,7 @@ hono.get("/trip-updates", (c) =>
 );
 hono.get("/trip-updates.json", (c) =>
 	c.json(
-		buildGtfsRtFeed(
-			tripUpdates.values(),
-			// hubResource,
-			// c.req.query("id_format") !== "TCAR",
-		),
+		buildGtfsRtFeed(tripUpdates.values(), c.req.query("id_format") !== "TCAR"),
 	),
 );
 hono.get("/vehicle-positions", (c) =>
@@ -123,8 +118,7 @@ hono.get("/vehicle-positions", (c) =>
 		const data = encodeGtfsRt(
 			buildGtfsRtFeed(
 				vehiclePositions.values(),
-				// hubResource,
-				// c.req.query("id_format") !== "TCAR",
+				c.req.query("id_format") !== "TCAR",
 			),
 		);
 		await stream.write(data);
@@ -134,8 +128,7 @@ hono.get("/vehicle-positions.json", (c) =>
 	c.json(
 		buildGtfsRtFeed(
 			vehiclePositions.values(),
-			// hubResource,
-			// c.req.query("id_format") !== "TCAR",
+			c.req.query("id_format") !== "TCAR",
 		),
 	),
 );
@@ -386,7 +379,7 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 			`Unknown operation code for vehicle id '${vehicle.VehicleRef}'.`,
 		);
 
-	const trip = gtfsResource.trips.get(operationCode);
+	const trip = gtfsResource.trips.get(operationCode.replace(/TCAR:?/, ""));
 	if (typeof trip === "undefined")
 		return console.warn(`Unknown trip for operation code '${operationCode}'.`);
 

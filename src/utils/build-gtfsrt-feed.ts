@@ -5,8 +5,7 @@ const IDS_PREFIX = "TCAR";
 
 export function buildGtfsRtFeed(
 	items: Iterable<TripUpdate | VehiclePosition>,
-	// hubResource: HubResource,
-	// transformIds: boolean,
+	transformIds: boolean,
 ) {
 	const header: Header = {
 		gtfsRealtimeVersion: "2.0",
@@ -19,31 +18,25 @@ export function buildGtfsRtFeed(
 		entity: [...items].map((item) => {
 			const itemCopy = structuredClone(item);
 
-			// if (transformIds) {
-			// 	// map TripDescriptor's tripId and routeId
-			// 	if (typeof itemCopy.trip !== "undefined") {
-			// 		itemCopy.trip.routeId = `${IDS_PREFIX}:${itemCopy.trip.routeId}`;
-			//
-			// 		const courseNumero = hubResource.courseOperation.get(
-			// 			itemCopy.trip.tripId,
-			// 		);
-			// 		if (typeof courseNumero !== "undefined") {
-			// 			itemCopy.trip.tripId = `${IDS_PREFIX}:${itemCopy.trip.tripId}:${hubResource.courseVersion.get(courseNumero)}`;
-			// 		}
-			// 	}
-			//
-			// if ("position" in itemCopy) {
-			// 	itemCopy.vehicle.id = `${IDS_PREFIX}:${itemCopy.vehicle.id}`;
-			//
-			// 		if (typeof itemCopy.stopId !== "undefined") {
-			// 			itemCopy.stopId = `${IDS_PREFIX}:${itemCopy.stopId}`;
-			// 		}
-			// 	} else {
-			// 		for (const stopTimeUpdate of itemCopy.stopTimeUpdate) {
-			// 			stopTimeUpdate.stopId = `${IDS_PREFIX}:${stopTimeUpdate.stopId}`;
-			// 		}
-			// 	}
-			// }
+			if (transformIds) {
+				// map TripDescriptor's tripId and routeId
+				if (typeof itemCopy.trip !== "undefined") {
+					itemCopy.trip.routeId = `${IDS_PREFIX}:${itemCopy.trip.routeId}`;
+					itemCopy.trip.tripId = `${IDS_PREFIX}:${itemCopy.trip.tripId}`;
+				}
+
+				if ("position" in itemCopy) {
+					itemCopy.vehicle.id = `${IDS_PREFIX}:${itemCopy.vehicle.id}`;
+
+					if (typeof itemCopy.stopId !== "undefined") {
+						itemCopy.stopId = `${IDS_PREFIX}:${itemCopy.stopId}`;
+					}
+				} else {
+					for (const stopTimeUpdate of itemCopy.stopTimeUpdate) {
+						stopTimeUpdate.stopId = `${IDS_PREFIX}:${stopTimeUpdate.stopId}`;
+					}
+				}
+			}
 
 			return "position" in itemCopy
 				? {
