@@ -33,7 +33,10 @@ import { encodeGtfsRt } from "./utils/gtfsrt-coding.js";
 import { isSus } from "./utils/is-sus.js";
 import { getVehicleOccupancyStatus } from "./utils/occupancy-fetcher.js";
 import { getTripIdByVehicleId } from "./resources/trip-finder.js";
-import { ctwStopIdToGtfsStopId } from "./providers/stop-provider.js";
+import {
+	ctwIdApToGtfsStopId,
+	ctwStopIdToGtfsStopId,
+} from "./providers/stop-provider.js";
 
 const REALTIME_STALE_TIME = 600; // seconds
 const RESOURCE_STALE_TIME = 3600 * 1000; // milliseconds
@@ -207,7 +210,7 @@ setInterval(async () => {
 
 			const currentStopId =
 				typeof oldVehiclePosition.vehicle.stopId !== "undefined"
-					? gtfsResource.stopIdsByCode.get(oldVehiclePosition.vehicle.stopId)
+					? ctwIdApToGtfsStopId.get(oldVehiclePosition.vehicle.stopId)
 					: undefined;
 
 			if (
@@ -280,7 +283,7 @@ setInterval(async () => {
 			if (tripUpdate) {
 				tripUpdates.set(trip.tripId, {
 					stopTimeUpdate: tripUpdate.tripUpdate.stopTimeUpdate?.map((stu) => {
-						const matchingStopId = gtfsResource.stopIdsByCode.get(stu.stopId);
+						const matchingStopId = ctwIdApToGtfsStopId.get(stu.stopId);
 						return {
 							arrival: stu.arrival
 								? {
@@ -316,7 +319,7 @@ setInterval(async () => {
 
 		const currentStopId =
 			typeof vehiclePosition.vehicle.stopId !== "undefined"
-				? gtfsResource.stopIdsByCode.get(vehiclePosition.vehicle.stopId)
+				? ctwIdApToGtfsStopId.get(vehiclePosition.vehicle.stopId)
 				: undefined;
 
 		vehiclePositions.set(parcNumber, {
@@ -339,7 +342,7 @@ setInterval(async () => {
 				? { trip: { ...trip, scheduleRelationship: "SCHEDULED" } }
 				: {
 						trip: {
-							tripId: `${parcNumber}_OLDTRIP`,
+							tripId: `${parcNumber}_UNKNOWN`,
 							routeId: vehicleTrip.routeId,
 							directionId: vehicleTrip.directionId,
 							scheduleRelationship: "UNSCHEDULED",

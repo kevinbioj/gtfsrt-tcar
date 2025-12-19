@@ -1,8 +1,10 @@
 export const ctwStopIdToGtfsStopId = new Map<number, string>();
+export const ctwIdApToGtfsStopId = new Map<string, string>();
 
 type StopListResponse = {
 	Data: {
 		Id: number;
+		IdAp: string;
 		Code: string;
 	}[];
 };
@@ -20,6 +22,7 @@ const updateStopMap = async () => {
 
 	for (const stop of payload.Data) {
 		ctwStopIdToGtfsStopId.set(stop.Id, stop.Code);
+		ctwIdApToGtfsStopId.set(stop.IdAp, stop.Code);
 	}
 };
 
