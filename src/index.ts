@@ -164,7 +164,9 @@ plugVehicleProvider();
 // IVa - Handle backup GTFS-RT
 
 const patchOldVehiclePositions = (data: VehiclePositionEntity[]) => {
-	for (const vehicle of data) vehicle.vehicle.timestamp += 3600;
+	for (const vehicle of data) {
+		vehicle.vehicle.timestamp += 3600;
+	}
 	return data;
 };
 

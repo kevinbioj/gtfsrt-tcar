@@ -1,6 +1,6 @@
 //- Feed URLs
 export const GTFS_FEED =
-	"https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=GTFS";
+	"https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=ASTUCE&dataFormat=GTFS&dataProfil=ASTUCE";
 export const HUB_FEED =
 	"https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=HUB";
 export const VEHICLE_WS = "https://api.mrn.cityway.fr/sdh/vehicles";
@@ -228,7 +228,10 @@ export const LINES_DATASET = new Map([
 	],
 	[
 		"42",
-		{ code: "42", destinations: ["Lebon", "Centre Routier", "La Houssière"] },
+		{
+			code: "42",
+			destinations: ["Lebon", "Centre Routier", "La Houssière"],
+		},
 	],
 	["43", { code: "43", destinations: ["Place du Vivier", "Longs Vallons"] }],
 	["44", { code: "44", destinations: ["E. Lacroix", "Chapelle St-Siméon"] }],

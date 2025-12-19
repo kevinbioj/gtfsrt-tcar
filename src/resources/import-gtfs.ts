@@ -26,7 +26,7 @@ async function loadStopIdsByCode(directory: string) {
 	await loadCsv<"stop_id" | "stop_code">(
 		join(directory, "stops.txt"),
 		(record) => {
-			stopIdsByCode.set(record.stop_code, record.stop_id);
+			stopIdsByCode.set(record.stop_code, record.stop_id.replace("TCAR:", ""));
 		},
 	);
 	return stopIdsByCode;
@@ -37,9 +37,9 @@ async function loadTrips(directory: string) {
 	await loadCsv<"trip_id" | "route_id" | "direction_id">(
 		join(directory, "trips.txt"),
 		(record) => {
-			trips.set(record.trip_id, {
-				tripId: record.trip_id,
-				routeId: record.route_id,
+			trips.set(record.trip_id.replace("TCAR:", ""), {
+				tripId: record.trip_id.replace("TCAR:", ""),
+				routeId: record.route_id.replace("TCAR:", ""),
 				directionId: +record.direction_id,
 			});
 		},
