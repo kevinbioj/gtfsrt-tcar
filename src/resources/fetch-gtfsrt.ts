@@ -7,6 +7,10 @@ export async function fetchGtfsrt(href: string) {
 			`Failed to fetch GTFS-RT at '${href}': ${response.status}.`,
 		);
 
+	if (response.status === 204) {
+		return { entity: [] };
+	}
+
 	const buffer = Buffer.from(await response.arrayBuffer());
 	const feed = decodeGtfsRt(buffer);
 	if (
