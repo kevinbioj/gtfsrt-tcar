@@ -370,6 +370,29 @@ const isCommercialTrip = (destination: string) =>
 async function handleVehicle(line: string, vehicle: Vehicle) {
 	const vehicleId = vehicle.VehicleRef.split(":")[3]!;
 
+	const lastPosition = lastPositionCache.get(vehicleId);
+	if (lastPosition === undefined) {
+		lastPositionCache.set(vehicleId, {
+			position: {
+				latitude: vehicle.Latitude,
+				longitude: vehicle.Longitude,
+				bearing: vehicle.Bearing,
+			},
+			recordedAt: 0,
+		});
+
+		return;
+	}
+
+	if (
+		lastPosition.recordedAt === 0 &&
+		lastPosition.position.latitude === vehicle.Latitude &&
+		lastPosition.position.longitude === vehicle.Longitude &&
+		lastPosition.position.bearing === vehicle.Bearing
+	) {
+		return;
+	}
+
 	const antiSpamKey = `${vehicle.RecordedAtTime.slice(0, -3)}:${vehicle.Latitude}:${vehicle.Longitude}:${vehicle.Bearing}`;
 	if (antiSpamCache.get(vehicleId) === antiSpamKey) return;
 	antiSpamCache.set(vehicleId, antiSpamKey);
@@ -404,28 +427,25 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 		.toInstant();
 	const recordedAtEpoch = () => Math.floor(recordedAt.epochMilliseconds / 1000);
 
-	const lastPosition = lastPositionCache.get(vehicleId);
-	if (typeof lastPosition !== "undefined") {
-		if (
-			recordedAtEpoch() < lastPosition.recordedAt ||
-			recordedAtEpoch() < (existingVehicle?.timestamp ?? 0)
-		) {
-			console.warn(
-				"\t\t  The position of this entry is older than the cached position, ignoring.",
-			);
-			return;
-		}
-		if (
-			vehicle.Latitude === lastPosition.position.latitude &&
-			vehicle.Longitude === lastPosition.position.longitude
-		) {
-			recordedAt = Temporal.Instant.fromEpochMilliseconds(
-				lastPosition.recordedAt * 1000,
-			);
-		}
-		if (Temporal.Now.instant().since(recordedAt).total("minutes") > 10) {
-			return;
-		}
+	if (
+		recordedAtEpoch() < lastPosition.recordedAt ||
+		recordedAtEpoch() < (existingVehicle?.timestamp ?? 0)
+	) {
+		console.warn(
+			"\t\t  The position of this entry is older than the cached position, ignoring.",
+		);
+		return;
+	}
+	if (
+		vehicle.Latitude === lastPosition.position.latitude &&
+		vehicle.Longitude === lastPosition.position.longitude
+	) {
+		recordedAt = Temporal.Instant.fromEpochMilliseconds(
+			lastPosition.recordedAt * 1000,
+		);
+	}
+	if (Temporal.Now.instant().since(recordedAt).total("minutes") > 10) {
+		return;
 	}
 
 	lastPositionCache.set(vehicleId, { position, recordedAt: recordedAtEpoch() });
