@@ -401,7 +401,7 @@ async function handleVehicle(line: string, vehicle: Vehicle) {
 		`[${line}] ${vehicleId}\t${vehicle.VJourneyId}\t${vehicle.RecordedAtTime}\t${vehicle.LineNumber} -> ${vehicle.Destination}`,
 	);
 
-	const operationCode = getTripIdByVehicleId(vehicle.VehicleRef);
+	const operationCode = await getTripIdByVehicleId(vehicle.VehicleRef);
 	if (typeof operationCode === "undefined")
 		return console.warn(
 			`Unknown operation code for vehicle id '${vehicle.VehicleRef}'.`,
