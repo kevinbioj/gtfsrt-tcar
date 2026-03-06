@@ -1,33 +1,37 @@
 {
-	"name": "@kevinbioj/tcar-producer",
-	"description": "Producteur de données GTFS-RT pour Transdev Rouen (TCAR)",
+	"name": "@bus-tracker/gtfsrt-tcar-2",
+	"description": "GTFS-RT data producer for TCAR (Rouen, France)",
 	"version": "0.1.0",
+	"author": "Kevin BIOJOUT <biojoutk1106@gmail.com>",
+	"license": "MIT",
 	"main": "dist/index.js",
 	"type": "module",
-	"license": "MIT",
-	"author": "Kevin BIOJOUT <biojoutk1106@gmail.com>",
 	"scripts": {
-		"build": "tsc",
-		"dev": "tsx --watch src/index.ts",
-		"start": "node .",
+		"dev": "tsx src/index.ts",
 		"lint": "biome lint",
-		"format": "biome format --write"
+		"format": "biome format --write",
+		"build": "tsc",
+		"start": "node dist/index.js"
 	},
-	"packageManager": "pnpm@10.28.0+sha512.05df71d1421f21399e053fde567cea34d446fa02c76571441bfc1c7956e98e363088982d940465fd34480d4d90a0668bc12362f8aa88000a64e83d0b0e47be48",
+	"packageManager": "pnpm@10.30.3+sha512.c961d1e0a2d8e354ecaa5166b822516668b7f44cb5bd95122d590dd81922f606f5473b6d23ec4a5be05e7fcd18e8488d47d978bbe981872f1145d06e9a740017",
+	"dependencies": {
+		"@hono/node-server": "^1.19.11",
+		"@microsoft/signalr": "^10.0.0",
+		"croner": "^10.0.1",
+		"decompress": "^4.2.1",
+		"fast-xml-parser": "^5.4.2",
+		"gtfs-realtime-bindings": "^1.1.1",
+		"hono": "^4.12.5",
+		"papaparse": "^5.5.3",
+		"temporal-polyfill": "^0.3.0",
+		"ts-pattern": "^5.9.0"
+	},
 	"devDependencies": {
-		"@biomejs/biome": "2.3.11",
+		"@biomejs/biome": "^2.4.6",
 		"@types/decompress": "^4.2.7",
-		"@types/node": "^25.0.8",
+		"@types/node": "^25.3.5",
+		"@types/papaparse": "^5.5.2",
 		"tsx": "^4.21.0",
 		"typescript": "^5.9.3"
-	},
-	"dependencies": {
-		"@hono/node-server": "^1.19.9",
-		"@microsoft/signalr": "^10.0.0",
-		"csv-parse": "^6.1.0",
-		"decompress": "^4.2.1",
-		"hono": "^4.11.4",
-		"protobufjs": "^8.0.0",
-		"temporal-polyfill": "^0.3.0"
 	}
 }

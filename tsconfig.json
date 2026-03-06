@@ -2,18 +2,17 @@
 	"compilerOptions": {
 		"esModuleInterop": true,
 		"skipLibCheck": true,
-		"target": "es2022",
+		"target": "esnext",
 		"allowJs": true,
 		"resolveJsonModule": true,
 		"moduleDetection": "force",
 		"isolatedModules": true,
 		"verbatimModuleSyntax": true,
 		"strict": true,
-		"noUncheckedIndexedAccess": true,
 		"noImplicitOverride": true,
 		"module": "NodeNext",
 		"outDir": "dist",
-		"lib": ["es2022"]
+		"lib": ["ESNext"]
 	},
 	"include": ["**/*.ts", "**/*.tsx"],
 	"exclude": ["node_modules"]
