@@ -1,19 +1,19 @@
 import { VERIFIED_ROUTE_DESTINATIONS } from "../config.js";
 
+import type { VerifiedVehicle } from "../gtfs-rt/use-verification-feed.js";
+
 export function isVehicleVerified(
-	vehicleRoute: Map<string, string>,
-	vehicleId: string,
+	verifiedVehicle: VerifiedVehicle | undefined,
 	routeId: string,
 	directionId: number,
 	destination: string,
 ) {
-	const verifiedRouteId = vehicleRoute.get(vehicleId);
-	if (verifiedRouteId !== undefined) {
-		if (verifiedRouteId === routeId) {
+	if (verifiedVehicle !== undefined) {
+		if (verifiedVehicle.routeId === routeId) {
 			return;
 		}
 
-		return { type: "ROUTE_MISMATCH", verifiedRouteId } as const;
+		return { type: "ROUTE_MISMATCH", verifiedRouteId: verifiedVehicle.routeId } as const;
 	}
 
 	const verifiedDestinations = VERIFIED_ROUTE_DESTINATIONS[routeId]?.[directionId];

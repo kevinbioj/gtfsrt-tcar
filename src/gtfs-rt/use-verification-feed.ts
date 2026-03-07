@@ -7,7 +7,7 @@ export async function useVerificationFeed(resourceUrl: string) {
 	const initialResource = await loadResource(resourceUrl);
 
 	const resource = {
-		vehicleRoute: initialResource,
+		verifiedVehicles: initialResource,
 		importedAt: Temporal.Now.instant(),
 	};
 
@@ -18,7 +18,7 @@ export async function useVerificationFeed(resourceUrl: string) {
 	currentInterval = setInterval(
 		async () => {
 			const newResource = await loadResource(resourceUrl);
-			resource.vehicleRoute = newResource;
+			resource.verifiedVehicles = newResource;
 			resource.importedAt = Temporal.Now.instant();
 		},
 		Temporal.Duration.from({ minutes: 1 }).total("milliseconds"),
@@ -29,16 +29,26 @@ export async function useVerificationFeed(resourceUrl: string) {
 
 // --- loadResource
 
+export type VerifiedVehicle = {
+	position: {
+		latitude: number;
+		longitude: number;
+		bearing: number;
+	};
+	recordedAt: number;
+	routeId: string;
+};
+
 async function loadResource(resourceUrl: string) {
 	console.log(`➔ Fetching verification feed at '${resourceUrl}'.`);
 
 	try {
-		const vehicleRoute = new Map<string, string>();
+		const verifiedVehicles = new Map<string, VerifiedVehicle>();
 
 		const response = await fetch(resourceUrl);
 		if (!response.ok || response.status === 204) {
 			console.error(`✘ Failed to fetch verification feed (HTTP ${response.status}).`);
-			return vehicleRoute;
+			return verifiedVehicles;
 		}
 
 		const buffer = Buffer.from(await response.arrayBuffer());
@@ -49,11 +59,19 @@ async function loadResource(resourceUrl: string) {
 				return;
 			}
 
-			vehicleRoute.set(entity.vehicle.vehicle.id, `TCAR:${entity.vehicle.trip.routeId}`);
+			verifiedVehicles.set(entity.vehicle.vehicle.id, {
+				position: {
+					latitude: entity.vehicle.position!.latitude,
+					longitude: entity.vehicle.position!.longitude,
+					bearing: entity.vehicle.position!.bearing!,
+				},
+				recordedAt: Math.floor(+entity.vehicle.timestamp! / 1000),
+				routeId: `TCAR:${entity.vehicle.trip.routeId}`,
+			});
 		});
 
 		console.log("✓ Successfully loaded resource!");
-		return vehicleRoute;
+		return verifiedVehicles;
 	} catch (cause) {
 		throw new Error("Failed to fetch verification feed", { cause });
 		// console.log("✘ Failed to load resource!", error);

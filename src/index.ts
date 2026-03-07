@@ -68,13 +68,13 @@ function onVehicle(_: string, vehicle: Vehicle) {
 
 	const directionId = vehicle.Direction - 1;
 
-	const verificationRejection = isVehicleVerified(
-		verificationFeed.vehicleRoute,
-		vehicleId,
-		routeId,
-		directionId,
-		vehicle.Destination,
-	);
+	const vehicleDescriptor = {
+		id: `TCAR:${vehicleId}`,
+		label: vehicle.Destination,
+	};
+
+	const verifiedVehicle = verificationFeed.verifiedVehicles.get(vehicleId);
+	const verificationRejection = isVehicleVerified(verifiedVehicle, routeId, directionId, vehicle.Destination);
 	if (verificationRejection !== undefined) {
 		const message = match(verificationRejection)
 			.with(
@@ -93,6 +93,14 @@ function onVehicle(_: string, vehicle: Vehicle) {
 			.otherwise(() => "Unknown rejection error");
 
 		console.warn(`\t✘ ${vehicleId}\t${message}`);
+
+		if (verifiedVehicle !== undefined) {
+			const storedVehicle = store.vehiclePositions.get(`VM:${vehicleDescriptor.id}`);
+			if (storedVehicle !== undefined && verifiedVehicle.recordedAt > +storedVehicle.timestamp!) {
+				storedVehicle.position = verifiedVehicle.position;
+				storedVehicle.timestamp = verifiedVehicle.recordedAt;
+			}
+		}
 		return;
 	}
 
@@ -109,11 +117,6 @@ function onVehicle(_: string, vehicle: Vehicle) {
 		routeId,
 		directionId,
 		scheduleRelationship: GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED,
-	};
-
-	const vehicleDescriptor = {
-		id: `TCAR:${vehicleId}`,
-		label: vehicle.Destination,
 	};
 
 	const isCommercial = !["Dépôt 2 Rivières", "Dépôt Lincoln"].includes(vehicle.Destination);
