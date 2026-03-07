@@ -96,9 +96,18 @@ function onVehicle(_: string, vehicle: Vehicle) {
 
 		if (verifiedVehicle !== undefined) {
 			const storedVehicle = store.vehiclePositions.get(`VM:${vehicleDescriptor.id}`);
-			if (storedVehicle !== undefined && verifiedVehicle.recordedAt > +storedVehicle.timestamp!) {
-				storedVehicle.position = verifiedVehicle.position;
-				storedVehicle.timestamp = verifiedVehicle.recordedAt;
+			if (storedVehicle !== undefined) {
+				if (verifiedVehicle.recordedAt > +storedVehicle.timestamp!) {
+					storedVehicle.timestamp = verifiedVehicle.recordedAt;
+					storedVehicle.position = verifiedVehicle.position;
+				} else {
+					storedVehicle.timestamp = Math.floor(recordedAt.epochMilliseconds / 1000);
+					storedVehicle.position = {
+						latitude: vehicle.Latitude,
+						longitude: vehicle.Longitude,
+						bearing: vehicle.Bearing,
+					};
+				}
 			}
 		}
 		return;
