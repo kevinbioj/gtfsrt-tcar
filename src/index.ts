@@ -128,7 +128,7 @@ function onVehicle(_: string, vehicle: Vehicle) {
 		scheduleRelationship: GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED,
 	};
 
-	const isCommercial = !["Dépôt 2 Rivières", "Dépôt Lincoln"].includes(vehicle.Destination);
+	const isCommercial = !["Dépôt 2 Rivières", "Dépôt Lincoln", "Dépôt St-Julien"].includes(vehicle.Destination);
 
 	store.vehiclePositions.set(`VM:${vehicleDescriptor.id}`, {
 		position: {
