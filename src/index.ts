@@ -96,7 +96,13 @@ function onVehicle(_: string, vehicle: Vehicle) {
 		return;
 	}
 
-	const currentStop = vehicle.StopTimeList[vehicle.VehicleAtStop || vehicle.StopTimeList.length === 1 ? 0 : 1];
+	const atStop =
+		vehicle.VehicleAtStop ||
+		vehicle.StopTimeList.length === 1 ||
+		(vehicle.StopTimeList[0].StopPointOrder === 1 &&
+			Temporal.Instant.compare(vehicle.StopTimeList[0].ExpectedTime, Temporal.Now.instant()) >= 0);
+
+	const currentStop = vehicle.StopTimeList[atStop ? 0 : 1];
 
 	const tripDescriptor = {
 		tripId: tripId,
@@ -118,12 +124,14 @@ function onVehicle(_: string, vehicle: Vehicle) {
 			longitude: vehicle.Longitude,
 			bearing: vehicle.Bearing,
 		},
-		occupancyStatus: isCommercial ? vehicleOccupancyStatuses.get(vehicleId)?.status : GtfsRealtime.transit_realtime.VehiclePosition.OccupancyStatus.NOT_BOARDABLE,
+		occupancyStatus: isCommercial
+			? vehicleOccupancyStatuses.get(vehicleId)?.status
+			: GtfsRealtime.transit_realtime.VehiclePosition.OccupancyStatus.NOT_BOARDABLE,
 		timestamp: Math.floor(recordedAt.epochMilliseconds / 1000),
 		vehicle: vehicleDescriptor,
 		...(isCommercial
 			? {
-					currentStatus: vehicle.VehicleAtStop
+					currentStatus: atStop
 						? GtfsRealtime.transit_realtime.VehiclePosition.VehicleStopStatus.STOPPED_AT
 						: GtfsRealtime.transit_realtime.VehiclePosition.VehicleStopStatus.IN_TRANSIT_TO,
 					stopId: hubResource.hub.idapCode.get(currentStop.StopPointId),
