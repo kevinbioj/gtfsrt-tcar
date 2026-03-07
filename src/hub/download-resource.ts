@@ -1,6 +1,8 @@
 import decompress from "decompress";
 
 export async function downloadResource(resourceUrl: string, outputDirectory: string) {
+	const lastModifiedResponse = await fetch(resourceUrl, { method: "HEAD", signal: AbortSignal.timeout(3_000) });
+
 	const response = await fetch(resourceUrl, {
 		signal: AbortSignal.timeout(30_000),
 	});
@@ -13,5 +15,5 @@ export async function downloadResource(resourceUrl: string, outputDirectory: str
 	await decompress(parts, outputDirectory);
 
 	// biome-ignore lint/style/noNonNullAssertion: the header is always sent
-	return { lastModified: response.headers.get("last-modified")! };
+	return { lastModified: lastModifiedResponse.headers.get("Last-Modified")! };
 }
