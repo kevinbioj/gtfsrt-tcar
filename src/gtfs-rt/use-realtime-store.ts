@@ -25,7 +25,7 @@ export function useRealtimeStore() {
 					seconds: lastArrival.delay ?? 0,
 				});
 
-				if (Temporal.Instant.compare(now, scheduledAt.add({ minutes: 2 })) <= 0) {
+				if (Temporal.Instant.compare(now, scheduledAt.add({ minutes: 10 })) <= 0) {
 					continue;
 				}
 			}
@@ -34,7 +34,7 @@ export function useRealtimeStore() {
 				now
 					// biome-ignore lint/style/noNonNullAssertion: we always set timestamp in store
 					.since(Temporal.Instant.fromEpochMilliseconds(+tripUpdate.timestamp! * 1000))
-					.total("minutes") >= 10
+					.total("hours") >= 1
 			) {
 				store.tripUpdates.delete(id);
 			}
@@ -45,7 +45,7 @@ export function useRealtimeStore() {
 				Temporal.Now.instant()
 					// biome-ignore lint/style/noNonNullAssertion: we always set timestamp in store
 					.since(Temporal.Instant.fromEpochMilliseconds(+vehicle.timestamp! * 1000))
-					.total("minutes") >= 10
+					.total("hours") >= 1
 			) {
 				store.vehiclePositions.delete(id);
 			}

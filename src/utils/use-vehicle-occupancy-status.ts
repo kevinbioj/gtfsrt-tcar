@@ -24,7 +24,7 @@ export function useVehicleOccupancyStatuses() {
 				}
 			});
 		},
-		Temporal.Duration.from({ minutes: 1 }).total("milliseconds"),
+		Temporal.Duration.from({ seconds: 30 }).total("milliseconds"),
 	);
 
 	return vehicleOccupancyStatuses;

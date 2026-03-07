@@ -3,7 +3,7 @@ import { Temporal } from "temporal-polyfill";
 export const HUB_RESOURCE_URL = "https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=HUB";
 export const PORT = 3000;
 export const SDH_URL = "https://api.mrn.cityway.fr/sdh/vehicles";
-export const SWEEP_THRESHOLD = Temporal.Duration.from({ minutes: 5 }).total("milliseconds");
+export const SWEEP_THRESHOLD = Temporal.Duration.from({ minutes: 15 }).total("milliseconds");
 export const VEHICLE_OCCUPANCY_STALENESS = Temporal.Duration.from({ minutes: 3 }).total("milliseconds");
 export const VEHICLE_OCCUPANCY_STATUS_URL = atob("aHR0cHM6Ly90Y2FyLmZsb3dseS5yZS9Qb3J0YWwvTWFwRGV2aWNlcy5hc3B4");
 export const VERIFICATION_FEED_URL = "https://reseau-astuce.fr/ftp/gtfsrt/Astuce.VehiclePosition.pb";

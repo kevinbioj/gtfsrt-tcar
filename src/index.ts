@@ -11,8 +11,8 @@ import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
 import { useVerificationFeed } from "./gtfs-rt/use-verification-feed.js";
 import { useHubResource } from "./hub/load-resource.js";
 import { useSdh, type Vehicle } from "./sdh/use-sdh.js";
-import { isVehicleVerified } from "./utils/verify-vehicle.js";
 import { useVehicleOccupancyStatuses } from "./utils/use-vehicle-occupancy-status.js";
+import { isVehicleVerified } from "./utils/verify-vehicle.js";
 
 console.log(` ,----.,--------.,------.,---.        ,------.,--------. ,--------.,-----.  ,---.  ,------.  
 '  .-./'--.  .--'|  .---'   .-',-----.|  .--. '--.  .--' '--.  .--'  .--./ /  O  \\ |  .--. ' 
