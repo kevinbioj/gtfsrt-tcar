@@ -27,7 +27,10 @@ export function useCache() {
 		}
 
 		const stopTime = vehicle.StopTimeList[0];
-		if (stopTime.StopPointId !== cached.lastStopId || stopTime.ExpectedTime !== cached.lastStopTime) {
+		if (
+			stopTime.StopPointId !== cached.lastStopId ||
+			(stopTime.ExpectedTime || stopTime.AimedTime) !== cached.lastStopTime
+		) {
 			return false;
 		}
 
@@ -44,7 +47,7 @@ export function useCache() {
 		const stopTime = vehicle.StopTimeList[0];
 		cache.set(id, {
 			lastStopId: stopTime.StopPointId,
-			lastStopTime: stopTime.ExpectedTime,
+			lastStopTime: stopTime.ExpectedTime ?? stopTime.AimedTime,
 			position: { latitude: vehicle.Latitude, longitude: vehicle.Longitude, bearing: vehicle.Bearing },
 			recordedAt: recordedAt.epochMilliseconds,
 		});

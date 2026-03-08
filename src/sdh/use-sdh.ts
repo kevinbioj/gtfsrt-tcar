@@ -31,8 +31,8 @@ export type StopTime = {
 	StopPointOrder: number;
 	AimedTime: string;
 	AimedDisplayTime: string;
-	ExpectedTime: string;
-	ExpectedDisplayTime: string;
+	ExpectedTime: string | null;
+	ExpectedDisplayTime: string | null;
 	WaitingTime: number;
 };
 

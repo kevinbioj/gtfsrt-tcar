@@ -113,11 +113,16 @@ function onVehicle(_: string, vehicle: Vehicle) {
 		return;
 	}
 
-	const atStop =
-		vehicle.VehicleAtStop ||
-		vehicle.StopTimeList.length === 1 ||
-		(vehicle.StopTimeList[0].StopPointOrder === 1 &&
-			Temporal.Instant.compare(vehicle.StopTimeList[0].ExpectedTime, Temporal.Now.instant()) >= 0);
+	let atStop = vehicle.VehicleAtStop || vehicle.StopTimeList.length === 1;
+
+	const firstStopTime = vehicle.StopTimeList[0];
+	if (!atStop && firstStopTime.StopPointOrder === 1) {
+		const time = firstStopTime.ExpectedTime
+			? Temporal.Instant.from(firstStopTime.ExpectedTime)
+			: Temporal.PlainDateTime.from(firstStopTime.AimedTime).toZonedDateTime("Europe/Paris").toInstant();
+
+		atStop = Temporal.Instant.compare(time, Temporal.Now.instant()) >= 0;
+	}
 
 	const currentStop = vehicle.StopTimeList[atStop ? 0 : 1];
 
@@ -166,7 +171,7 @@ function onVehicle(_: string, vehicle: Vehicle) {
 					};
 				}
 
-				if (!StopTime.IsMonitored) {
+				if (!StopTime.IsMonitored || StopTime.ExpectedTime === null) {
 					return {
 						...update,
 						scheduleRelationship: GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.NO_DATA,
