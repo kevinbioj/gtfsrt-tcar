@@ -56,7 +56,7 @@ export const VERIFIED_ROUTE_DESTINATIONS: Record<string, [string[], string[]]> =
 	"TCAR:03": [["C. Commercial", "Pôle Multimodal"], ["HDV Sotteville"]],
 	"TCAR:04": [["Mont-Riboudet"], ["Hameau Frévaux"]],
 	"TCAR:05": [["Lycée Galilée"], ["Théâtre des Arts"]],
-	"TCAR:06": [["Gare St-Etienne"], ["Martainville"]],
+	"TCAR:06": [["Gare St-Etienne"], ["Les Bouttières"]],
 	"TCAR:07": [["HDV Sotteville"], ["La Pléiade"]],
 	"TCAR:08": [["Tamarelle"], ["Lycée du Cailly"]],
 	"TCAR:10": [["Lycée Flaubert"], ["Maromme La Maine"]],

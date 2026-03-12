@@ -73,7 +73,7 @@ function onVehicle(_: string, vehicle: Vehicle) {
 		label: vehicle.Destination,
 	};
 
-	const verifiedVehicle = verificationFeed.verifiedVehicles.get(vehicleId);
+	const verifiedVehicle = verificationFeed.verifiedVehicles?.get(vehicleId);
 	const verificationRejection = isVehicleVerified(verifiedVehicle, routeId, directionId, vehicle.Destination);
 	if (verificationRejection !== undefined) {
 		const message = match(verificationRejection)

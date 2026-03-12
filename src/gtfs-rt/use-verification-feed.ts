@@ -54,8 +54,17 @@ async function loadResource(resourceUrl: string) {
 		const buffer = Buffer.from(await response.arrayBuffer());
 		const feed = GtfsRealtime.transit_realtime.FeedMessage.decode(buffer);
 
+		const now = Temporal.Now.instant();
+		if (now.since(Temporal.Instant.fromEpochMilliseconds(+feed.header.timestamp! * 1000)).total("minutes") >= 30) {
+			return verifiedVehicles;
+		}
+
 		feed.entity.forEach((entity) => {
-			if (!entity.vehicle?.vehicle?.id || !entity.vehicle?.trip?.routeId) {
+			if (
+				!entity.vehicle?.vehicle?.id ||
+				!entity.vehicle?.trip?.routeId ||
+				now.since(Temporal.Instant.fromEpochMilliseconds(+entity.vehicle.timestamp! * 1000)).total("minutes") >= 30
+			) {
 				return;
 			}
 
@@ -73,7 +82,7 @@ async function loadResource(resourceUrl: string) {
 		console.log("✓ Successfully loaded resource!");
 		return verifiedVehicles;
 	} catch (cause) {
-		throw new Error("Failed to fetch verification feed", { cause });
-		// console.log("✘ Failed to load resource!", error);
+		// throw new Error("Failed to fetch verification feed", { cause });
+		console.log("✘ Failed to update verification feed!", cause);
 	}
 }
