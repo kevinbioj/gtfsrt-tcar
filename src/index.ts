@@ -73,59 +73,6 @@ function onVehicle(_: string, vehicle: Vehicle) {
 		label: vehicle.Destination,
 	};
 
-	const verifiedVehicle = verificationFeed.verifiedVehicles?.get(vehicleId);
-	const verificationRejection = isVehicleVerified(verifiedVehicle, routeId, directionId, vehicle.Destination);
-	if (verificationRejection !== undefined) {
-		const message = match(verificationRejection)
-			.with(
-				{ type: "ROUTE_MISMATCH" },
-				({ verifiedRouteId }) =>
-					`Route mismatch with verification feed! Expected '${routeId}' but received '${verifiedRouteId}'.`,
-			)
-			.with(
-				{ type: "MISSING_ROUTE_DESTINATIONS" },
-				() => `Route '${routeId}' has no registered destinations, unable to verify!`,
-			)
-			.with(
-				{ type: "UNKNOWN_DESTINATION" },
-				() => `Destination '${vehicle.Destination}' is not verified for route '${routeId}'.`,
-			)
-			.otherwise(() => "Unknown rejection error");
-
-		console.warn(`\t✘ ${vehicleId}\t${message}`);
-
-		if (verifiedVehicle !== undefined) {
-			const storedVehicle = store.vehiclePositions.get(`VM:${vehicleDescriptor.id}`);
-			if (storedVehicle !== undefined) {
-				if (verifiedVehicle.recordedAt > +storedVehicle.timestamp!) {
-					storedVehicle.timestamp = verifiedVehicle.recordedAt;
-					storedVehicle.position = verifiedVehicle.position;
-				} else {
-					storedVehicle.timestamp = Math.floor(recordedAt.epochMilliseconds / 1000);
-					storedVehicle.position = {
-						latitude: vehicle.Latitude,
-						longitude: vehicle.Longitude,
-						bearing: vehicle.Bearing,
-					};
-				}
-			}
-		}
-		return;
-	}
-
-	let atStop = vehicle.VehicleAtStop || vehicle.StopTimeList.length === 1;
-
-	const firstStopTime = vehicle.StopTimeList[0];
-	if (!atStop && firstStopTime.StopPointOrder === 1) {
-		const time = firstStopTime.ExpectedTime
-			? Temporal.Instant.from(firstStopTime.ExpectedTime)
-			: Temporal.PlainDateTime.from(firstStopTime.AimedTime).toZonedDateTime("Europe/Paris").toInstant();
-
-		atStop = Temporal.Instant.compare(time, Temporal.Now.instant()) >= 0;
-	}
-
-	const currentStop = vehicle.StopTimeList[atStop ? 0 : 1];
-
 	const tripDescriptor = {
 		tripId: tripId,
 		routeId,
@@ -134,30 +81,58 @@ function onVehicle(_: string, vehicle: Vehicle) {
 	};
 
 	const isCommercial = !["Dépôt 2 Rivières", "Dépôt Lincoln", "Dépôt St-Julien"].includes(vehicle.Destination);
-
-	store.vehiclePositions.set(`VM:${vehicleDescriptor.id}`, {
-		position: {
-			latitude: vehicle.Latitude,
-			longitude: vehicle.Longitude,
-			bearing: vehicle.Bearing,
-		},
-		occupancyStatus: isCommercial
-			? vehicleOccupancyStatuses.get(vehicleId)?.status
-			: GtfsRealtime.transit_realtime.VehiclePosition.OccupancyStatus.NOT_BOARDABLE,
-		timestamp: Math.floor(recordedAt.epochMilliseconds / 1000),
-		vehicle: vehicleDescriptor,
-		...(isCommercial
-			? {
-					currentStatus: atStop
-						? GtfsRealtime.transit_realtime.VehiclePosition.VehicleStopStatus.STOPPED_AT
-						: GtfsRealtime.transit_realtime.VehiclePosition.VehicleStopStatus.IN_TRANSIT_TO,
-					stopId: hubResource.hub.idapCode.get(currentStop.StopPointId),
-					trip: tripDescriptor,
-				}
-			: {}),
-	});
+	let atStop = vehicle.VehicleAtStop || vehicle.StopTimeList.length === 1;
 
 	if (isCommercial) {
+		const verifiedVehicle = verificationFeed.verifiedVehicles?.get(vehicleId);
+		const verificationRejection = isVehicleVerified(verifiedVehicle, routeId, directionId, vehicle.Destination);
+		if (verificationRejection !== undefined) {
+			const message = match(verificationRejection)
+				.with(
+					{ type: "ROUTE_MISMATCH" },
+					({ verifiedRouteId }) =>
+						`Route mismatch with verification feed! Expected '${routeId}' but received '${verifiedRouteId}'.`,
+				)
+				.with(
+					{ type: "MISSING_ROUTE_DESTINATIONS" },
+					() => `Route '${routeId}' has no registered destinations, unable to verify!`,
+				)
+				.with(
+					{ type: "UNKNOWN_DESTINATION" },
+					() => `Destination '${vehicle.Destination}' is not verified for route '${routeId}'.`,
+				)
+				.otherwise(() => "Unknown rejection error");
+
+			console.warn(`\t✘ ${vehicleId}\t${message}`);
+
+			if (verifiedVehicle !== undefined) {
+				const storedVehicle = store.vehiclePositions.get(`VM:${vehicleDescriptor.id}`);
+				if (storedVehicle !== undefined) {
+					if (verifiedVehicle.recordedAt > +storedVehicle.timestamp!) {
+						storedVehicle.timestamp = verifiedVehicle.recordedAt;
+						storedVehicle.position = verifiedVehicle.position;
+					} else {
+						storedVehicle.timestamp = Math.floor(recordedAt.epochMilliseconds / 1000);
+						storedVehicle.position = {
+							latitude: vehicle.Latitude,
+							longitude: vehicle.Longitude,
+							bearing: vehicle.Bearing,
+						};
+					}
+				}
+			}
+			return;
+		}
+
+		const firstStopTime = vehicle.StopTimeList[0];
+		if (!atStop && firstStopTime.StopPointOrder === 1) {
+			const time = firstStopTime.ExpectedTime
+				? Temporal.Instant.from(firstStopTime.ExpectedTime)
+				: Temporal.PlainDateTime.from(firstStopTime.AimedTime).toZonedDateTime("Europe/Paris").toInstant();
+
+			atStop = Temporal.Instant.compare(time, Temporal.Now.instant()) >= 0;
+		}
+
 		store.tripUpdates.set(`ET:${tripDescriptor.tripId}`, {
 			stopTimeUpdate: vehicle.StopTimeList.flatMap((StopTime) => {
 				const update = {
@@ -196,6 +171,30 @@ function onVehicle(_: string, vehicle: Vehicle) {
 			trip: tripDescriptor,
 		});
 	}
+
+	const currentStop = vehicle.StopTimeList[atStop ? 0 : 1];
+
+	store.vehiclePositions.set(`VM:${vehicleDescriptor.id}`, {
+		position: {
+			latitude: vehicle.Latitude,
+			longitude: vehicle.Longitude,
+			bearing: vehicle.Bearing,
+		},
+		occupancyStatus: isCommercial
+			? vehicleOccupancyStatuses.get(vehicleId)?.status
+			: GtfsRealtime.transit_realtime.VehiclePosition.OccupancyStatus.NOT_BOARDABLE,
+		timestamp: Math.floor(recordedAt.epochMilliseconds / 1000),
+		vehicle: vehicleDescriptor,
+		...(isCommercial
+			? {
+					currentStatus: atStop
+						? GtfsRealtime.transit_realtime.VehiclePosition.VehicleStopStatus.STOPPED_AT
+						: GtfsRealtime.transit_realtime.VehiclePosition.VehicleStopStatus.IN_TRANSIT_TO,
+					stopId: hubResource.hub.idapCode.get(currentStop.StopPointId),
+					trip: tripDescriptor,
+				}
+			: {}),
+	});
 
 	console.log(
 		`\t⛛ ${vehicleId.padEnd(4, " ")}  ${recordedAt.toPlainTime()}  ${vehicle.VJourneyId}  ${(isCommercial ? vehicle.LineNumber : "").padEnd(10, " ")} ${directionId} ${vehicle.Destination}`,

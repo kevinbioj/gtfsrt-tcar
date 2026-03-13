@@ -55,15 +55,18 @@ async function loadResource(resourceUrl: string) {
 		const feed = GtfsRealtime.transit_realtime.FeedMessage.decode(buffer);
 
 		const now = Temporal.Now.instant();
+		const offsetSeconds = Math.floor(now.toZonedDateTimeISO("Europe/Paris").offsetNanoseconds / 1_000_000_000);
 		if (now.since(Temporal.Instant.fromEpochMilliseconds(+feed.header.timestamp! * 1000)).total("minutes") >= 30) {
 			return verifiedVehicles;
 		}
 
 		feed.entity.forEach((entity) => {
+			const timestamp = +entity.vehicle!.timestamp! + offsetSeconds;
+
 			if (
 				!entity.vehicle?.vehicle?.id ||
 				!entity.vehicle?.trip?.routeId ||
-				now.since(Temporal.Instant.fromEpochMilliseconds(+entity.vehicle.timestamp! * 1000)).total("minutes") >= 30
+				now.since(Temporal.Instant.fromEpochMilliseconds(timestamp * 1000)).total("minutes") >= 30
 			) {
 				return;
 			}
