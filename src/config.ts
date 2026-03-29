@@ -7,6 +7,7 @@ export const SWEEP_THRESHOLD = Temporal.Duration.from({ minutes: 15 }).total("mi
 export const VEHICLE_OCCUPANCY_STALENESS = Temporal.Duration.from({ minutes: 3 }).total("milliseconds");
 export const VEHICLE_OCCUPANCY_STATUS_URL = atob("aHR0cHM6Ly90Y2FyLmZsb3dseS5yZS9Qb3J0YWwvTWFwRGV2aWNlcy5hc3B4");
 export const VERIFICATION_FEED_URL = "https://reseau-astuce.fr/ftp/gtfsrt/Astuce.VehiclePosition.pb";
+export const VERIFICATION_TRIP_UPDATES_URL = "https://reseau-astuce.fr/ftp/gtfsrt/Astuce.TripUpdate.pb";
 
 export const MONITORED_LINES = [
 	"24211", // Métro

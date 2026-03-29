@@ -1,11 +1,19 @@
 import { serve } from "@hono/node-server";
+import { HubConnectionState } from "@microsoft/signalr";
 import GtfsRealtime from "gtfs-realtime-bindings";
 import { Hono } from "hono";
 import { Temporal } from "temporal-polyfill";
 import { match } from "ts-pattern";
 
 import { useCache } from "./cache/use-cache.js";
-import { HUB_RESOURCE_URL, MONITORED_LINES, PORT, SDH_URL, VERIFICATION_FEED_URL } from "./config.js";
+import {
+	HUB_RESOURCE_URL,
+	MONITORED_LINES,
+	PORT,
+	SDH_URL,
+	VERIFICATION_FEED_URL,
+	VERIFICATION_TRIP_UPDATES_URL,
+} from "./config.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
 import { useVerificationFeed } from "./gtfs-rt/use-verification-feed.js";
@@ -35,10 +43,71 @@ console.log(`➔ Listening on :${PORT}`);
 
 // ---
 
-const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL);
+const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL, VERIFICATION_TRIP_UPDATES_URL);
 const vehicleOccupancyStatuses = useVehicleOccupancyStatuses();
 const hubResource = await useHubResource(HUB_RESOURCE_URL);
-useSdh(SDH_URL, MONITORED_LINES, onVehicle);
+const sdh = await useSdh(SDH_URL, MONITORED_LINES, onVehicle);
+
+const fourAM = Temporal.PlainTime.from({ hour: 4 });
+setInterval(
+	() => {
+		const now = Temporal.Now.plainTimeISO("Europe/Paris");
+		const isSdhConnected = sdh.state === HubConnectionState.Connected;
+
+		if (verificationFeed.verifiedVehicles === undefined) {
+			return;
+		}
+
+		// SDH service seems to restart at 4AM and won't publish the end of Noctambus services.
+		// From 4AM to end of service, we use the verification feed as a relay to still publish Noctambus vehicles.
+		const isNoctambusTakeover = Temporal.PlainTime.compare(now, fourAM) >= 0;
+
+		// If both SDH is available and it's not 4AM yet, we don't loop over vehicles since we have no reason to do so.
+		if (isSdhConnected && !isNoctambusTakeover) {
+			return;
+		}
+
+		for (const [vehicleId, verifiedVehicle] of verificationFeed.verifiedVehicles) {
+			const isNoctambus = verifiedVehicle.routeId === "TCAR:98";
+
+			if (isSdhConnected && (!isNoctambus || (isNoctambus && !isNoctambusTakeover))) {
+				continue;
+			}
+
+			const vehicleKey = `TCAR:${vehicleId}`;
+
+			const tripDescriptor = {
+				tripId: verifiedVehicle.tripId,
+				routeId: verifiedVehicle.routeId,
+				directionId: verifiedVehicle.directionId,
+				scheduleRelationship: GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED,
+			};
+
+			store.vehiclePositions.set(`VM:${vehicleKey}`, {
+				occupancyStatus: vehicleOccupancyStatuses.get(vehicleId)?.status,
+				position: verifiedVehicle.position,
+				timestamp: verifiedVehicle.recordedAt,
+				vehicle: {
+					id: `${vehicleKey}`,
+				},
+				trip: tripDescriptor,
+			});
+
+			if (verifiedVehicle.stopTimeUpdate !== undefined) {
+				store.tripUpdates.set(`ET:${verifiedVehicle.tripId}`, {
+					stopTimeUpdate: verifiedVehicle.stopTimeUpdate,
+					timestamp: verifiedVehicle.recordedAt,
+					trip: tripDescriptor,
+				});
+			}
+
+			console.log(
+				`\t⛛ ${vehicleId.padEnd(4, " ")}  ${now}  BACKUP    ${verifiedVehicle.routeId.padEnd(10, " ")} ${verifiedVehicle.directionId}`,
+			);
+		}
+	},
+	Temporal.Duration.from({ seconds: 30 }).total("milliseconds"),
+);
 
 const cache = useCache();
 
