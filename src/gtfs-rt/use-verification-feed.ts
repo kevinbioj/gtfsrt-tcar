@@ -1,10 +1,15 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
 import { Temporal } from "temporal-polyfill";
+import type { useHubResource } from "../hub/load-resource.js";
 
 let currentInterval: NodeJS.Timeout | undefined;
 
-export async function useVerificationFeed(vehicleUrl: string, tripUpdatesUrl: string) {
-	const initialResource = await loadResource(vehicleUrl, tripUpdatesUrl);
+export async function useVerificationFeed(
+	vehicleUrl: string,
+	tripUpdatesUrl: string,
+	hubResource: Awaited<ReturnType<typeof useHubResource>>,
+) {
+	const initialResource = await loadResource(vehicleUrl, tripUpdatesUrl, hubResource);
 
 	const resource = {
 		verifiedVehicles: initialResource,
@@ -17,7 +22,7 @@ export async function useVerificationFeed(vehicleUrl: string, tripUpdatesUrl: st
 
 	currentInterval = setInterval(
 		async () => {
-			const newResource = await loadResource(vehicleUrl, tripUpdatesUrl);
+			const newResource = await loadResource(vehicleUrl, tripUpdatesUrl, hubResource);
 			resource.verifiedVehicles = newResource;
 			resource.importedAt = Temporal.Now.instant();
 		},
@@ -42,7 +47,11 @@ export type VerifiedVehicle = {
 	stopTimeUpdate?: GtfsRealtime.transit_realtime.TripUpdate.IStopTimeUpdate[];
 };
 
-async function loadResource(vehicleUrl: string, tripUpdatesUrl: string) {
+async function loadResource(
+	vehicleUrl: string,
+	tripUpdatesUrl: string,
+	hubResource: Awaited<ReturnType<typeof useHubResource>>,
+) {
 	console.log("➔ Fetching verification feeds.");
 
 	try {
@@ -110,7 +119,11 @@ async function loadResource(vehicleUrl: string, tripUpdatesUrl: string) {
 
 			const vehicle = verifiedVehicles.get(vehicleId);
 			if (vehicle !== undefined) {
-				vehicle.stopTimeUpdate = entity.tripUpdate!.stopTimeUpdate!;
+				vehicle.stopTimeUpdate = entity.tripUpdate!.stopTimeUpdate!.map((stopTimeUpdate) => ({
+					...stopTimeUpdate,
+					stopId: hubResource.hub.idapCode.get(+stopTimeUpdate.stopId!),
+					scheduleRelationship: GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SCHEDULED,
+				}));
 			}
 		});
 

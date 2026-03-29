@@ -43,9 +43,9 @@ console.log(`➔ Listening on :${PORT}`);
 
 // ---
 
-const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL, VERIFICATION_TRIP_UPDATES_URL);
 const vehicleOccupancyStatuses = useVehicleOccupancyStatuses();
 const hubResource = await useHubResource(HUB_RESOURCE_URL);
+const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL, VERIFICATION_TRIP_UPDATES_URL, hubResource);
 const sdh = await useSdh(SDH_URL, MONITORED_LINES, onVehicle);
 
 const fourAM = Temporal.PlainTime.from({ hour: 4 });
@@ -102,7 +102,7 @@ setInterval(
 			}
 
 			console.log(
-				`\t⛛ ${vehicleId.padEnd(4, " ")}  ${now}  BACKUP    ${verifiedVehicle.routeId.padEnd(10, " ")} ${verifiedVehicle.directionId}`,
+				`\t⛛ ${vehicleId.padEnd(4, " ")}  ${now.toString({ smallestUnit: "second" })}  BACKUP    ${verifiedVehicle.routeId.padEnd(10, " ")} ${verifiedVehicle.directionId}`,
 			);
 		}
 	},
