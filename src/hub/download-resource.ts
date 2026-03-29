@@ -14,6 +14,5 @@ export async function downloadResource(resourceUrl: string, outputDirectory: str
 	const parts = Buffer.from(await response.arrayBuffer());
 	await decompress(parts, outputDirectory);
 
-	// biome-ignore lint/style/noNonNullAssertion: the header is always sent
 	return { lastModified: lastModifiedResponse.headers.get("Last-Modified")! };
 }

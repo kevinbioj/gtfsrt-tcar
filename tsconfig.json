@@ -11,6 +11,7 @@
 		"strict": true,
 		"noImplicitOverride": true,
 		"module": "NodeNext",
+		"rootDir": "src",
 		"outDir": "dist",
 		"lib": ["ESNext"]
 	},

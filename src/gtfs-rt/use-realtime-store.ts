@@ -30,12 +30,7 @@ export function useRealtimeStore() {
 				}
 			}
 
-			if (
-				now
-					// biome-ignore lint/style/noNonNullAssertion: we always set timestamp in store
-					.since(Temporal.Instant.fromEpochMilliseconds(+tripUpdate.timestamp! * 1000))
-					.total("hours") >= 1
-			) {
+			if (now.since(Temporal.Instant.fromEpochMilliseconds(+tripUpdate.timestamp! * 1000)).total("hours") >= 1) {
 				store.tripUpdates.delete(id);
 			}
 		}
@@ -43,7 +38,6 @@ export function useRealtimeStore() {
 		for (const [id, vehicle] of store.vehiclePositions) {
 			if (
 				Temporal.Now.instant()
-					// biome-ignore lint/style/noNonNullAssertion: we always set timestamp in store
 					.since(Temporal.Instant.fromEpochMilliseconds(+vehicle.timestamp! * 1000))
 					.total("hours") >= 1
 			) {
