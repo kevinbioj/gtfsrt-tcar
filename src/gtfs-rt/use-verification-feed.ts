@@ -93,7 +93,7 @@ async function loadResource(
 					longitude: entity.vehicle.position!.longitude,
 					bearing: entity.vehicle.position!.bearing!,
 				},
-				recordedAt: +entity.vehicle.timestamp!,
+				recordedAt: timestamp,
 				routeId: `TCAR:${entity.vehicle.trip.routeId}`,
 				tripId: `TCAR:${entity.vehicle.trip.tripId}`,
 				directionId: entity.vehicle.trip.directionId ?? 0,
