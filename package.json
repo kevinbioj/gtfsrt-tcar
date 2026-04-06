@@ -20,6 +20,7 @@
 		"decompress": "^4.2.1",
 		"gtfs-realtime-bindings": "^1.1.1",
 		"hono": "^4.12.11",
+		"hono-rate-limiter": "^0.5.3",
 		"papaparse": "^5.5.3",
 		"temporal-polyfill": "^0.3.2",
 		"ts-pattern": "^5.9.0"
