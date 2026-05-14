@@ -21,24 +21,15 @@ export const MONITORED_LINES = [
 	"24101", // F3
 	"24102", // F4
 	"24103", // F5
-	"24104", // F6
 	"24105", // F7
 	"24106", // F8
 	"24108", // 10
 	"24115", // 11
-	"24116", // 13
-	"24117", // 14
 	"24118", // 15
 	"24119", // 20
 	"24133", // 22
-	"24144", // 27
-	"24145", // 28
-	"24157", // 33
-	"24169", // 35
 	"24186", // 41
-	"24192", // 42
 	"24193", // 43
-	"24194", // 44
 	"40874", // Noctambus
 ];
 
@@ -57,13 +48,10 @@ export const VERIFIED_ROUTE_DESTINATIONS: Record<string, [string[], string[]]> =
 	"TCAR:03": [["C. Commercial", "Pôle Multimodal"], ["HDV Sotteville"]],
 	"TCAR:04": [["Mont-Riboudet"], ["Hameau Frévaux"]],
 	"TCAR:05": [["Lycée Galilée"], ["Théâtre des Arts"]],
-	"TCAR:06": [["Gare St-Etienne"], ["Les Bouttières"]],
 	"TCAR:07": [["HDV Sotteville"], ["La Pléiade"]],
 	"TCAR:08": [["Tamarelle"], ["Lycée du Cailly"]],
 	"TCAR:10": [["Lycée Flaubert"], ["Maromme La Maine"]],
 	"TCAR:11": [["Ile Lacroix"], ["Coll. L.de Vinci"]],
-	"TCAR:13": [["Ecole de Musique"], ["Martainville"]],
-	"TCAR:14": [["Mairie Belbeuf"], ["Mont Pilon"]],
 	"TCAR:15": [
 		["Grand Val", "Hôtel de Ville"],
 		["Collège J. Verne", "Eude", "Hôtel de Ville"],
@@ -73,13 +61,7 @@ export const VERIFIED_ROUTE_DESTINATIONS: Record<string, [string[], string[]]> =
 		["Le Chapître", "Hôtel de Ville"],
 	],
 	"TCAR:22": [["Barr.de Darnétal"], ["P. de la Vatine"]],
-	"TCAR:27": [["Bel Air"], ["Georges Braque", "Théâtre des Arts"]],
-	"TCAR:28": [["Bois Tison"], ["Louise Michel"]],
-	"TCAR:33": [["HDV Sotteville"], ["F. Truffaut"]],
-	"TCAR:35": [["Mont-Riboudet", "Sente Houdeville"], ["Ecole Moulin"]],
 	"TCAR:41": [["La Bastille"], ["Ancienne Mare"]],
-	"TCAR:42": [["Vente Olivier"], ["Centre Routier", "Lebon"]],
 	"TCAR:43": [["Place du Vivier"], ["Longs Vallons"]],
-	"TCAR:44": [["E. Lacroix"], ["Chapelle St Siméon"]],
 	"TCAR:98": [["Cateliers", "Hôtel de Ville"], ["La Pléiade"]],
 };
