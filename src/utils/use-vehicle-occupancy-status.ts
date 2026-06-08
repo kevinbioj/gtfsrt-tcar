@@ -1,5 +1,4 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
-import { Temporal } from "temporal-polyfill";
 import { match } from "ts-pattern";
 
 import { VEHICLE_OCCUPANCY_STALENESS, VEHICLE_OCCUPANCY_STATUS_URL } from "../config.js";

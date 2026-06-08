@@ -1,5 +1,3 @@
-import { Temporal } from "temporal-polyfill";
-
 export const HUB_RESOURCE_URL = "https://api.mrn.cityway.fr/dataflow/offre-tc/download?provider=TCAR&dataFormat=HUB";
 export const PORT = 3000;
 export const SDH_URL = "https://api.mrn.cityway.fr/sdh/vehicles";

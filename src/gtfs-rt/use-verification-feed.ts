@@ -1,5 +1,4 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
-import { Temporal } from "temporal-polyfill";
 import type { useHubResource } from "../hub/load-resource.js";
 
 let currentInterval: NodeJS.Timeout | undefined;

@@ -1,7 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Temporal } from "temporal-polyfill";
 
 import { downloadResource } from "./download-resource.js";
 import { importResource } from "./import-resource.js";

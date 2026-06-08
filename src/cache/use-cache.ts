@@ -1,5 +1,3 @@
-import type { Temporal } from "temporal-polyfill";
-
 import type { Vehicle } from "../sdh/use-sdh.js";
 
 type CacheEntry = {

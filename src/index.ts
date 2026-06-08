@@ -3,7 +3,6 @@ import { HubConnectionState } from "@microsoft/signalr";
 import GtfsRealtime from "gtfs-realtime-bindings";
 import { Hono } from "hono";
 import { rateLimiter } from "hono-rate-limiter";
-import { Temporal } from "temporal-polyfill";
 import { match } from "ts-pattern";
 
 import { useCache } from "./cache/use-cache.js";
