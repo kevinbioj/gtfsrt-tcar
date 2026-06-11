@@ -13,7 +13,8 @@
 		"module": "NodeNext",
 		"rootDir": "src",
 		"outDir": "dist",
-		"lib": ["ESNext"]
+		"lib": ["DOM", "ESNext"],
+		"types": ["node"]
 	},
 	"include": ["**/*.ts", "**/*.tsx"],
 	"exclude": ["node_modules"]

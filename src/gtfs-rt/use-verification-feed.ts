@@ -1,14 +1,9 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
-import type { useHubResource } from "../hub/load-resource.js";
 
 let currentInterval: NodeJS.Timeout | undefined;
 
-export async function useVerificationFeed(
-	vehicleUrl: string,
-	tripUpdatesUrl: string,
-	hubResource: Awaited<ReturnType<typeof useHubResource>>,
-) {
-	const initialResource = await loadResource(vehicleUrl, tripUpdatesUrl, hubResource);
+export async function useVerificationFeed(vehicleUrl: string) {
+	const initialResource = await loadResource(vehicleUrl);
 
 	const resource = {
 		verifiedVehicles: initialResource,
@@ -21,7 +16,7 @@ export async function useVerificationFeed(
 
 	currentInterval = setInterval(
 		async () => {
-			const newResource = await loadResource(vehicleUrl, tripUpdatesUrl, hubResource);
+			const newResource = await loadResource(vehicleUrl);
 			resource.verifiedVehicles = newResource;
 			resource.importedAt = Temporal.Now.instant();
 		},
@@ -31,7 +26,7 @@ export async function useVerificationFeed(
 	return resource;
 }
 
-// --- loadResource
+// ---
 
 export type VerifiedVehicle = {
 	position: {
@@ -41,30 +36,23 @@ export type VerifiedVehicle = {
 	};
 	recordedAt: number;
 	routeId: string;
-	tripId?: string;
-	directionId?: number;
-	stopTimeUpdate?: GtfsRealtime.transit_realtime.TripUpdate.IStopTimeUpdate[];
+	directionId: number;
 };
 
-async function loadResource(
-	vehicleUrl: string,
-	tripUpdatesUrl: string,
-	hubResource: Awaited<ReturnType<typeof useHubResource>>,
-) {
-	console.log("➔ Fetching verification feeds.");
+async function loadResource(vehicleUrl: string) {
+	console.log("➔ Fetching verification feed.");
 
 	try {
 		const verifiedVehicles = new Map<string, VerifiedVehicle>();
 
 		const vehicleResponse = await fetch(vehicleUrl);
 		if (!vehicleResponse.ok || vehicleResponse.status === 204) {
-			console.error(`✘ Failed to fetch vehicle positions feed (HTTP ${vehicleResponse.status}).`);
+			console.error(`✘ Failed to fetch verification feed (HTTP ${vehicleResponse.status}).`);
 			return verifiedVehicles;
 		}
 
 		const vehicleBuffer = Buffer.from(await vehicleResponse.arrayBuffer());
 		const vehicleFeed = GtfsRealtime.transit_realtime.FeedMessage.decode(vehicleBuffer);
-		const vehicleTrip = new Map<string, string>();
 
 		const now = Temporal.Now.instant();
 		const offsetSeconds = Math.floor(now.toZonedDateTimeISO("Europe/Paris").offsetNanoseconds / 1_000_000_000);
@@ -94,41 +82,13 @@ async function loadResource(
 				},
 				recordedAt: timestamp,
 				routeId: `TCAR:${entity.vehicle.trip.routeId}`,
-				tripId: `TCAR:${entity.vehicle.trip.tripId}`,
 				directionId: entity.vehicle.trip.directionId ?? 0,
 			});
-
-			vehicleTrip.set(entity.vehicle.trip.tripId!, entity.vehicle.vehicle.id);
 		});
 
-		const tripResponse = await fetch(tripUpdatesUrl);
-		if (!tripResponse.ok || tripResponse.status === 204) {
-			console.warn(`✘ Failed to fetch trip updates feed (HTTP ${tripResponse.status}).`);
-			return verifiedVehicles;
-		}
-
-		const tripBuffer = Buffer.from(await tripResponse.arrayBuffer());
-		const tripFeed = GtfsRealtime.transit_realtime.FeedMessage.decode(tripBuffer);
-
-		tripFeed.entity.forEach((entity) => {
-			const vehicleId = vehicleTrip.get(entity.tripUpdate!.trip.tripId!);
-			if (vehicleId === undefined) {
-				return;
-			}
-
-			const vehicle = verifiedVehicles.get(vehicleId);
-			if (vehicle !== undefined) {
-				vehicle.stopTimeUpdate = entity.tripUpdate!.stopTimeUpdate!.map((stopTimeUpdate) => ({
-					...stopTimeUpdate,
-					stopId: hubResource.hub.idapCode.get(+stopTimeUpdate.stopId!),
-					scheduleRelationship: GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SCHEDULED,
-				}));
-			}
-		});
-
-		console.log("✓ Successfully loaded verification resources!");
+		console.log(`✓ Loaded ${verifiedVehicles.size} verified vehicles.`);
 		return verifiedVehicles;
 	} catch (cause) {
-		console.log("✘ Failed to update verification feeds!", cause);
+		console.error("✘ Failed to update verification feed!", cause);
 	}
 }

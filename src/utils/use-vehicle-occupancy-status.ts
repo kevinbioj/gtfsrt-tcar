@@ -1,5 +1,4 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
-import { match } from "ts-pattern";
 
 import { VEHICLE_OCCUPANCY_STALENESS, VEHICLE_OCCUPANCY_STATUS_URL } from "../config.js";
 
@@ -67,11 +66,14 @@ async function updateVehicleOccupancyStatuses(vehicleOccupancyStatuses: Map<stri
 
 			vehicleOccupancyStatuses.set(vehicleNumber, {
 				recordedAt: now,
-				status: match(backgroundColor)
-					.with("1cc88a", () => GtfsRealtime.transit_realtime.VehiclePosition.OccupancyStatus.MANY_SEATS_AVAILABLE)
-					.with("f6c23e", () => GtfsRealtime.transit_realtime.VehiclePosition.OccupancyStatus.FEW_SEATS_AVAILABLE)
-					.with("e74a3b", () => GtfsRealtime.transit_realtime.VehiclePosition.OccupancyStatus.FULL)
-					.otherwise(() => GtfsRealtime.transit_realtime.VehiclePosition.OccupancyStatus.NO_DATA_AVAILABLE),
+				status:
+					backgroundColor === "1cc88a"
+						? GtfsRealtime.transit_realtime.VehiclePosition.OccupancyStatus.MANY_SEATS_AVAILABLE
+						: backgroundColor === "f6c23e"
+							? GtfsRealtime.transit_realtime.VehiclePosition.OccupancyStatus.FEW_SEATS_AVAILABLE
+							: backgroundColor === "e74a3b"
+								? GtfsRealtime.transit_realtime.VehiclePosition.OccupancyStatus.FULL
+								: GtfsRealtime.transit_realtime.VehiclePosition.OccupancyStatus.NO_DATA_AVAILABLE,
 			});
 		}
 

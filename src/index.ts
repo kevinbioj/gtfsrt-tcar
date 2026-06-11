@@ -1,34 +1,23 @@
 import { serve } from "@hono/node-server";
-import { HubConnectionState } from "@microsoft/signalr";
 import GtfsRealtime from "gtfs-realtime-bindings";
 import { Hono } from "hono";
 import { rateLimiter } from "hono-rate-limiter";
-import { match } from "ts-pattern";
 
-import { useCache } from "./cache/use-cache.js";
-import {
-	HUB_RESOURCE_URL,
-	MONITORED_LINES,
-	PORT,
-	SDH_URL,
-	VERIFICATION_FEED_URL,
-	VERIFICATION_TRIP_UPDATES_URL,
-} from "./config.js";
+import { POLL_INTERVAL, PORT, TRIP_UPDATES_URL, VEHICLE_POSITIONS_URL, VERIFICATION_FEED_URL } from "./config.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
 import { useVerificationFeed } from "./gtfs-rt/use-verification-feed.js";
-import { useHubResource } from "./hub/load-resource.js";
-import { useSdh, type Vehicle } from "./sdh/use-sdh.js";
 import { useVehicleOccupancyStatuses } from "./utils/use-vehicle-occupancy-status.js";
-import { isVehicleVerified } from "./utils/verify-vehicle.js";
 
-console.log(` ,----.,--------.,------.,---.        ,------.,--------. ,--------.,-----.  ,---.  ,------.  
-'  .-./'--.  .--'|  .---'   .-',-----.|  .--. '--.  .--' '--.  .--'  .--./ /  O  \\ |  .--. ' 
-|  | .---.|  |   |  \`--,\`.  \`-.'-----'|  '--'.'  |  |       |  |  |  |    |  .-.  ||  '--'.' 
-'  '--'  ||  |   |  |\`  .-'    |      |  |\\  \\   |  |       |  |  '  '--'\\|  | |  ||  |\\  \\  
+console.log(` ,----.,--------.,------.,---.        ,------.,--------. ,--------.,-----.  ,---.  ,------.
+'  .-./'--.  .--'|  .---'   .-',-----.|  .--. '--.  .--' '--.  .--'  .--./ /  O  \\ |  .--. '
+|  | .---.|  |   |  \`--,\`.  \`-.'-----'|  '--'.'  |  |       |  |  |  |    |  .-.  ||  '--'.'
+'  '--'  ||  |   |  |\`  .-'    |      |  |\\  \\   |  |       |  |  '  '--'\\|  | |  ||  |\\  \\
  \`------' \`--'   \`--'   \`-----'       \`--' '--'  \`--'       \`--'   \`-----'\`--' \`--'\`--' '--'`);
 
 const store = useRealtimeStore();
+const vehicleOccupancyStatuses = useVehicleOccupancyStatuses();
+const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL);
 
 const hono = new Hono();
 hono.use(
@@ -39,241 +28,73 @@ hono.use(
 		handler: (c) => c.json({ code: 429, message: "Too many requests, please try again later." }, 429),
 	}),
 );
-hono.get("/trip-updates", (c) => handleRequest(c, "protobuf", store.tripUpdates, null));
-hono.get("/trip-updates.json", (c) => handleRequest(c, "json", store.tripUpdates, null));
+
 hono.get("/vehicle-positions", (c) => handleRequest(c, "protobuf", null, store.vehiclePositions));
 hono.get("/vehicle-positions.json", (c) => handleRequest(c, "json", null, store.vehiclePositions));
+hono.get("/trip-updates", (c) => c.redirect(TRIP_UPDATES_URL, 302));
+hono.get("/trip-updates.json", (c) => c.redirect(TRIP_UPDATES_URL, 302));
 hono.get("/", (c) =>
-	handleRequest(c, c.req.query("format") === "json" ? "json" : "protobuf", store.tripUpdates, store.vehiclePositions),
+	handleRequest(c, c.req.query("format") === "json" ? "json" : "protobuf", null, store.vehiclePositions),
 );
+
 serve({ fetch: hono.fetch, port: PORT });
 console.log(`➔ Listening on :${PORT}`);
 
 // ---
 
-const vehicleOccupancyStatuses = useVehicleOccupancyStatuses();
-const hubResource = await useHubResource(HUB_RESOURCE_URL);
-const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL, VERIFICATION_TRIP_UPDATES_URL, hubResource);
-const sdh = await useSdh(SDH_URL, MONITORED_LINES, onVehicle);
-
-const fourAM = Temporal.PlainTime.from({ hour: 4 });
-setInterval(
-	() => {
-		const now = Temporal.Now.plainTimeISO("Europe/Paris");
-		const isSdhConnected = sdh.state === HubConnectionState.Connected;
-
-		if (verificationFeed.verifiedVehicles === undefined) {
+async function poll() {
+	try {
+		const response = await fetch(VEHICLE_POSITIONS_URL);
+		if (!response.ok || response.status === 204) {
+			console.error(`✘ Vehicle positions fetch failed (HTTP ${response.status}).`);
 			return;
 		}
 
-		// SDH service seems to restart at 4AM and won't publish the end of Noctambus services.
-		// From 4AM to end of service, we use the verification feed as a relay to still publish Noctambus vehicles.
-		const isNoctambusTakeover = Temporal.PlainTime.compare(now, fourAM) >= 0;
+		const buffer = Buffer.from(await response.arrayBuffer());
+		const feed = GtfsRealtime.transit_realtime.FeedMessage.decode(buffer);
 
-		// If both SDH is available and it's not 4AM yet, we don't loop over vehicles since we have no reason to do so.
-		if (isSdhConnected && !isNoctambusTakeover) {
-			return;
-		}
+		store.vehiclePositions.clear();
 
-		for (const [vehicleId, verifiedVehicle] of verificationFeed.verifiedVehicles) {
-			const isNoctambus = verifiedVehicle.routeId === "TCAR:98";
+		for (const entity of feed.entity) {
+			if (!entity.vehicle?.vehicle?.id) continue;
 
-			if (isSdhConnected && (!isNoctambus || (isNoctambus && !isNoctambusTakeover))) {
+			const id = entity.vehicle.vehicle.id;
+			const vehicleId = id.split(":")[3]!;
+			const routeId = entity.vehicle.trip?.routeId ?? "";
+			const directionId = entity.vehicle.trip?.directionId ?? 0;
+
+			const verifiedVehicle = verificationFeed.verifiedVehicles?.get(vehicleId);
+
+			if (verifiedVehicle === undefined) {
 				continue;
 			}
 
-			const vehicleKey = `TCAR:${vehicleId}`;
+			const entityTimestamp = +(entity.vehicle.timestamp ?? 0);
 
-			const tripDescriptor = {
-				tripId: verifiedVehicle.tripId,
-				routeId: verifiedVehicle.routeId,
-				directionId: verifiedVehicle.directionId,
-				scheduleRelationship: GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED,
-			};
+			if (verifiedVehicle.routeId !== routeId) {
+				console.warn(`\t✘ ${vehicleId}\tRoute mismatch! New: '${routeId}' vs. Old: '${verifiedVehicle.routeId}'.`);
 
-			store.vehiclePositions.set(`VM:${vehicleKey}`, {
+				store.vehiclePositions.set(`VM:${id}`, {
+					...entity.vehicle,
+					position: verifiedVehicle.recordedAt > entityTimestamp ? verifiedVehicle.position : entity.vehicle.position,
+					occupancyStatus: vehicleOccupancyStatuses.get(vehicleId)?.status,
+				});
+				continue;
+			}
+
+			store.vehiclePositions.set(`VM:${id}`, {
+				...entity.vehicle,
 				occupancyStatus: vehicleOccupancyStatuses.get(vehicleId)?.status,
-				position: verifiedVehicle.position,
-				timestamp: verifiedVehicle.recordedAt,
-				vehicle: {
-					id: `${vehicleKey}`,
-				},
-				trip: tripDescriptor,
 			});
 
-			if (verifiedVehicle.stopTimeUpdate !== undefined) {
-				store.tripUpdates.set(`ET:${verifiedVehicle.tripId}`, {
-					stopTimeUpdate: verifiedVehicle.stopTimeUpdate,
-					timestamp: verifiedVehicle.recordedAt,
-					trip: tripDescriptor,
-				});
-			}
-
-			console.log(
-				`\t⛛ ${vehicleId.padEnd(4, " ")}  ${now.toString({ smallestUnit: "second" })}  BACKUP    ${verifiedVehicle.routeId.padEnd(10, " ")} ${verifiedVehicle.directionId}`,
-			);
-		}
-	},
-	Temporal.Duration.from({ seconds: 30 }).total("milliseconds"),
-);
-
-const cache = useCache();
-
-function onVehicle(_: string, vehicle: Vehicle) {
-	const vehicleId = vehicle.VehicleRef.split(":")[3];
-	const recordedAt = Temporal.PlainDateTime.from(vehicle.RecordedAtTime).toZonedDateTime("Europe/Paris");
-
-	if (cache.isCached(vehicleId, recordedAt, vehicle)) {
-		return;
-	}
-
-	if (cache.upsert(vehicleId, recordedAt, vehicle)) {
-		return;
-	}
-
-	const tripId = hubResource.hub.courseOperation.get(vehicle.VJourneyId);
-	if (tripId === undefined) {
-		console.warn(`✘ ${vehicleId}\tUnknown operation for journey id: '${vehicle.VJourneyId}'.`);
-		return;
-	}
-
-	const routeId = hubResource.hub.comCode.get(vehicle.LineId);
-	if (routeId === undefined) {
-		console.warn(`\t✘ ${vehicleId}\tCould not find line code for id '${vehicle.LineId}'.`);
-		return;
-	}
-
-	const directionId = vehicle.Direction - 1;
-
-	const vehicleDescriptor = {
-		id: `TCAR:${vehicleId}`,
-		label: vehicle.Destination,
-	};
-
-	const tripDescriptor = {
-		tripId: tripId,
-		routeId,
-		directionId,
-		scheduleRelationship: GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED,
-	};
-
-	const isCommercial = !["Dépôt 2 Rivières", "Dépôt Lincoln", "Dépôt St-Julien"].includes(vehicle.Destination);
-	let atStop = vehicle.VehicleAtStop || vehicle.StopTimeList.length === 1;
-
-	if (isCommercial) {
-		const verifiedVehicle = verificationFeed.verifiedVehicles?.get(vehicleId);
-		const verificationRejection = isVehicleVerified(verifiedVehicle, routeId, directionId, vehicle.Destination);
-		if (verificationRejection !== undefined) {
-			const message = match(verificationRejection)
-				.with(
-					{ type: "ROUTE_MISMATCH" },
-					({ verifiedRouteId }) =>
-						`Route mismatch with verification feed! Expected '${routeId}' but received '${verifiedRouteId}'.`,
-				)
-				.with(
-					{ type: "MISSING_ROUTE_DESTINATIONS" },
-					() => `Route '${routeId}' has no registered destinations, unable to verify!`,
-				)
-				.with(
-					{ type: "UNKNOWN_DESTINATION" },
-					() => `Destination '${vehicle.Destination}' is not verified for route '${routeId}'.`,
-				)
-				.otherwise(() => "Unknown rejection error");
-
-			console.warn(`\t✘ ${vehicleId}\t${message}`);
-
-			if (verifiedVehicle !== undefined) {
-				const storedVehicle = store.vehiclePositions.get(`VM:${vehicleDescriptor.id}`);
-				if (storedVehicle !== undefined) {
-					if (verifiedVehicle.recordedAt > +storedVehicle.timestamp!) {
-						storedVehicle.timestamp = verifiedVehicle.recordedAt;
-						storedVehicle.position = verifiedVehicle.position;
-					} else {
-						storedVehicle.timestamp = Math.floor(recordedAt.epochMilliseconds / 1000);
-						storedVehicle.position = {
-							latitude: vehicle.Latitude,
-							longitude: vehicle.Longitude,
-							bearing: vehicle.Bearing,
-						};
-					}
-				}
-			}
-			return;
+			console.log(`\t⛛ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} ${directionId}`);
 		}
 
-		const firstStopTime = vehicle.StopTimeList[0];
-		if (!atStop && firstStopTime.StopPointOrder === 1) {
-			const time = firstStopTime.ExpectedTime
-				? Temporal.Instant.from(firstStopTime.ExpectedTime)
-				: Temporal.PlainDateTime.from(firstStopTime.AimedTime).toZonedDateTime("Europe/Paris").toInstant();
-
-			atStop = Temporal.Instant.compare(time, Temporal.Now.instant()) >= 0;
-		}
-
-		store.tripUpdates.set(`ET:${tripDescriptor.tripId}`, {
-			stopTimeUpdate: vehicle.StopTimeList.flatMap((StopTime) => {
-				const update = {
-					stopId: hubResource.hub.idapCode.get(StopTime.StopPointId),
-				};
-
-				if (StopTime.IsCancelled) {
-					return {
-						...update,
-						scheduleRelationship: GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SKIPPED,
-					};
-				}
-
-				if (!StopTime.IsMonitored || StopTime.ExpectedTime === null) {
-					return {
-						...update,
-						scheduleRelationship: GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.NO_DATA,
-					};
-				}
-
-				const expectedTime = Temporal.Instant.from(StopTime.ExpectedTime);
-				const aimedTime = Temporal.PlainDateTime.from(StopTime.AimedTime).toZonedDateTime("Europe/Paris");
-				const event = {
-					delay: Math.floor((expectedTime.epochMilliseconds - aimedTime.epochMilliseconds) / 1000),
-					time: Math.floor(expectedTime.epochMilliseconds / 1000),
-				};
-
-				return {
-					...update,
-					arrival: event,
-					departure: event,
-					scheduleRelationship: GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SCHEDULED,
-				};
-			}),
-			timestamp: Math.floor(recordedAt.epochMilliseconds / 1000),
-			trip: tripDescriptor,
-		});
+		console.log(`✓ ${store.vehiclePositions.size} positions.`);
+	} catch (cause) {
+		console.error("✘ Poll error:", cause);
 	}
-
-	const currentStop = vehicle.StopTimeList[atStop ? 0 : 1];
-
-	store.vehiclePositions.set(`VM:${vehicleDescriptor.id}`, {
-		position: {
-			latitude: vehicle.Latitude,
-			longitude: vehicle.Longitude,
-			bearing: vehicle.Bearing,
-		},
-		occupancyStatus: isCommercial
-			? vehicleOccupancyStatuses.get(vehicleId)?.status
-			: GtfsRealtime.transit_realtime.VehiclePosition.OccupancyStatus.NOT_BOARDABLE,
-		timestamp: Math.floor(recordedAt.epochMilliseconds / 1000),
-		vehicle: vehicleDescriptor,
-		...(isCommercial
-			? {
-					currentStatus: atStop
-						? GtfsRealtime.transit_realtime.VehiclePosition.VehicleStopStatus.STOPPED_AT
-						: GtfsRealtime.transit_realtime.VehiclePosition.VehicleStopStatus.IN_TRANSIT_TO,
-					stopId: hubResource.hub.idapCode.get(currentStop.StopPointId),
-					trip: tripDescriptor,
-				}
-			: {}),
-	});
-
-	console.log(
-		`\t⛛ ${vehicleId.padEnd(4, " ")}  ${recordedAt.toPlainTime()}  ${vehicle.VJourneyId}  ${(isCommercial ? vehicle.LineNumber : "").padEnd(10, " ")} ${directionId} ${vehicle.Destination}`,
-	);
 }
+
+setInterval(poll, POLL_INTERVAL);
+await poll();
