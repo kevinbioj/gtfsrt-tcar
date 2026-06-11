@@ -22,8 +22,8 @@ const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL);
 const hono = new Hono();
 hono.use(
 	rateLimiter({
-		windowMs: 10_000,
-		limit: 1,
+		windowMs: 5_000,
+		limit: 5,
 		keyGenerator: (c) => `${c.req.header("CF-Connecting-IP")}_${c.req.method}_${c.req.path}`,
 		handler: (c) => c.json({ code: 429, message: "Too many requests, please try again later." }, 429),
 	}),
@@ -31,8 +31,8 @@ hono.use(
 
 hono.get("/vehicle-positions", (c) => handleRequest(c, "protobuf", null, store.vehiclePositions));
 hono.get("/vehicle-positions.json", (c) => handleRequest(c, "json", null, store.vehiclePositions));
-hono.get("/trip-updates", (c) => c.redirect(TRIP_UPDATES_URL, 302));
-hono.get("/trip-updates.json", (c) => c.redirect(TRIP_UPDATES_URL, 302));
+hono.get("/trip-updates", (c) => handleRequest(c, "protobuf", store.tripUpdates, null));
+hono.get("/trip-updates.json", (c) => handleRequest(c, "json", store.tripUpdates, null));
 hono.get("/", (c) =>
 	handleRequest(c, c.req.query("format") === "json" ? "json" : "protobuf", null, store.vehiclePositions),
 );
@@ -96,5 +96,31 @@ async function poll() {
 	}
 }
 
+async function pollTripUpdates() {
+	try {
+		const response = await fetch(TRIP_UPDATES_URL);
+		if (!response.ok || response.status === 204) {
+			console.error(`✘ Trip updates fetch failed (HTTP ${response.status}).`);
+			return;
+		}
+
+		const buffer = Buffer.from(await response.arrayBuffer());
+		const feed = GtfsRealtime.transit_realtime.FeedMessage.decode(buffer);
+
+		store.tripUpdates.clear();
+
+		for (const entity of feed.entity) {
+			if (!entity.tripUpdate) continue;
+			store.tripUpdates.set(entity.id, entity.tripUpdate);
+		}
+
+		console.log(`✓ ${store.tripUpdates.size} trip updates.`);
+	} catch (cause) {
+		console.error("✘ Trip updates poll error:", cause);
+	}
+}
+
 setInterval(poll, POLL_INTERVAL);
+setInterval(pollTripUpdates, POLL_INTERVAL);
 await poll();
+await pollTripUpdates();
