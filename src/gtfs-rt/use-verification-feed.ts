@@ -2,7 +2,10 @@ import GtfsRealtime from "gtfs-realtime-bindings";
 
 let currentInterval: NodeJS.Timeout | undefined;
 
-export async function useVerificationFeed(vehicleUrl: string) {
+export async function useVerificationFeed(
+	vehicleUrl: string,
+	onUpdate?: (verifiedVehicles: Map<string, VerifiedVehicle>) => void,
+) {
 	const initialResource = await loadResource(vehicleUrl);
 
 	const resource = {
@@ -19,6 +22,9 @@ export async function useVerificationFeed(vehicleUrl: string) {
 			const newResource = await loadResource(vehicleUrl);
 			resource.verifiedVehicles = newResource;
 			resource.importedAt = Temporal.Now.instant();
+			if (newResource && onUpdate) {
+				onUpdate(newResource);
+			}
 		},
 		Temporal.Duration.from({ minutes: 1 }).total("milliseconds"),
 	);

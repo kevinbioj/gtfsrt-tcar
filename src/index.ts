@@ -17,7 +17,22 @@ console.log(` ,----.,--------.,------.,---.        ,------.,--------. ,--------.
 
 const store = useRealtimeStore();
 const vehicleOccupancyStatuses = useVehicleOccupancyStatuses();
-const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL);
+const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL, (verifiedVehicles) => {
+	for (const [key, storedVehicle] of store.vehiclePositions) {
+		const vehicleId = key.split(":")[2]!;
+		const verifiedVehicle = verifiedVehicles.get(vehicleId);
+		if (!verifiedVehicle) continue;
+
+		const entityTimestamp = +(storedVehicle.timestamp ?? 0);
+		if (verifiedVehicle.recordedAt > entityTimestamp) {
+			store.vehiclePositions.set(key, {
+				...storedVehicle,
+				position: verifiedVehicle.position,
+				timestamp: verifiedVehicle.recordedAt,
+			});
+		}
+	}
+});
 
 const hono = new Hono();
 hono.use(
