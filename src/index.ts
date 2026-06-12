@@ -69,23 +69,33 @@ async function poll() {
 				continue;
 			}
 
+			const now = Temporal.Now.instant();
+			if (now.since(Temporal.Instant.fromEpochMilliseconds(verifiedVehicle.recordedAt * 1000)).total("minutes") >= 30) {
+				console.warn(`\t✘ ${vehicleId}\tExcluded: last verified position is stale (> 30 min).`);
+				continue;
+			}
+
 			const entityTimestamp = +(entity.vehicle.timestamp ?? 0);
 
 			if (verifiedVehicle.routeId !== routeId) {
 				console.warn(`\t✘ ${vehicleId}\tRoute mismatch! New: '${routeId}' vs. Old: '${verifiedVehicle.routeId}'.`);
 
-				store.vehiclePositions.set(`VM:TCAR:${vehicleId}`, {
-					...entity.vehicle,
-					vehicle: { ...entity.vehicle.vehicle, id: `TCAR:${vehicleId}` },
-					position: verifiedVehicle.recordedAt > entityTimestamp ? verifiedVehicle.position : entity.vehicle.position,
-					occupancyStatus: vehicleOccupancyStatuses.get(vehicleId)?.status,
-				});
+				const storedVehicle = store.vehiclePositions.get(`VM:TCAR:${vehicleId}`);
+				if (storedVehicle !== undefined) {
+					store.vehiclePositions.set(`VM:TCAR:${vehicleId}`, {
+						...storedVehicle,
+						vehicle: { id: `TCAR:${vehicleId}` },
+						position: verifiedVehicle.recordedAt > entityTimestamp ? verifiedVehicle.position : entity.vehicle.position,
+						occupancyStatus: vehicleOccupancyStatuses.get(vehicleId)?.status,
+					});
+				}
+
 				continue;
 			}
 
 			store.vehiclePositions.set(`VM:TCAR:${vehicleId}`, {
 				...entity.vehicle,
-				vehicle: { ...entity.vehicle.vehicle, id: `TCAR:${vehicleId}` },
+				vehicle: { id: `TCAR:${vehicleId}` },
 				occupancyStatus: vehicleOccupancyStatuses.get(vehicleId)?.status,
 			});
 
