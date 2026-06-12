@@ -3,7 +3,7 @@ import GtfsRealtime from "gtfs-realtime-bindings";
 import { Hono } from "hono";
 import { rateLimiter } from "hono-rate-limiter";
 
-import { POLL_INTERVAL, PORT, TRIP_UPDATES_URL, VEHICLE_POSITIONS_URL, VERIFICATION_FEED_URL } from "./config.js";
+import { ALLOWED_LINES, POLL_INTERVAL, PORT, TRIP_UPDATES_URL, VEHICLE_POSITIONS_URL, VERIFICATION_FEED_URL } from "./config.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
 import { useVerificationFeed } from "./gtfs-rt/use-verification-feed.js";
@@ -62,6 +62,9 @@ async function poll() {
 			const vehicleId = id.split(":")[3]!;
 			const routeId = entity.vehicle.trip?.routeId ?? "";
 			const directionId = entity.vehicle.trip?.directionId ?? 0;
+
+			const lineId = routeId.split(":").at(-1) ?? "";
+			if (!ALLOWED_LINES.has(lineId)) continue;
 
 			const verifiedVehicle = verificationFeed.verifiedVehicles?.get(vehicleId);
 
@@ -123,6 +126,9 @@ async function pollTripUpdates() {
 
 		for (const entity of feed.entity) {
 			if (!entity.tripUpdate) continue;
+			const tripRouteId = entity.tripUpdate.trip?.routeId ?? "";
+			const tripLineId = tripRouteId.split(":").at(-1) ?? "";
+			if (!ALLOWED_LINES.has(tripLineId)) continue;
 			const tripEntityId = entity.id.split(":").at(-1) ?? entity.id;
 			store.tripUpdates.set(`ET:TCAR:${tripEntityId}`, entity.tripUpdate);
 		}

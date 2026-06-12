@@ -1,3 +1,5 @@
+export const ALLOWED_LINES = new Set(['90', '91', '92', '93', '94', '95', '01', '02', '03', '04', '05', '07', '08', '10', '11', '15', '20', '22', '41', '43', '98']);
+
 export const PORT = 3000;
 export const POLL_INTERVAL = 20_000;
 export const VEHICLE_POSITIONS_URL =
