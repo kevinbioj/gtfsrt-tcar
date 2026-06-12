@@ -74,16 +74,18 @@ async function poll() {
 			if (verifiedVehicle.routeId !== routeId) {
 				console.warn(`\t✘ ${vehicleId}\tRoute mismatch! New: '${routeId}' vs. Old: '${verifiedVehicle.routeId}'.`);
 
-				store.vehiclePositions.set(`VM:${id}`, {
+				store.vehiclePositions.set(`VM:TCAR:${vehicleId}`, {
 					...entity.vehicle,
+					vehicle: { ...entity.vehicle.vehicle, id: `TCAR:${vehicleId}` },
 					position: verifiedVehicle.recordedAt > entityTimestamp ? verifiedVehicle.position : entity.vehicle.position,
 					occupancyStatus: vehicleOccupancyStatuses.get(vehicleId)?.status,
 				});
 				continue;
 			}
 
-			store.vehiclePositions.set(`VM:${id}`, {
+			store.vehiclePositions.set(`VM:TCAR:${vehicleId}`, {
 				...entity.vehicle,
+				vehicle: { ...entity.vehicle.vehicle, id: `TCAR:${vehicleId}` },
 				occupancyStatus: vehicleOccupancyStatuses.get(vehicleId)?.status,
 			});
 
@@ -111,7 +113,8 @@ async function pollTripUpdates() {
 
 		for (const entity of feed.entity) {
 			if (!entity.tripUpdate) continue;
-			store.tripUpdates.set(entity.id, entity.tripUpdate);
+			const tripEntityId = entity.id.split(":").at(-1) ?? entity.id;
+			store.tripUpdates.set(`ET:TCAR:${tripEntityId}`, entity.tripUpdate);
 		}
 
 		console.log(`✓ ${store.tripUpdates.size} trip updates.`);
