@@ -6,9 +6,10 @@ import {
 	analyzeAlerts,
 	flushCache,
 	pruneCache,
+	type RemovedStop,
 } from "../ai/analyze-alert.js";
 import { ALLOWED_LINES } from "../config.js";
-import { normalizeStopName, type StaticGtfs } from "./use-static-gtfs.js";
+import { normalizeStopName, type OrderedStop, type StaticGtfs } from "./use-static-gtfs.js";
 
 export type SkipBucket = { directionId: number | null; stopIds: Set<string> };
 /** routeId → buckets d'arrêts à sauter (SKIPPED), par sens. */
@@ -133,13 +134,9 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 
 			const allowedRouteIds = allowedById.get(input.id) ?? new Set();
 			for (const removedStop of analysis.removedStops) {
-				const stopIds = gtfs.stopNameIndex.get(normalizeStopName(removedStop.stopName));
-				if (stopIds === undefined) continue; // hors périmètre GTFS → ignoré
-
 				for (const route of removedStop.routes) {
 					if (!allowedRouteIds.has(route.routeId)) continue;
-					mergeSkip(skipIndex, route.routeId, route.directionId, stopIds);
-					removedCount += 1;
+					removedCount += applyRemovedStop(skipIndex, gtfs, removedStop, route.routeId, route.directionId);
 				}
 			}
 		}
@@ -192,6 +189,67 @@ function buildRouteContext(routeIds: Set<string>, gtfs: StaticGtfs): AlertRouteC
 		shortName: routeId.split(":").at(-1) ?? routeId,
 		directions: gtfs.routeDirections.get(routeId) ?? [],
 	}));
+}
+
+/**
+ * Ajoute à l'index les arrêts à sauter pour un arrêt supprimé (ou une plage « de X à Y »)
+ * sur une ligne/sens. Renvoie le nombre de contributions (pour les logs). Hors périmètre → 0.
+ */
+function applyRemovedStop(
+	skipIndex: SkipIndex,
+	gtfs: StaticGtfs,
+	removedStop: RemovedStop,
+	routeId: string,
+	directionId: number | null,
+): number {
+	const startName = normalizeStopName(removedStop.stopName);
+
+	// Arrêt seul : tous les quais portant ce nom (le filtrage par trip garantit la pertinence).
+	if (!removedStop.toStopName) {
+		const stopIds = gtfs.stopNameIndex.get(startName);
+		if (stopIds === undefined) return 0; // hors périmètre GTFS → ignoré
+		mergeSkip(skipIndex, routeId, directionId, stopIds);
+		return 1;
+	}
+
+	// Plage : on étend le long de l'itinéraire de la ligne, par sens.
+	const endName = normalizeStopName(removedStop.toStopName);
+	const directions = directionId === null ? [0, 1] : [directionId];
+	let count = 0;
+
+	for (const dir of directions) {
+		const sequence = gtfs.routeStopSequences.get(routeId)?.get(dir);
+		const rangeIds = sequence ? sliceRange(sequence, startName, endName) : undefined;
+
+		if (rangeIds && rangeIds.size > 0) {
+			mergeSkip(skipIndex, routeId, dir, rangeIds);
+			count += 1;
+			continue;
+		}
+
+		// Repli : au moins les extrémités connues du GTFS (pas de régression si l'itinéraire manque).
+		const fallback = new Set<string>();
+		for (const id of gtfs.stopNameIndex.get(startName) ?? []) fallback.add(id);
+		for (const id of gtfs.stopNameIndex.get(endName) ?? []) fallback.add(id);
+		if (fallback.size > 0) {
+			mergeSkip(skipIndex, routeId, dir, fallback);
+			count += 1;
+		}
+	}
+
+	return count;
+}
+
+/** Renvoie les stopId de l'itinéraire entre deux arrêts (inclus), quel que soit le sens de citation. */
+function sliceRange(sequence: OrderedStop[], startName: string, endName: string): Set<string> | undefined {
+	const startIndex = sequence.findIndex((stop) => stop.name === startName);
+	const endIndex = sequence.findIndex((stop) => stop.name === endName);
+	if (startIndex === -1 || endIndex === -1) return undefined;
+
+	const [lo, hi] = startIndex <= endIndex ? [startIndex, endIndex] : [endIndex, startIndex];
+	const ids = new Set<string>();
+	for (let i = lo; i <= hi; i += 1) ids.add(sequence[i]!.stopId);
+	return ids;
 }
 
 function mergeSkip(skipIndex: SkipIndex, routeId: string, directionId: number | null, stopIds: Set<string>) {

@@ -20,9 +20,14 @@ export type AlertInput = {
 	today: string;
 };
 
-/** Un arrêt supprimé, avec les lignes/sens concernés. `directionId: null` = les deux sens. */
+/**
+ * Un arrêt supprimé (ou une plage d'arrêts), avec les lignes/sens concernés.
+ * `directionId: null` = les deux sens. `toStopName` non vide = plage « de stopName à toStopName »
+ * (tous les arrêts intermédiaires de l'itinéraire sont aussi supprimés).
+ */
 export type RemovedStop = {
 	stopName: string;
+	toStopName: string;
 	routes: { routeId: string; directionId: number | null }[];
 };
 
@@ -51,6 +56,7 @@ const BATCH_SCHEMA = {
 							additionalProperties: false,
 							properties: {
 								stopName: { type: "string" },
+								toStopName: { type: "string" },
 								routes: {
 									type: "array",
 									items: {
@@ -64,7 +70,7 @@ const BATCH_SCHEMA = {
 									},
 								},
 							},
-							required: ["stopName", "routes"],
+							required: ["stopName", "toStopName", "routes"],
 						},
 					},
 					period: {
@@ -96,6 +102,10 @@ RÈGLES STRICTES :
 - Sens : sers-toi des terminus (headsigns) fournis pour chaque ligne afin de déduire directionId ("0" ou "1"). Si le texte ne précise aucun sens (suppression dans les deux sens), utilise "any".
 - Utilise EXACTEMENT le nom de l'arrêt tel qu'il est écrit dans l'alerte.
 - Si aucun arrêt n'est supprimé, retourne une liste vide.
+
+PLAGES D'ARRÊTS :
+- Si le texte décrit une PLAGE d'arrêts consécutifs ("de X à Y", "entre X et Y", "des arrêts X à Y", "de X jusqu'à Y"), renvoie UN SEUL removedStop avec stopName="X" (premier arrêt de la plage) et toStopName="Y" (dernier arrêt). Tous les arrêts intermédiaires seront supprimés automatiquement.
+- Pour un arrêt seul, ou une liste explicite ("X, Y et Z"), renvoie des entrées séparées avec toStopName="".
 
 PÉRIODE D'EFFET (champ "period") :
 - Extrais du texte la date de DÉBUT et la date de FIN de la perturbation (la période pendant laquelle l'arrêt n'est pas desservi).
@@ -250,6 +260,7 @@ function normalizeAnalysis(raw: unknown): AlertAnalysis {
 	for (const stop of (raw as { removedStops: unknown[] }).removedStops) {
 		if (typeof stop !== "object" || stop === null) continue;
 		const stopName = (stop as { stopName?: unknown }).stopName;
+		const toStopNameRaw = (stop as { toStopName?: unknown }).toStopName;
 		const routesRaw = (stop as { routes?: unknown }).routes;
 		if (typeof stopName !== "string" || !Array.isArray(routesRaw)) continue;
 
@@ -262,7 +273,8 @@ function normalizeAnalysis(raw: unknown): AlertAnalysis {
 			routes.push({ routeId, directionId: parseDirection(directionId) });
 		}
 
-		if (routes.length > 0) removedStops.push({ stopName, routes });
+		const toStopName = typeof toStopNameRaw === "string" ? toStopNameRaw : "";
+		if (routes.length > 0) removedStops.push({ stopName, toStopName, routes });
 	}
 
 	return { removedStops, period: parsePeriod((raw as { period?: unknown }).period) };
@@ -308,9 +320,18 @@ function getClient(): Anthropic | undefined {
 	return client;
 }
 
+// Version du schéma/prompt d'analyse : à incrémenter quand la logique change, pour invalider
+// proprement les caches existants (ex. ajout de l'extraction des plages « de X à Y »).
+const ANALYSIS_VERSION = 2;
+
 function hashAlert(alert: AlertInput): string {
 	// On inclut le contexte des lignes (terminus/sens) : si le GTFS change, l'analyse est
 	// ré-invalidée automatiquement pour les seules alertes concernées. `today` est exclu
 	// à dessein (les dates extraites sont absolues → pas d'invalidation quotidienne).
-	return JSON.stringify({ header: alert.headerText, desc: alert.descriptionText, routes: alert.routes });
+	return JSON.stringify({
+		v: ANALYSIS_VERSION,
+		header: alert.headerText,
+		desc: alert.descriptionText,
+		routes: alert.routes,
+	});
 }
