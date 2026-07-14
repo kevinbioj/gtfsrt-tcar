@@ -4,8 +4,17 @@ services:
       context: .
       dockerfile: ./Dockerfile
     container_name: gtfsrt-tcar
+    # Injecte les variables du .env (dont ANTHROPIC_API_KEY) dans le conteneur.
+    # Le .env n'est pas copié dans l'image : il est lu au déploiement.
+    env_file:
+      - path: .env
+        required: false
     environment:
       - TZ=Europe/Paris
     ports:
       - "127.0.0.1:50001:3000"
+    # Persiste le cache d'analyse IA des Service Alerts dans le dossier .cache du projet
+    # (le workdir est /app → le cache est écrit dans /app/.cache).
+    volumes:
+      - ./.cache:/app/.cache
     restart: unless-stopped
