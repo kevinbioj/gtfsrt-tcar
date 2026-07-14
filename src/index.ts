@@ -2,12 +2,33 @@ import { serve } from "@hono/node-server";
 import GtfsRealtime from "gtfs-realtime-bindings";
 import { Hono } from "hono";
 import { rateLimiter } from "hono-rate-limiter";
-
-import { ALLOWED_LINES, POLL_INTERVAL, PORT, TRIP_UPDATES_URL, VEHICLE_POSITIONS_URL, VERIFICATION_FEED_URL } from "./config.js";
+import { loadCache } from "./ai/analyze-alert.js";
+import {
+	ALERT_CACHE_PATH,
+	ALERTS_POLL_INTERVAL,
+	ALLOWED_LINES,
+	GTFS_REFRESH_INTERVAL,
+	POLL_INTERVAL,
+	PORT,
+	SERVICE_ALERTS_URL,
+	STATIC_GTFS_URL,
+	TRIP_UPDATES_URL,
+	VEHICLE_POSITIONS_URL,
+	VERIFICATION_FEED_URL,
+} from "./config.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
+import { skippedStopIds, useServiceAlerts } from "./gtfs-rt/use-service-alerts.js";
+import { useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
 import { useVerificationFeed } from "./gtfs-rt/use-verification-feed.js";
 import { useVehicleOccupancyStatuses } from "./utils/use-vehicle-occupancy-status.js";
+
+// Charge un fichier .env s'il existe (clé ANTHROPIC_API_KEY notamment).
+try {
+	process.loadEnvFile();
+} catch {
+	// pas de .env → on s'appuie sur les variables d'environnement du système
+}
 
 console.log(` ,----.,--------.,------.,---.        ,------.,--------. ,--------.,-----.  ,---.  ,------.
 '  .-./'--.  .--'|  .---'   .-',-----.|  .--. '--.  .--' '--.  .--'  .--./ /  O  \\ |  .--. '
@@ -33,6 +54,10 @@ const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL, (verif
 		}
 	}
 });
+
+loadCache(ALERT_CACHE_PATH);
+const staticGtfs = await useStaticGtfs(STATIC_GTFS_URL, GTFS_REFRESH_INTERVAL);
+const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs);
 
 const hono = new Hono();
 hono.use(
@@ -144,6 +169,9 @@ async function pollTripUpdates() {
 			const tripRouteId = entity.tripUpdate.trip?.routeId ?? "";
 			const tripLineId = tripRouteId.split(":").at(-1) ?? "";
 			if (!ALLOWED_LINES.has(tripLineId)) continue;
+
+			applySkippedStops(entity.tripUpdate, tripRouteId);
+
 			const tripEntityId = entity.id.split(":").at(-1) ?? entity.id;
 			store.tripUpdates.set(`ET:TCAR:${tripEntityId}`, entity.tripUpdate);
 		}
@@ -151,6 +179,22 @@ async function pollTripUpdates() {
 		console.log(`✓ ${store.tripUpdates.size} trip updates.`);
 	} catch (cause) {
 		console.error("✘ Trip updates poll error:", cause);
+	}
+}
+
+function applySkippedStops(tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate, tripRouteId: string) {
+	if (!tripUpdate.stopTimeUpdate?.length) return;
+
+	const directionId = tripUpdate.trip?.directionId ?? 0;
+	const stopIds = skippedStopIds(serviceAlerts.skipIndex, tripRouteId, directionId);
+	if (stopIds.size === 0) return;
+
+	for (const stopTimeUpdate of tripUpdate.stopTimeUpdate) {
+		if (!stopTimeUpdate.stopId || !stopIds.has(stopTimeUpdate.stopId)) continue;
+		stopTimeUpdate.scheduleRelationship =
+			GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SKIPPED;
+		stopTimeUpdate.arrival = null;
+		stopTimeUpdate.departure = null;
 	}
 }
 
