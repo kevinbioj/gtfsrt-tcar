@@ -136,9 +136,12 @@ async function poll() {
 				continue;
 			}
 
+			const useVerifiedPosition = verifiedVehicle.recordedAt > entityTimestamp;
 			store.vehiclePositions.set(`VM:TCAR:${vehicleId}`, {
 				...entity.vehicle,
 				vehicle: { id: `TCAR:${vehicleId}` },
+				position: useVerifiedPosition ? verifiedVehicle.position : entity.vehicle.position,
+				timestamp: useVerifiedPosition ? verifiedVehicle.recordedAt : entity.vehicle.timestamp,
 				occupancyStatus: vehicleOccupancyStatuses.get(vehicleId)?.status,
 			});
 
