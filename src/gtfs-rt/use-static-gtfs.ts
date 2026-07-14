@@ -1,9 +1,14 @@
 import { unzipSync } from "fflate";
 
+import { ALLOWED_LINES } from "../config.js";
+
 export type RouteDirection = { directionId: number; headsigns: string[] };
 
 /** Un arrêt dans l'itinéraire d'une ligne : son quai (stopId) et son nom normalisé. */
 export type OrderedStop = { stopId: string; name: string };
+
+/** Un arrêt dans l'horaire théorique d'un trip : sa position (stop_sequence) et son quai. */
+export type TripStop = { stopSequence: number; stopId: string };
 
 export type StaticGtfs = {
 	/** Nom d'arrêt normalisé → identifiants des quais (enfants) portant ce nom. */
@@ -12,6 +17,8 @@ export type StaticGtfs = {
 	routeDirections: Map<string, RouteDirection[]>;
 	/** routeId → directionId → itinéraire ordonné des arrêts (pour étendre les plages « de X à Y »). */
 	routeStopSequences: Map<string, Map<number, OrderedStop[]>>;
+	/** tripId → horaire théorique ordonné (pour réinsérer un arrêt supprimé absent du GTFS-RT). */
+	tripStopSequences: Map<string, TripStop[]>;
 };
 
 let currentInterval: NodeJS.Timeout | undefined;
@@ -52,7 +59,12 @@ export function normalizeStopName(name: string): string {
 async function loadGtfs(url: string): Promise<StaticGtfs> {
 	console.log("➔ Fetching static GTFS.");
 
-	const empty: StaticGtfs = { stopNameIndex: new Map(), routeDirections: new Map(), routeStopSequences: new Map() };
+	const empty: StaticGtfs = {
+		stopNameIndex: new Map(),
+		routeDirections: new Map(),
+		routeStopSequences: new Map(),
+		tripStopSequences: new Map(),
+	};
 
 	try {
 		const response = await fetch(url);
@@ -74,14 +86,14 @@ async function loadGtfs(url: string): Promise<StaticGtfs> {
 		const decoder = new TextDecoder();
 		const { stopNameIndex, idToName } = buildStops(decoder.decode(files["stops.txt"]));
 		const { routeDirections, tripMeta } = buildTrips(decoder.decode(files["trips.txt"]));
-		const routeStopSequences = files["stop_times.txt"]
-			? buildRouteStopSequences(decoder.decode(files["stop_times.txt"]), tripMeta, idToName)
-			: new Map<string, Map<number, OrderedStop[]>>();
+		const { routeStopSequences, tripStopSequences } = files["stop_times.txt"]
+			? buildSequences(decoder.decode(files["stop_times.txt"]), tripMeta, idToName)
+			: { routeStopSequences: new Map(), tripStopSequences: new Map() };
 
 		console.log(
-			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${routeStopSequences.size} route itineraries from GTFS.`,
+			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${routeStopSequences.size} route itineraries, ${tripStopSequences.size} trip schedules from GTFS.`,
 		);
-		return { stopNameIndex, routeDirections, routeStopSequences };
+		return { stopNameIndex, routeDirections, routeStopSequences, tripStopSequences };
 	} catch (cause) {
 		console.error("✘ Failed to load static GTFS!", cause);
 		return empty;
@@ -177,64 +189,70 @@ function buildTrips(csv: string): {
 }
 
 /**
- * Construit, par (routeId, directionId), l'itinéraire ordonné des arrêts, à partir du trip le
- * plus long de chaque sens (itinéraire de référence). Sert à étendre les plages « de X à Y ».
+ * À partir de stop_times, construit :
+ *  - `routeStopSequences` : par (routeId, directionId), l'itinéraire de référence (trip le plus
+ *    long) — sert à étendre les plages « de X à Y » ;
+ *  - `tripStopSequences` : par tripId (lignes autorisées uniquement), l'horaire théorique ordonné
+ *    — sert à réinsérer un arrêt supprimé absent du GTFS-RT, avec son stop_sequence.
  */
-function buildRouteStopSequences(
+function buildSequences(
 	csv: string,
 	tripMeta: Map<string, { routeId: string; directionId: number }>,
 	idToName: Map<string, string>,
-): Map<string, Map<number, OrderedStop[]>> {
+): { routeStopSequences: Map<string, Map<number, OrderedStop[]>>; tripStopSequences: Map<string, TripStop[]> } {
+	const routeStopSequences = new Map<string, Map<number, OrderedStop[]>>();
+	const tripStopSequences = new Map<string, TripStop[]>();
+
 	const rows = parseCsv(csv);
 	const header = rows.next().value;
-	if (!header) return new Map();
+	if (!header) return { routeStopSequences, tripStopSequences };
 
 	const tripCol = header.indexOf("trip_id");
 	const stopCol = header.indexOf("stop_id");
 	const seqCol = header.indexOf("stop_sequence");
-	if (tripCol === -1 || stopCol === -1 || seqCol === -1) return new Map();
+	if (tripCol === -1 || stopCol === -1 || seqCol === -1) return { routeStopSequences, tripStopSequences };
 
-	// Regroupe les arrêts par trip.
-	const perTrip = new Map<string, [number, string][]>();
+	// Regroupe les arrêts par trip (uniquement les trips connus, lignes autorisées).
+	const perTrip = new Map<string, TripStop[]>();
 	for (const row of rows) {
 		const tripId = row[tripCol];
 		const stopId = row[stopCol];
-		if (!tripId || !stopId || !tripMeta.has(tripId)) continue;
-		const seq = Number.parseInt(row[seqCol] ?? "", 10);
-		if (Number.isNaN(seq)) continue;
+		if (!tripId || !stopId) continue;
+		const meta = tripMeta.get(tripId);
+		if (meta === undefined || !ALLOWED_LINES.has(meta.routeId.split(":").at(-1) ?? "")) continue;
+		const stopSequence = Number.parseInt(row[seqCol] ?? "", 10);
+		if (Number.isNaN(stopSequence)) continue;
 
 		let stops = perTrip.get(tripId);
 		if (stops === undefined) {
 			stops = [];
 			perTrip.set(tripId, stops);
 		}
-		stops.push([seq, stopId]);
+		stops.push({ stopSequence, stopId });
 	}
 
-	// Conserve, par (routeId, directionId), le trip ayant le plus d'arrêts.
-	const result = new Map<string, Map<number, OrderedStop[]>>();
 	const bestLength = new Map<string, number>();
 	for (const [tripId, stops] of perTrip) {
+		stops.sort((a, b) => a.stopSequence - b.stopSequence);
+		tripStopSequences.set(tripId, stops);
+
+		// Itinéraire de référence : le trip le plus long de chaque (route, sens).
 		const meta = tripMeta.get(tripId);
 		if (meta === undefined) continue;
-
 		const key = `${meta.routeId}:${meta.directionId}`;
 		if ((bestLength.get(key) ?? 0) >= stops.length) continue;
 		bestLength.set(key, stops.length);
 
-		const ordered = stops
-			.sort((a, b) => a[0] - b[0])
-			.map(([, stopId]) => ({ stopId, name: normalizeStopName(idToName.get(stopId) ?? "") }));
-
-		let directions = result.get(meta.routeId);
+		const ordered = stops.map(({ stopId }) => ({ stopId, name: normalizeStopName(idToName.get(stopId) ?? "") }));
+		let directions = routeStopSequences.get(meta.routeId);
 		if (directions === undefined) {
 			directions = new Map();
-			result.set(meta.routeId, directions);
+			routeStopSequences.set(meta.routeId, directions);
 		}
 		directions.set(meta.directionId, ordered);
 	}
 
-	return result;
+	return { routeStopSequences, tripStopSequences };
 }
 
 /** Parseur CSV minimal gérant les champs entre guillemets. */

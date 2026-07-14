@@ -99,7 +99,10 @@ RÈGLES STRICTES :
 - Ne retourne QUE les arrêts explicitement non desservis, supprimés ou sautés.
 - N'inclus PAS les arrêts simplement reportés, déplacés de quelques mètres, déviés, ni les arrêts de report/substitution, ni les informations d'ascenseurs/escaliers/quais.
 - Pour chaque arrêt supprimé, indique les lignes concernées (uniquement parmi celles fournies) et le sens.
-- Sens : sers-toi des terminus (headsigns) fournis pour chaque ligne afin de déduire directionId ("0" ou "1"). Si le texte ne précise aucun sens (suppression dans les deux sens), utilise "any".
+- Sens : sers-toi des terminus (headsigns) fournis pour chaque ligne afin de déduire directionId ("0" ou "1").
+  - La direction est souvent donnée par le SENS DE LA DÉVIATION, indiqué globalement en tête de l'alerte (« Déviation en direction de X », « vers X »), parfois différent par ligne (« Déviation en direction de X (F2), Y (F7) et Z (22) »). Dans ce cas, applique cette direction aux arrêts supprimés de la ligne concernée, MÊME SI la phrase de suppression ne répète pas le sens. Rapproche le terminus/lieu cité (X) du headsign de la ligne pour trouver directionId.
+  - « dans les deux sens » → "any".
+  - N'utilise "any" que si AUCUNE direction n'est déductible pour la ligne.
 - Utilise EXACTEMENT le nom de l'arrêt tel qu'il est écrit dans l'alerte.
 - Si aucun arrêt n'est supprimé, retourne une liste vide.
 
@@ -322,7 +325,7 @@ function getClient(): Anthropic | undefined {
 
 // Version du schéma/prompt d'analyse : à incrémenter quand la logique change, pour invalider
 // proprement les caches existants (ex. ajout de l'extraction des plages « de X à Y »).
-const ANALYSIS_VERSION = 2;
+const ANALYSIS_VERSION = 3;
 
 function hashAlert(alert: AlertInput): string {
 	// On inclut le contexte des lignes (terminus/sens) : si le GTFS change, l'analyse est

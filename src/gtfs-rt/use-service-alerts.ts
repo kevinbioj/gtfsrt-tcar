@@ -68,6 +68,56 @@ export function skippedStopIds(skipIndex: SkipIndex, routeId: string, directionI
 	return stopIds;
 }
 
+/**
+ * Marque en SKIPPED les arrêts supprimés d'un trip. Deux cas :
+ *  1. arrêt présent dans le GTFS-RT → on le bascule en SKIPPED (temps retirés) ;
+ *  2. arrêt supprimé mais ABSENT du GTFS-RT (la source l'a retiré) → on le réinsère comme entrée
+ *     SKIPPED, à sa position (stop_sequence issu de l'horaire théorique du trip).
+ */
+export function applySkippedStops(
+	tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate,
+	routeId: string,
+	skipIndex: SkipIndex,
+	gtfs: StaticGtfs,
+) {
+	const stopTimeUpdates = tripUpdate.stopTimeUpdate;
+	if (!stopTimeUpdates?.length) return;
+
+	const directionId = tripUpdate.trip?.directionId ?? 0;
+	const stopIds = skippedStopIds(skipIndex, routeId, directionId);
+	if (stopIds.size === 0) return;
+
+	const SKIPPED = GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SKIPPED;
+
+	// 1. Arrêts déjà présents → bascule en SKIPPED.
+	const presentIds = new Set<string>();
+	for (const stopTimeUpdate of stopTimeUpdates) {
+		if (stopTimeUpdate.stopId) presentIds.add(stopTimeUpdate.stopId);
+		if (stopTimeUpdate.stopId && stopIds.has(stopTimeUpdate.stopId)) {
+			stopTimeUpdate.scheduleRelationship = SKIPPED;
+			stopTimeUpdate.arrival = null;
+			stopTimeUpdate.departure = null;
+		}
+	}
+
+	// 2. Arrêts supprimés absents du GTFS-RT → réinsertion (à partir de l'horaire théorique du trip).
+	const tripId = tripUpdate.trip?.tripId;
+	const schedule = tripId ? gtfs.tripStopSequences.get(tripId) : undefined;
+	if (schedule === undefined) return;
+
+	const inserted: GtfsRealtime.transit_realtime.TripUpdate.IStopTimeUpdate[] = [];
+	for (const { stopSequence, stopId } of schedule) {
+		if (stopIds.has(stopId) && !presentIds.has(stopId)) {
+			inserted.push({ stopSequence, stopId, scheduleRelationship: SKIPPED });
+		}
+	}
+	if (inserted.length > 0) {
+		tripUpdate.stopTimeUpdate = [...stopTimeUpdates, ...inserted].sort(
+			(a, b) => (a.stopSequence ?? 0) - (b.stopSequence ?? 0),
+		);
+	}
+}
+
 // ---
 
 async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState): Promise<PollResult | null> {
@@ -203,36 +253,50 @@ function applyRemovedStop(
 	directionId: number | null,
 ): number {
 	const startName = normalizeStopName(removedStop.stopName);
+	const directions = directionId === null ? [0, 1] : [directionId];
 
-	// Arrêt seul : tous les quais portant ce nom (le filtrage par trip garantit la pertinence).
+	// Arrêt seul.
 	if (!removedStop.toStopName) {
-		const stopIds = gtfs.stopNameIndex.get(startName);
-		if (stopIds === undefined) return 0; // hors périmètre GTFS → ignoré
-		mergeSkip(skipIndex, routeId, directionId, stopIds);
-		return 1;
+		// Match exact global (chemin rapide, comportement inchangé).
+		const exact = gtfs.stopNameIndex.get(startName);
+		if (exact !== undefined) {
+			mergeSkip(skipIndex, routeId, directionId, exact);
+			return 1;
+		}
+		// Sinon, match flou dans le contexte de la ligne (ex. « Piscine » → « Piscine de Bihorel »).
+		let count = 0;
+		for (const dir of directions) {
+			const sequence = gtfs.routeStopSequences.get(routeId)?.get(dir);
+			const canonical = sequence?.find((stop) => stopNameMatches(startName, stop.name))?.name;
+			const stopIds = canonical ? gtfs.stopNameIndex.get(canonical) : undefined;
+			if (stopIds && stopIds.size > 0) {
+				mergeSkip(skipIndex, routeId, dir, stopIds);
+				count += 1;
+			}
+		}
+		return count;
 	}
 
-	// Plage : on étend le long de l'itinéraire de la ligne, par sens.
+	// Plage : on détermine les arrêts entre les deux extrémités le long de l'itinéraire (par sens),
+	// puis on supprime TOUS les quais de chaque nom (comme pour un arrêt seul) — robuste aux
+	// variantes de quais empruntées par les différentes courses.
 	const endName = normalizeStopName(removedStop.toStopName);
-	const directions = directionId === null ? [0, 1] : [directionId];
 	let count = 0;
 
 	for (const dir of directions) {
 		const sequence = gtfs.routeStopSequences.get(routeId)?.get(dir);
-		const rangeIds = sequence ? sliceRange(sequence, startName, endName) : undefined;
+		const rangeNames = sequence ? sliceRangeNames(sequence, startName, endName) : undefined;
+		// Repli : si l'itinéraire manque ou qu'une extrémité n'y figure pas, on ne supprime que
+		// les extrémités connues du GTFS (pas de régression, best-effort).
+		const names = rangeNames ?? [startName, endName];
 
-		if (rangeIds && rangeIds.size > 0) {
-			mergeSkip(skipIndex, routeId, dir, rangeIds);
-			count += 1;
-			continue;
+		const stopIds = new Set<string>();
+		for (const name of names) {
+			for (const id of gtfs.stopNameIndex.get(name) ?? []) stopIds.add(id);
 		}
 
-		// Repli : au moins les extrémités connues du GTFS (pas de régression si l'itinéraire manque).
-		const fallback = new Set<string>();
-		for (const id of gtfs.stopNameIndex.get(startName) ?? []) fallback.add(id);
-		for (const id of gtfs.stopNameIndex.get(endName) ?? []) fallback.add(id);
-		if (fallback.size > 0) {
-			mergeSkip(skipIndex, routeId, dir, fallback);
+		if (stopIds.size > 0) {
+			mergeSkip(skipIndex, routeId, dir, stopIds);
 			count += 1;
 		}
 	}
@@ -240,16 +304,42 @@ function applyRemovedStop(
 	return count;
 }
 
-/** Renvoie les stopId de l'itinéraire entre deux arrêts (inclus), quel que soit le sens de citation. */
-function sliceRange(sequence: OrderedStop[], startName: string, endName: string): Set<string> | undefined {
-	const startIndex = sequence.findIndex((stop) => stop.name === startName);
-	const endIndex = sequence.findIndex((stop) => stop.name === endName);
+/** Renvoie les noms d'arrêts de l'itinéraire entre deux arrêts (inclus), quel que soit le sens de citation. */
+function sliceRangeNames(sequence: OrderedStop[], startName: string, endName: string): string[] | undefined {
+	const startIndex = sequence.findIndex((stop) => stopNameMatches(startName, stop.name));
+	const endIndex = sequence.findIndex((stop) => stopNameMatches(endName, stop.name));
 	if (startIndex === -1 || endIndex === -1) return undefined;
 
 	const [lo, hi] = startIndex <= endIndex ? [startIndex, endIndex] : [endIndex, startIndex];
-	const ids = new Set<string>();
-	for (let i = lo; i <= hi; i += 1) ids.add(sequence[i]!.stopId);
-	return ids;
+	return sequence.slice(lo, hi + 1).map((stop) => stop.name);
+}
+
+/**
+ * Rapproche un nom d'arrêt d'alerte d'un nom d'arrêt GTFS (déjà normalisés). Vrai si l'un est une
+ * sous-séquence contiguë de mots de l'autre — gère les libellés abrégés de l'info trafic
+ * (« Piscine » ↔ « Piscine de Bihorel », « Michelet » ↔ « Collège Michelet »).
+ */
+function stopNameMatches(alertName: string, gtfsName: string): boolean {
+	if (alertName === gtfsName) return true;
+	const a = alertName.split(" ").filter(Boolean);
+	const b = gtfsName.split(" ").filter(Boolean);
+	return containsRun(a, b) || containsRun(b, a);
+}
+
+/** Vrai si `needle` (liste de mots) apparaît comme une suite contiguë dans `haystack`. */
+function containsRun(needle: string[], haystack: string[]): boolean {
+	if (needle.length === 0 || needle.length > haystack.length) return false;
+	for (let i = 0; i <= haystack.length - needle.length; i += 1) {
+		let match = true;
+		for (let j = 0; j < needle.length; j += 1) {
+			if (haystack[i + j] !== needle[j]) {
+				match = false;
+				break;
+			}
+		}
+		if (match) return true;
+	}
+	return false;
 }
 
 function mergeSkip(skipIndex: SkipIndex, routeId: string, directionId: number | null, stopIds: Set<string>) {

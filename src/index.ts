@@ -18,7 +18,7 @@ import {
 } from "./config.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
-import { skippedStopIds, useServiceAlerts } from "./gtfs-rt/use-service-alerts.js";
+import { applySkippedStops, useServiceAlerts } from "./gtfs-rt/use-service-alerts.js";
 import { useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
 import { useVerificationFeed } from "./gtfs-rt/use-verification-feed.js";
 import { useVehicleOccupancyStatuses } from "./utils/use-vehicle-occupancy-status.js";
@@ -173,7 +173,7 @@ async function pollTripUpdates() {
 			const tripLineId = tripRouteId.split(":").at(-1) ?? "";
 			if (!ALLOWED_LINES.has(tripLineId)) continue;
 
-			applySkippedStops(entity.tripUpdate, tripRouteId);
+			applySkippedStops(entity.tripUpdate, tripRouteId, serviceAlerts.skipIndex, staticGtfs.data);
 
 			const tripEntityId = entity.id.split(":").at(-1) ?? entity.id;
 			store.tripUpdates.set(`ET:TCAR:${tripEntityId}`, entity.tripUpdate);
@@ -182,22 +182,6 @@ async function pollTripUpdates() {
 		console.log(`✓ ${store.tripUpdates.size} trip updates.`);
 	} catch (cause) {
 		console.error("✘ Trip updates poll error:", cause);
-	}
-}
-
-function applySkippedStops(tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate, tripRouteId: string) {
-	if (!tripUpdate.stopTimeUpdate?.length) return;
-
-	const directionId = tripUpdate.trip?.directionId ?? 0;
-	const stopIds = skippedStopIds(serviceAlerts.skipIndex, tripRouteId, directionId);
-	if (stopIds.size === 0) return;
-
-	for (const stopTimeUpdate of tripUpdate.stopTimeUpdate) {
-		if (!stopTimeUpdate.stopId || !stopIds.has(stopTimeUpdate.stopId)) continue;
-		stopTimeUpdate.scheduleRelationship =
-			GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SKIPPED;
-		stopTimeUpdate.arrival = null;
-		stopTimeUpdate.departure = null;
 	}
 }
 
