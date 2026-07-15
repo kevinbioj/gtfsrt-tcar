@@ -6,10 +6,10 @@ import { loadCache } from "./ai/analyze-alert.js";
 import {
 	ALERT_CACHE_PATH,
 	ALERTS_POLL_INTERVAL,
-	ALLOWED_LINES,
 	GTFS_REFRESH_INTERVAL,
 	POLL_INTERVAL,
 	PORT,
+	REALTIME_LINES,
 	SERVICE_ALERTS_URL,
 	STATIC_GTFS_URL,
 	TRIP_UPDATES_URL,
@@ -18,7 +18,7 @@ import {
 } from "./config.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
-import { applySkippedStops, useServiceAlerts } from "./gtfs-rt/use-service-alerts.js";
+import { applySkippedStops, keepOnlySkippedStops, useServiceAlerts } from "./gtfs-rt/use-service-alerts.js";
 import { useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
 import { useVerificationFeed } from "./gtfs-rt/use-verification-feed.js";
 import { useVehicleOccupancyStatuses } from "./utils/use-vehicle-occupancy-status.js";
@@ -104,7 +104,7 @@ async function poll() {
 			const directionId = entity.vehicle.trip?.directionId ?? 0;
 
 			const lineId = routeId.split(":").at(-1) ?? "";
-			if (!ALLOWED_LINES.has(lineId)) continue;
+			if (!REALTIME_LINES.has(lineId)) continue;
 
 			const verifiedVehicle = verificationFeed.verifiedVehicles?.get(vehicleId);
 
@@ -167,19 +167,28 @@ async function pollTripUpdates() {
 
 		store.tripUpdates.clear();
 
+		let skipsOnly = 0;
+
 		for (const entity of feed.entity) {
 			if (!entity.tripUpdate) continue;
 			const tripRouteId = entity.tripUpdate.trip?.routeId ?? "";
 			const tripLineId = tripRouteId.split(":").at(-1) ?? "";
-			if (!ALLOWED_LINES.has(tripLineId)) continue;
 
 			applySkippedStops(entity.tripUpdate, tripRouteId, serviceAlerts.skipIndex, staticGtfs.data);
+
+			// Ligne sans vrai temps réel : on ne relaie pas ses horaires, mais on garde ses
+			// suppressions d'arrêt. Sans suppression, le trip n'apporte rien → on l'écarte.
+			if (!REALTIME_LINES.has(tripLineId)) {
+				keepOnlySkippedStops(entity.tripUpdate);
+				if (!entity.tripUpdate.stopTimeUpdate?.length) continue;
+				skipsOnly += 1;
+			}
 
 			const tripEntityId = entity.id.split(":").at(-1) ?? entity.id;
 			store.tripUpdates.set(`ET:TCAR:${tripEntityId}`, entity.tripUpdate);
 		}
 
-		console.log(`✓ ${store.tripUpdates.size} trip updates.`);
+		console.log(`✓ ${store.tripUpdates.size} trip updates (${skipsOnly} skipped-stops only).`);
 	} catch (cause) {
 		console.error("✘ Trip updates poll error:", cause);
 	}

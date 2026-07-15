@@ -8,8 +8,9 @@ import {
 	pruneCache,
 	type RemovedStop,
 } from "../ai/analyze-alert.js";
-import { ALLOWED_LINES } from "../config.js";
 import { normalizeStopName, type OrderedStop, type StaticGtfs } from "./use-static-gtfs.js";
+
+const SKIPPED = GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SKIPPED;
 
 export type SkipBucket = { directionId: number | null; stopIds: Set<string> };
 /** routeId → buckets d'arrêts à sauter (SKIPPED), par sens. */
@@ -87,8 +88,6 @@ export function applySkippedStops(
 	const stopIds = skippedStopIds(skipIndex, routeId, directionId);
 	if (stopIds.size === 0) return;
 
-	const SKIPPED = GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SKIPPED;
-
 	// 1. Arrêts déjà présents → bascule en SKIPPED.
 	const presentIds = new Set<string>();
 	for (const stopTimeUpdate of stopTimeUpdates) {
@@ -116,6 +115,22 @@ export function applySkippedStops(
 			(a, b) => (a.stopSequence ?? 0) - (b.stopSequence ?? 0),
 		);
 	}
+}
+
+/**
+ * Réduit un trip update aux seuls arrêts SKIPPED, en retirant tout horaire. À appliquer aux lignes
+ * hors {@link REALTIME_LINES}, dont la source rebadge le théorique en temps réel : ces horaires ne
+ * valent rien et ne doivent pas être diffusés, alors que les suppressions d'arrêt — issues des
+ * alertes, pas de la source — restent une information exploitable.
+ *
+ * Un trip qui ne saute aucun arrêt se retrouve donc sans stopTimeUpdate : il n'a plus rien à dire.
+ */
+export function keepOnlySkippedStops(tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate) {
+	tripUpdate.stopTimeUpdate = (tripUpdate.stopTimeUpdate ?? []).filter(
+		(stopTimeUpdate) => stopTimeUpdate.scheduleRelationship === SKIPPED,
+	);
+	// Retard global calculé sur du faux temps réel → sans objet.
+	tripUpdate.delay = null;
 }
 
 // ---
@@ -152,23 +167,23 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		const skipIndex: SkipIndex = new Map();
 		const feedAlertIds = new Set<string>();
 
-		// 1. Collecte des alertes touchant une ligne autorisée.
+		// 1. Collecte des alertes touchant une ligne du réseau.
 		const inputs: AlertInput[] = [];
-		const allowedById = new Map<string, Set<string>>();
+		const routesById = new Map<string, Set<string>>();
 		for (const entity of feed.entity) {
 			const alert = entity.alert;
 			if (!alert) continue;
 			feedAlertIds.add(entity.id);
 
-			const allowedRouteIds = collectAllowedRoutes(alert);
-			if (allowedRouteIds.size === 0) continue;
+			const routeIds = collectNetworkRoutes(alert, gtfs);
+			if (routeIds.size === 0) continue;
 
-			allowedById.set(entity.id, allowedRouteIds);
+			routesById.set(entity.id, routeIds);
 			inputs.push({
 				id: entity.id,
 				headerText: joinTranslations(alert.headerText),
 				descriptionText: joinTranslations(alert.descriptionText),
-				routes: buildRouteContext(allowedRouteIds, gtfs),
+				routes: buildRouteContext(routeIds, gtfs),
 				today,
 			});
 		}
@@ -182,10 +197,10 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 			const analysis = analyses.get(input.id);
 			if (!analysis || analysis.removedStops.length === 0 || !isPeriodActive(analysis.period, now)) continue;
 
-			const allowedRouteIds = allowedById.get(input.id) ?? new Set();
+			const routeIds = routesById.get(input.id) ?? new Set();
 			for (const removedStop of analysis.removedStops) {
 				for (const route of removedStop.routes) {
-					if (!allowedRouteIds.has(route.routeId)) continue;
+					if (!routeIds.has(route.routeId)) continue;
 					removedCount += applyRemovedStop(skipIndex, gtfs, removedStop, route.routeId, route.directionId);
 				}
 			}
@@ -222,13 +237,16 @@ function startOfDay(date: string, addDays = 0): Temporal.Instant | null {
 	}
 }
 
-function collectAllowedRoutes(alert: GtfsRealtime.transit_realtime.IAlert): Set<string> {
+/**
+ * Routes du réseau touchées par l'alerte. Le flux couvre plusieurs opérateurs (TAE…) : on ne
+ * retient que les routes présentes dans notre GTFS, seules exploitables en aval.
+ */
+function collectNetworkRoutes(alert: GtfsRealtime.transit_realtime.IAlert, gtfs: StaticGtfs): Set<string> {
 	const routeIds = new Set<string>();
 	for (const informed of alert.informedEntity ?? []) {
 		const routeId = informed.routeId;
 		if (!routeId) continue;
-		const lineId = routeId.split(":").at(-1) ?? "";
-		if (ALLOWED_LINES.has(lineId)) routeIds.add(routeId);
+		if (gtfs.routeDirections.has(routeId)) routeIds.add(routeId);
 	}
 	return routeIds;
 }

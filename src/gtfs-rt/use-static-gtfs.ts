@@ -1,7 +1,5 @@
 import { unzipSync } from "fflate";
 
-import { ALLOWED_LINES } from "../config.js";
-
 export type RouteDirection = { directionId: number; headsigns: string[] };
 
 /** Un arrêt dans l'itinéraire d'une ligne : son quai (stopId) et son nom normalisé. */
@@ -192,8 +190,8 @@ function buildTrips(csv: string): {
  * À partir de stop_times, construit :
  *  - `routeStopSequences` : par (routeId, directionId), l'itinéraire de référence (trip le plus
  *    long) — sert à étendre les plages « de X à Y » ;
- *  - `tripStopSequences` : par tripId (lignes autorisées uniquement), l'horaire théorique ordonné
- *    — sert à réinsérer un arrêt supprimé absent du GTFS-RT, avec son stop_sequence.
+ *  - `tripStopSequences` : par tripId, l'horaire théorique ordonné — sert à réinsérer un arrêt
+ *    supprimé absent du GTFS-RT, avec son stop_sequence.
  */
 function buildSequences(
 	csv: string,
@@ -212,14 +210,14 @@ function buildSequences(
 	const seqCol = header.indexOf("stop_sequence");
 	if (tripCol === -1 || stopCol === -1 || seqCol === -1) return { routeStopSequences, tripStopSequences };
 
-	// Regroupe les arrêts par trip (uniquement les trips connus, lignes autorisées).
+	// Regroupe les arrêts par trip (uniquement les trips connus).
 	const perTrip = new Map<string, TripStop[]>();
 	for (const row of rows) {
 		const tripId = row[tripCol];
 		const stopId = row[stopCol];
 		if (!tripId || !stopId) continue;
 		const meta = tripMeta.get(tripId);
-		if (meta === undefined || !ALLOWED_LINES.has(meta.routeId.split(":").at(-1) ?? "")) continue;
+		if (meta === undefined) continue;
 		const stopSequence = Number.parseInt(row[seqCol] ?? "", 10);
 		if (Number.isNaN(stopSequence)) continue;
 

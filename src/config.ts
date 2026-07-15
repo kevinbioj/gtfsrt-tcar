@@ -1,4 +1,9 @@
-export const ALLOWED_LINES = new Set([
+/**
+ * Lignes dont le temps réel de la source est authentique. Ailleurs, la source rebadge l'horaire
+ * théorique en temps réel : ses positions véhicule ne sont pas diffusées et ses trip updates sont
+ * réduits aux seules suppressions d'arrêt (cf. `keepOnlySkippedStops`).
+ */
+export const REALTIME_LINES = new Set([
 	"90",
 	"91",
 	"92",
