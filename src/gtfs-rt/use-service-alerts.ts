@@ -354,21 +354,25 @@ function sliceRangeNames(sequence: OrderedStop[], startName: string, endName: st
 }
 
 /**
- * Rapproche un nom d'arrêt d'alerte d'un nom d'arrêt GTFS (déjà normalisés). Vrai si l'un est une
- * sous-séquence contiguë de mots de l'autre — gère les libellés abrégés de l'info trafic
- * (« Piscine » ↔ « Piscine de Bihorel », « Michelet » ↔ « Collège Michelet »). La comparaison
+ * Rapproche un nom d'arrêt d'alerte d'un nom d'arrêt GTFS (déjà normalisés). Vrai si le nom de
+ * l'alerte est une sous-séquence contiguë de mots du nom GTFS — gère les libellés abrégés de l'info
+ * trafic (« Piscine » → « Piscine de Bihorel », « Michelet » → « Collège Michelet »). La comparaison
  * porte sur les tokens ({@link stopNameTokens}), à une faute de frappe près par mot : l'appel se
  * fait dans le contexte d'une ligne (quelques dizaines d'arrêts), où le risque de confusion est faible.
+ *
+ * Le rapprochement est volontairement à SENS UNIQUE : un nom d'alerte plus précis que le nom GTFS
+ * ne matche pas. Les mots en trop désignent presque toujours un autre lieu — « Pôle Multimodal-Cotoni »
+ * n'est pas l'arrêt « Pôle Multimodal ». Les noms de pôle (station parente) restent rapprochés par
+ * `stopNameIndex`, qui les indexe vers leurs quais.
  */
 function stopNameMatches(alertName: string, gtfsName: string): boolean {
 	if (alertName === gtfsName) return true;
 	return containsRun(stopNameTokens(alertName), stopNameTokens(gtfsName));
 }
 
-/** Vrai si l'une des listes de mots apparaît comme une suite contiguë dans l'autre. */
-function containsRun(a: string[], b: string[]): boolean {
-	const [needle, haystack] = a.length <= b.length ? [a, b] : [b, a];
-	if (needle.length === 0) return false;
+/** Vrai si `needle` apparaît comme une suite contiguë de mots dans `haystack`. */
+function containsRun(needle: string[], haystack: string[]): boolean {
+	if (needle.length === 0 || needle.length > haystack.length) return false;
 
 	for (let i = 0; i <= haystack.length - needle.length; i += 1) {
 		let match = true;

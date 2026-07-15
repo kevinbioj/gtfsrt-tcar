@@ -152,38 +152,81 @@ function buildStops(csv: string): {
 
 	const idCol = header.indexOf("stop_id");
 	const nameCol = header.indexOf("stop_name");
+	const parentCol = header.indexOf("parent_station");
 	if (idCol === -1 || nameCol === -1) return { stopNameIndex, stopKeyIndex, idToName };
+
+	const stationNames = new Map<string, string>();
+	const stationStopIds = new Map<string, Set<string>>();
 
 	for (const row of rows) {
 		const stopId = row[idCol];
 		const stopName = row[nameCol];
-		// On indexe uniquement les quais (enfants), pas les stations parentes.
-		if (!stopId || !stopName || stopId.startsWith("TCAR:ST:")) continue;
+		if (!stopId || !stopName) continue;
+
+		// Les stations parentes ne sont pas des quais : on les met de côté pour n'indexer que leur
+		// nom (cf. plus bas), jamais leur identifiant.
+		if (stopId.startsWith("TCAR:ST:")) {
+			stationNames.set(stopId, stopName);
+			continue;
+		}
 
 		idToName.set(stopId, stopName);
 
-		const key = normalizeStopName(stopName);
-		if (!key) continue;
-
-		let ids = stopNameIndex.get(key);
-		if (ids === undefined) {
-			ids = new Set();
-			stopNameIndex.set(key, ids);
+		const parent = parentCol === -1 ? "" : (row[parentCol] ?? "");
+		if (parent) {
+			let siblings = stationStopIds.get(parent);
+			if (siblings === undefined) {
+				siblings = new Set();
+				stationStopIds.set(parent, siblings);
+			}
+			siblings.add(stopId);
 		}
-		ids.add(stopId);
 
-		const fuzzyKey = stopNameKey(stopName);
-		if (!fuzzyKey) continue;
+		indexStopName(stopNameIndex, stopKeyIndex, stopName, [stopId]);
+	}
 
-		let names = stopKeyIndex.get(fuzzyKey);
-		if (names === undefined) {
-			names = new Set();
-			stopKeyIndex.set(fuzzyKey, names);
-		}
-		names.add(key);
+	// Le nom du pôle diffère parfois de celui de ses quais (« Pôle Multimodal d'Oissel » pour des
+	// quais « Pôle Multimodal », « Duclair Centre » pour « Centre ») : l'info trafic emploie l'un ou
+	// l'autre. On rattache donc le nom de la station à ses quais — sauf s'il désigne déjà un arrêt
+	// bien réel, auquel cas on ne touche à rien.
+	for (const [stationId, stationName] of stationNames) {
+		const key = normalizeStopName(stationName);
+		if (!key || stopNameIndex.has(key)) continue;
+
+		const stopIds = stationStopIds.get(stationId);
+		if (stopIds === undefined) continue;
+
+		indexStopName(stopNameIndex, stopKeyIndex, stationName, stopIds);
 	}
 
 	return { stopNameIndex, stopKeyIndex, idToName };
+}
+
+function indexStopName(
+	stopNameIndex: Map<string, Set<string>>,
+	stopKeyIndex: Map<string, Set<string>>,
+	stopName: string,
+	stopIds: Iterable<string>,
+) {
+	const key = normalizeStopName(stopName);
+	if (!key) return;
+
+	let ids = stopNameIndex.get(key);
+	if (ids === undefined) {
+		ids = new Set();
+		stopNameIndex.set(key, ids);
+	}
+	for (const stopId of stopIds) ids.add(stopId);
+
+	const fuzzyKey = stopNameKey(stopName);
+	if (!fuzzyKey) return;
+
+	let names = stopKeyIndex.get(fuzzyKey);
+	if (names === undefined) {
+		names = new Set();
+		stopKeyIndex.set(fuzzyKey, names);
+	}
+	names.add(key);
 }
 
 function buildTrips(csv: string): {
