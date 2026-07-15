@@ -11,6 +11,8 @@ export type TripStop = { stopSequence: number; stopId: string };
 export type StaticGtfs = {
 	/** Nom d'arrêt normalisé → identifiants des quais (enfants) portant ce nom. */
 	stopNameIndex: Map<string, Set<string>>;
+	/** Clé tolérante ({@link stopNameKey}) → noms normalisés qui la produisent (clés de `stopNameIndex`). */
+	stopKeyIndex: Map<string, Set<string>>;
 	/** routeId → directions desservies avec leurs terminus (headsigns). */
 	routeDirections: Map<string, RouteDirection[]>;
 	/** routeId → directionId → itinéraire ordonné des arrêts (pour étendre les plages « de X à Y »). */
@@ -52,6 +54,43 @@ export function normalizeStopName(name: string): string {
 		.trim();
 }
 
+/** Mots-outils sans valeur discriminante, ignorés par {@link stopNameTokens}. */
+const FILLER_WORDS = new Set(["a", "au", "aux", "d", "de", "des", "du", "en", "et", "l", "la", "le", "les", "sur"]);
+
+/** Abréviations courantes de l'info trafic, développées avant comparaison. */
+const ABBREVIATIONS = new Map([
+	["st", "saint"],
+	["ste", "sainte"],
+	["av", "avenue"],
+	["bd", "boulevard"],
+	["pl", "place"],
+	["pce", "place"],
+]);
+
+/**
+ * Découpe un nom d'arrêt en mots comparables : mots-outils retirés, abréviations développées,
+ * pluriels rabotés. Absorbe les approximations de la source, qui n'écrit pas toujours les noms
+ * comme le GTFS (« Champs de Mars » et « Champ de Mars » donnent tous deux `["champ", "mar"]`).
+ */
+export function stopNameTokens(name: string): string[] {
+	const tokens: string[] = [];
+	for (const word of normalizeStopName(name).split(" ")) {
+		if (!word || FILLER_WORDS.has(word)) continue;
+		tokens.push(stem(ABBREVIATIONS.get(word) ?? word));
+	}
+	return tokens;
+}
+
+/** Clé de rapprochement tolérant d'un nom d'arrêt. Vide si le nom ne porte aucun mot discriminant. */
+export function stopNameKey(name: string): string {
+	return stopNameTokens(name).join(" ");
+}
+
+/** Rabote les marques de pluriel : « champs » → « champ ». Les mots courts sont laissés intacts. */
+function stem(word: string): string {
+	return word.length > 3 ? word.replace(/[sx]$/, "") : word;
+}
+
 // ---
 
 async function loadGtfs(url: string): Promise<StaticGtfs> {
@@ -59,6 +98,7 @@ async function loadGtfs(url: string): Promise<StaticGtfs> {
 
 	const empty: StaticGtfs = {
 		stopNameIndex: new Map(),
+		stopKeyIndex: new Map(),
 		routeDirections: new Map(),
 		routeStopSequences: new Map(),
 		tripStopSequences: new Map(),
@@ -82,7 +122,7 @@ async function loadGtfs(url: string): Promise<StaticGtfs> {
 		}
 
 		const decoder = new TextDecoder();
-		const { stopNameIndex, idToName } = buildStops(decoder.decode(files["stops.txt"]));
+		const { stopNameIndex, stopKeyIndex, idToName } = buildStops(decoder.decode(files["stops.txt"]));
 		const { routeDirections, tripMeta } = buildTrips(decoder.decode(files["trips.txt"]));
 		const { routeStopSequences, tripStopSequences } = files["stop_times.txt"]
 			? buildSequences(decoder.decode(files["stop_times.txt"]), tripMeta, idToName)
@@ -91,23 +131,28 @@ async function loadGtfs(url: string): Promise<StaticGtfs> {
 		console.log(
 			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${routeStopSequences.size} route itineraries, ${tripStopSequences.size} trip schedules from GTFS.`,
 		);
-		return { stopNameIndex, routeDirections, routeStopSequences, tripStopSequences };
+		return { stopNameIndex, stopKeyIndex, routeDirections, routeStopSequences, tripStopSequences };
 	} catch (cause) {
 		console.error("✘ Failed to load static GTFS!", cause);
 		return empty;
 	}
 }
 
-function buildStops(csv: string): { stopNameIndex: Map<string, Set<string>>; idToName: Map<string, string> } {
+function buildStops(csv: string): {
+	stopNameIndex: Map<string, Set<string>>;
+	stopKeyIndex: Map<string, Set<string>>;
+	idToName: Map<string, string>;
+} {
 	const stopNameIndex = new Map<string, Set<string>>();
+	const stopKeyIndex = new Map<string, Set<string>>();
 	const idToName = new Map<string, string>();
 	const rows = parseCsv(csv);
 	const header = rows.next().value;
-	if (!header) return { stopNameIndex, idToName };
+	if (!header) return { stopNameIndex, stopKeyIndex, idToName };
 
 	const idCol = header.indexOf("stop_id");
 	const nameCol = header.indexOf("stop_name");
-	if (idCol === -1 || nameCol === -1) return { stopNameIndex, idToName };
+	if (idCol === -1 || nameCol === -1) return { stopNameIndex, stopKeyIndex, idToName };
 
 	for (const row of rows) {
 		const stopId = row[idCol];
@@ -126,9 +171,19 @@ function buildStops(csv: string): { stopNameIndex: Map<string, Set<string>>; idT
 			stopNameIndex.set(key, ids);
 		}
 		ids.add(stopId);
+
+		const fuzzyKey = stopNameKey(stopName);
+		if (!fuzzyKey) continue;
+
+		let names = stopKeyIndex.get(fuzzyKey);
+		if (names === undefined) {
+			names = new Set();
+			stopKeyIndex.set(fuzzyKey, names);
+		}
+		names.add(key);
 	}
 
-	return { stopNameIndex, idToName };
+	return { stopNameIndex, stopKeyIndex, idToName };
 }
 
 function buildTrips(csv: string): {
