@@ -93,6 +93,9 @@ async function poll() {
 		const buffer = Buffer.from(await response.arrayBuffer());
 		const feed = GtfsRealtime.transit_realtime.FeedMessage.decode(buffer);
 
+		// Le store est vidé à chaque poll : on garde l'état précédent sous la main pour
+		// pouvoir continuer à publier un véhicule dont la ligne est incohérente.
+		const previousPositions = new Map(store.vehiclePositions);
 		store.vehiclePositions.clear();
 
 		for (const entity of feed.entity) {
@@ -123,12 +126,16 @@ async function poll() {
 			if (verifiedVehicle.routeId !== routeId) {
 				console.warn(`\t✘ ${vehicleId}\tRoute mismatch! New: '${routeId}' vs. Old: '${verifiedVehicle.routeId}'.`);
 
-				const storedVehicle = store.vehiclePositions.get(`VM:TCAR:${vehicleId}`);
+				// On ne relaie pas la course incohérente, mais on continue de rafraîchir la
+				// position sur la dernière course connue, sinon le véhicule se fige.
+				const storedVehicle = previousPositions.get(`VM:TCAR:${vehicleId}`);
 				if (storedVehicle !== undefined) {
+					const useVerifiedPosition = verifiedVehicle.recordedAt > entityTimestamp;
 					store.vehiclePositions.set(`VM:TCAR:${vehicleId}`, {
 						...storedVehicle,
 						vehicle: { id: `TCAR:${vehicleId}` },
-						position: verifiedVehicle.recordedAt > entityTimestamp ? verifiedVehicle.position : entity.vehicle.position,
+						position: useVerifiedPosition ? verifiedVehicle.position : entity.vehicle.position,
+						timestamp: useVerifiedPosition ? verifiedVehicle.recordedAt : entity.vehicle.timestamp,
 						occupancyStatus: vehicleOccupancyStatuses.get(vehicleId)?.status,
 					});
 				}
