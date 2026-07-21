@@ -143,6 +143,25 @@ PÉRIODE D'EFFET (champ "period") :
 - NE CONFONDS PAS la date d'édition/publication de l'info (ex. "Info ASTUCE 20/06/2026") avec la période de la perturbation.
 - Interprète les années à 2 chiffres (ex. "20/01/26" = 2026) et sers-toi de la date du jour fournie pour lever toute ambiguïté.
 
+ANNONCE D'UN RETOUR À LA NORMALE :
+- Le réseau réécrit souvent l'info quelques jours avant la fin pour ANNONCER LA REPRISE plutôt que la perturbation
+  (« Le 22.07.26, parcours normal route d'Houppeville », « Mercredi 22 juillet 2026 : reprise du parcours normal »,
+  « à compter du 5 mai, retour à l'itinéraire habituel », « fin des travaux le 30 août »).
+- La date citée est alors la date de FIN de la perturbation, PAS son début : la perturbation reste en vigueur
+  JUSQU'À ce moment, EXCLU.
+- Renseigne donc end à l'INSTANT de la reprise, pour que le dernier jour perturbé soit bien la veille :
+  « Le 22.07.26, parcours normal » → end "2026-07-22T00:00" (perturbé jusqu'au mardi 21/07 au soir inclus).
+  « reprise le 22 juillet à 5h » → end "2026-07-22T05:00".
+  N'écris SURTOUT PAS end "2026-07-22" (qui prolongerait à tort la perturbation toute la journée du 22),
+  ni start "2026-07-22" (qui la ferait commencer le jour même de la reprise).
+- start reste "" si le texte ne dit pas quand la perturbation a commencé : elle est déjà en cours.
+- Les arrêts non desservis à renvoyer sont ceux de la perturbation ENCORE EN COURS. N'inclus pas un arrêt
+  uniquement cité comme redevenant desservi à la reprise.
+- Si la reprise ne concerne qu'une PARTIE des lignes (« lignes F2 et 22 : reprise du parcours normal, lignes F8-10-43 :
+  reprise de la déviation par la route de Maromme »), borne quand même l'alerte à cette date : mieux vaut cesser trop tôt
+  d'annoncer un arrêt non desservi que d'en annoncer un qui l'est de nouveau. Le réseau republie une info à jour pour
+  les lignes encore déviées.
+
 TRANCHE HORAIRE RÉCURRENTE (champ "period.dailyWindow") :
 - À remplir UNIQUEMENT si la perturbation se répète chaque jour sur une même tranche horaire, sur PLUSIEURS jours
   (ex. « du 20 au 24 juillet, chaque nuit de 20h à 5h », « tous les jours de 9h à 16h jusqu'au 30 août »).
@@ -370,7 +389,7 @@ function getClient(): Anthropic | undefined {
 
 // Version du schéma/prompt d'analyse : à incrémenter quand la logique change, pour invalider
 // proprement les caches existants (ex. ajout des bornes horaires dans la période d'effet).
-const ANALYSIS_VERSION = 4;
+const ANALYSIS_VERSION = 5;
 
 function hashAlert(alert: AlertInput): string {
 	// On inclut le contexte des lignes (terminus/sens) : si le GTFS change, l'analyse est
