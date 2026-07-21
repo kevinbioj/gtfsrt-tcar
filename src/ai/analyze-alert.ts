@@ -31,8 +31,19 @@ export type RemovedStop = {
 	routes: { routeId: string; directionId: number | null }[];
 };
 
-/** Période d'effet de la perturbation, extraite du texte. `null` = non précisé / ouvert. */
-export type AlertPeriod = { start: string | null; end: string | null };
+/**
+ * Tranche horaire quotidienne (heures locales) d'une perturbation récurrente. `to` <= `from`
+ * signifie que la tranche passe minuit (elle se termine le lendemain matin).
+ */
+export type DailyWindow = { from: string; to: string };
+
+/**
+ * Période d'effet de la perturbation, extraite du texte. `null` = non précisé / ouvert.
+ * Les bornes valent soit `AAAA-MM-JJ` (journée entière, fin incluse), soit `AAAA-MM-JJTHH:MM`
+ * (instant exact, fin exclue). `dailyWindow` non nul restreint la période à une tranche horaire
+ * répétée chaque jour de l'enveloppe.
+ */
+export type AlertPeriod = { start: string | null; end: string | null; dailyWindow: DailyWindow | null };
 
 export type AlertAnalysis = { removedStops: RemovedStop[]; period: AlertPeriod };
 
@@ -79,8 +90,17 @@ const BATCH_SCHEMA = {
 						properties: {
 							start: { type: "string" },
 							end: { type: "string" },
+							dailyWindow: {
+								type: "object",
+								additionalProperties: false,
+								properties: {
+									from: { type: "string" },
+									to: { type: "string" },
+								},
+								required: ["from", "to"],
+							},
 						},
-						required: ["start", "end"],
+						required: ["start", "end", "dailyWindow"],
 					},
 				},
 				required: ["id", "removedStops", "period"],
@@ -111,11 +131,25 @@ PLAGES D'ARRÊTS :
 - Pour un arrêt seul, ou une liste explicite ("X, Y et Z"), renvoie des entrées séparées avec toStopName="".
 
 PÉRIODE D'EFFET (champ "period") :
-- Extrais du texte la date de DÉBUT et la date de FIN de la perturbation (la période pendant laquelle l'arrêt n'est pas desservi).
-- Format ISO strict "AAAA-MM-JJ".
+- Extrais du texte le DÉBUT et la FIN de la perturbation (la période pendant laquelle l'arrêt n'est pas desservi).
+- Format : "AAAA-MM-JJ" si le texte ne donne qu'une date, "AAAA-MM-JJTHH:MM" (heure locale) dès qu'il précise une heure.
+- Une borne "AAAA-MM-JJ" couvre la journée entière : le début vaut 00:00 et la fin est INCLUSIVE (toute la journée citée).
+- Une borne "AAAA-MM-JJTHH:MM" est exacte, et la fin est EXCLUSIVE (la perturbation s'arrête à cette heure précise).
+- Utilise les heures DÈS QU'ELLES SONT DONNÉES, y compris pour les interventions courtes ou de nuit.
+  - « Travaux de nuit le 21 juillet (20h>5h) — nuit du mardi 21 juillet de 20h à 5h, reprise le mercredi 22 juillet à 5h »
+    → start "2026-07-21T20:00", end "2026-07-22T05:00" (et surtout PAS start "2026-07-21" qui l'activerait dès le matin).
+  - « le 3 mars de 9h à 16h » → start "2026-03-03T09:00", end "2026-03-03T16:00".
 - Si une borne n'est pas précisée ou est ouverte ("à nouvel avis", "jusqu'à nouvel ordre", "durée indéterminée"), mets la chaîne vide "".
 - NE CONFONDS PAS la date d'édition/publication de l'info (ex. "Info ASTUCE 20/06/2026") avec la période de la perturbation.
-- Interprète les années à 2 chiffres (ex. "20/01/26" = 2026) et sers-toi de la date du jour fournie pour lever toute ambiguïté.`;
+- Interprète les années à 2 chiffres (ex. "20/01/26" = 2026) et sers-toi de la date du jour fournie pour lever toute ambiguïté.
+
+TRANCHE HORAIRE RÉCURRENTE (champ "period.dailyWindow") :
+- À remplir UNIQUEMENT si la perturbation se répète chaque jour sur une même tranche horaire, sur PLUSIEURS jours
+  (ex. « du 20 au 24 juillet, chaque nuit de 20h à 5h », « tous les jours de 9h à 16h jusqu'au 30 août »).
+- Renseigne alors from/to au format "HH:MM" ; si "to" est <= "from", la tranche passe minuit et se termine le lendemain matin.
+- Dans ce cas, start/end sont des DATES SEULES "AAAA-MM-JJ" délimitant les jours où la tranche DÉBUTE
+  (start = premier jour concerné, end = dernier jour où la tranche commence).
+- Pour une perturbation continue, ou limitée à une seule nuit / une seule journée, laisse from et to vides ("") et exprime tout via start/end.`;
 
 const cache = new Map<string, { hash: string; result: AlertAnalysis }>();
 
@@ -124,7 +158,7 @@ let warnedMissingKey = false;
 let cachePath: string | undefined;
 let dirty = false;
 
-const EMPTY: AlertAnalysis = { removedStops: [], period: { start: null, end: null } };
+const EMPTY: AlertAnalysis = { removedStops: [], period: { start: null, end: null, dailyWindow: null } };
 
 /** Charge le cache persistant depuis le disque au démarrage (aucun ré-appel IA si inchangé). */
 export function loadCache(path: string) {
@@ -291,17 +325,28 @@ function isAlertAnalysis(value: unknown): value is AlertAnalysis {
 }
 
 function parsePeriod(raw: unknown): AlertPeriod {
-	if (typeof raw !== "object" || raw === null) return { start: null, end: null };
+	if (typeof raw !== "object" || raw === null) return { start: null, end: null, dailyWindow: null };
 	return {
 		start: parseDate((raw as { start?: unknown }).start),
 		end: parseDate((raw as { end?: unknown }).end),
+		dailyWindow: parseDailyWindow((raw as { dailyWindow?: unknown }).dailyWindow),
 	};
 }
 
 function parseDate(value: unknown): string | null {
 	if (typeof value !== "string") return null;
-	// L'IA renvoie "AAAA-MM-JJ" ou "" (borne inconnue / ouverte).
-	return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
+	// L'IA renvoie "AAAA-MM-JJ", "AAAA-MM-JJTHH:MM" ou "" (borne inconnue / ouverte).
+	return /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/.test(value) ? value : null;
+}
+
+/** Tranche horaire quotidienne, ignorée si l'une des deux bornes manque (cas courant : perturbation continue). */
+function parseDailyWindow(value: unknown): DailyWindow | null {
+	if (typeof value !== "object" || value === null) return null;
+	const from = (value as { from?: unknown }).from;
+	const to = (value as { to?: unknown }).to;
+	if (typeof from !== "string" || typeof to !== "string") return null;
+	if (!/^\d{2}:\d{2}$/.test(from) || !/^\d{2}:\d{2}$/.test(to)) return null;
+	return { from, to };
 }
 
 function parseDirection(value: unknown): number | null {
@@ -324,8 +369,8 @@ function getClient(): Anthropic | undefined {
 }
 
 // Version du schéma/prompt d'analyse : à incrémenter quand la logique change, pour invalider
-// proprement les caches existants (ex. ajout de l'extraction des plages « de X à Y »).
-const ANALYSIS_VERSION = 3;
+// proprement les caches existants (ex. ajout des bornes horaires dans la période d'effet).
+const ANALYSIS_VERSION = 4;
 
 function hashAlert(alert: AlertInput): string {
 	// On inclut le contexte des lignes (terminus/sens) : si le GTFS change, l'analyse est

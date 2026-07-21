@@ -4,6 +4,7 @@ import {
 	type AlertPeriod,
 	type AlertRouteContext,
 	analyzeAlerts,
+	type DailyWindow,
 	flushCache,
 	pruneCache,
 	type RemovedStop,
@@ -18,17 +19,19 @@ import {
 
 const SKIPPED = GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SKIPPED;
 
+const TIME_ZONE = "Europe/Paris";
+
 export type SkipBucket = { directionId: number | null; stopIds: Set<string> };
 /** routeId → buckets d'arrêts à sauter (SKIPPED), par sens. */
 export type SkipIndex = Map<string, SkipBucket[]>;
 
-type AlertsState = { headerTimestamp: string | null; buildDate: string | null };
-type PollResult = { skipIndex: SkipIndex; headerTimestamp: string | null; buildDate: string };
+type AlertsState = { headerTimestamp: string | null };
+type PollResult = { skipIndex: SkipIndex; headerTimestamp: string | null };
 
 let currentInterval: NodeJS.Timeout | undefined;
 
 export function useServiceAlerts(url: string, pollInterval: number, gtfs: { data: StaticGtfs }) {
-	const state: AlertsState = { headerTimestamp: null, buildDate: null };
+	const state: AlertsState = { headerTimestamp: null };
 	const resource = {
 		skipIndex: new Map<string, SkipBucket[]>(),
 		importedAt: Temporal.Now.instant(),
@@ -46,7 +49,6 @@ export function useServiceAlerts(url: string, pollInterval: number, gtfs: { data
 			resource.skipIndex = next.skipIndex;
 			resource.importedAt = Temporal.Now.instant();
 			state.headerTimestamp = next.headerTimestamp;
-			state.buildDate = next.buildDate;
 		} finally {
 			running = false;
 		}
@@ -161,13 +163,13 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		const headerTimestamp = feed.header?.timestamp != null ? String(feed.header.timestamp) : null;
 		// Les activePeriod du GTFS-RT ne sont pas fiables : on s'appuie sur les dates extraites du texte par l'IA.
 		const now = Temporal.Now.instant();
-		const today = Temporal.Now.plainDateISO("Europe/Paris").toString();
+		const today = Temporal.Now.plainDateISO(TIME_ZONE).toString();
 
-		// Flux inchangé (même timestamp) ET même jour → rien à retraiter (le jour est réévalué
-		// pour re-jauger les périodes IA aux frontières de journée sans réappeler l'IA).
-		if (headerTimestamp !== null && headerTimestamp === previous.headerTimestamp && today === previous.buildDate) {
-			console.log(`✓ Service alerts unchanged (feed ${headerTimestamp}).`);
-			return null;
+		// L'index est TOUJOURS reconstruit, même à flux inchangé : les périodes extraites par l'IA portent
+		// des heures (travaux de nuit), et leurs bornes doivent être re-jaugées à chaque poll. Aucun réappel
+		// IA n'en découle : à texte inchangé, `analyzeAlerts` sert entièrement le cache.
+		if (headerTimestamp !== null && headerTimestamp === previous.headerTimestamp) {
+			console.log(`✓ Service alerts unchanged (feed ${headerTimestamp}) — re-evaluating periods.`);
 		}
 
 		const skipIndex: SkipIndex = new Map();
@@ -217,17 +219,23 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		flushCache();
 
 		console.log(`✓ ${skipIndex.size} routes with skipped stops (${removedCount} entries).`);
-		return { skipIndex, headerTimestamp, buildDate: today };
+		return { skipIndex, headerTimestamp };
 	} catch (cause) {
 		console.error("✘ Failed to load service alerts!", cause);
 		return null;
 	}
 }
 
+/**
+ * Une perturbation récurrente n'est active que pendant sa tranche horaire, chaque jour de l'enveloppe
+ * `start`/`end` ; sinon, la période va de `start` à `end`, avec des bornes à la journée ou à la minute
+ * selon ce que le texte de l'alerte précisait (cf. {@link AlertPeriod}).
+ */
 function isPeriodActive(period: AlertPeriod, now: Temporal.Instant): boolean {
-	const start = period.start ? startOfDay(period.start) : null;
-	// La borne de fin est inclusive : active tant que `now` précède le début du lendemain.
-	const endExclusive = period.end ? startOfDay(period.end, 1) : null;
+	if (period.dailyWindow) return isDailyWindowActive(period, period.dailyWindow, now);
+
+	const start = period.start ? periodStart(period.start) : null;
+	const endExclusive = period.end ? periodEnd(period.end) : null;
 
 	return (
 		(start === null || Temporal.Instant.compare(now, start) >= 0) &&
@@ -235,9 +243,81 @@ function isPeriodActive(period: AlertPeriod, now: Temporal.Instant): boolean {
 	);
 }
 
+/**
+ * Active si `now` tombe dans la tranche horaire d'un jour couvert par l'enveloppe. On teste aussi la
+ * tranche ouverte la VEILLE : une tranche de nuit (« 20h > 5h ») déborde sur le lendemain matin.
+ */
+function isDailyWindowActive(period: AlertPeriod, window: DailyWindow, now: Temporal.Instant): boolean {
+	const zoned = now.toZonedDateTimeISO(TIME_ZONE);
+	// `to` <= `from` → la tranche passe minuit et se termine le lendemain.
+	const spansMidnight = window.to <= window.from;
+
+	for (const dayOffset of [0, -1]) {
+		const day = zoned.toPlainDate().add({ days: dayOffset });
+		if (!isDayInEnvelope(period, day)) continue;
+
+		const from = atTime(day, window.from);
+		const to = atTime(spansMidnight ? day.add({ days: 1 }) : day, window.to);
+		if (from === null || to === null) continue;
+
+		if (Temporal.Instant.compare(now, from) >= 0 && Temporal.Instant.compare(now, to) < 0) return true;
+	}
+
+	return false;
+}
+
+/** Vrai si `day` est un jour où la tranche horaire démarre (bornes de l'enveloppe incluses). */
+function isDayInEnvelope(period: AlertPeriod, day: Temporal.PlainDate): boolean {
+	const start = period.start ? plainDate(period.start) : null;
+	const end = period.end ? plainDate(period.end) : null;
+
+	if (start !== null && Temporal.PlainDate.compare(day, start) < 0) return false;
+	if (end !== null && Temporal.PlainDate.compare(day, end) > 0) return false;
+	return true;
+}
+
+/** Borne de début : minuit pour une date seule, l'instant exact pour un « AAAA-MM-JJTHH:MM ». */
+function periodStart(value: string): Temporal.Instant | null {
+	return hasTime(value) ? toInstant(value) : startOfDay(value);
+}
+
+/** Borne de fin : exclusive. Une date seule couvre toute la journée, une heure précise arrête net. */
+function periodEnd(value: string): Temporal.Instant | null {
+	return hasTime(value) ? toInstant(value) : startOfDay(value, 1);
+}
+
+function hasTime(value: string): boolean {
+	return value.includes("T");
+}
+
 function startOfDay(date: string, addDays = 0): Temporal.Instant | null {
 	try {
-		return Temporal.PlainDate.from(date).add({ days: addDays }).toZonedDateTime("Europe/Paris").toInstant();
+		return Temporal.PlainDate.from(date).add({ days: addDays }).toZonedDateTime(TIME_ZONE).toInstant();
+	} catch {
+		return null;
+	}
+}
+
+function toInstant(dateTime: string): Temporal.Instant | null {
+	try {
+		return Temporal.PlainDateTime.from(dateTime).toZonedDateTime(TIME_ZONE).toInstant();
+	} catch {
+		return null;
+	}
+}
+
+function atTime(day: Temporal.PlainDate, time: string): Temporal.Instant | null {
+	try {
+		return day.toPlainDateTime(Temporal.PlainTime.from(time)).toZonedDateTime(TIME_ZONE).toInstant();
+	} catch {
+		return null;
+	}
+}
+
+/** Partie date d'une borne, qu'elle porte ou non une heure. */
+function plainDate(value: string): Temporal.PlainDate | null {
+	try {
+		return Temporal.PlainDate.from(value.slice(0, 10));
 	} catch {
 		return null;
 	}
