@@ -155,8 +155,14 @@ ANNONCE D'UN RETOUR À LA NORMALE :
   N'écris SURTOUT PAS end "2026-07-22" (qui prolongerait à tort la perturbation toute la journée du 22),
   ni start "2026-07-22" (qui la ferait commencer le jour même de la reprise).
 - start reste "" si le texte ne dit pas quand la perturbation a commencé : elle est déjà en cours.
-- Les arrêts non desservis à renvoyer sont ceux de la perturbation ENCORE EN COURS. N'inclus pas un arrêt
-  uniquement cité comme redevenant desservi à la reprise.
+- L'annonce de la reprise ne vide PAS removedStops : tant que la reprise n'a pas eu lieu, la perturbation
+  CONTINUE. Si le texte décrit encore des arrêts non desservis (« Arrêts non desservis de X à Y », « l'arrêt
+  X n'est pas desservi »), renvoie-les NORMALEMENT — c'est la period (end = instant de la reprise) qui borne
+  leur suppression dans le temps, PAS leur omission de removedStops.
+  Ex. « T1 : Reprise du parcours normal jeudi 23 juillet. […] Arrêts non desservis de X à Y. »
+  → removedStops contient bien la plage X→Y, et period.end vaut "2026-07-23T00:00".
+- N'omets un arrêt que s'il n'est cité QUE comme redevenant desservi à la reprise (« l'arrêt X sera de
+  nouveau desservi »), sans jamais être listé comme actuellement non desservi.
 - Si la reprise ne concerne qu'une PARTIE des lignes (« lignes F2 et 22 : reprise du parcours normal, lignes F8-10-43 :
   reprise de la déviation par la route de Maromme »), borne quand même l'alerte à cette date : mieux vaut cesser trop tôt
   d'annoncer un arrêt non desservi que d'en annoncer un qui l'est de nouveau. Le réseau republie une info à jour pour
@@ -389,7 +395,7 @@ function getClient(): Anthropic | undefined {
 
 // Version du schéma/prompt d'analyse : à incrémenter quand la logique change, pour invalider
 // proprement les caches existants (ex. ajout des bornes horaires dans la période d'effet).
-const ANALYSIS_VERSION = 5;
+const ANALYSIS_VERSION = 6;
 
 function hashAlert(alert: AlertInput): string {
 	// On inclut le contexte des lignes (terminus/sens) : si le GTFS change, l'analyse est
