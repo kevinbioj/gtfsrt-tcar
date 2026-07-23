@@ -23,23 +23,33 @@ export type StaticGtfs = {
 
 let currentInterval: NodeJS.Timeout | undefined;
 
-export async function useStaticGtfs(url: string, refreshInterval: number, onReload?: () => void) {
+export async function useStaticGtfs(url: string, checkInterval: number, onReload?: () => void) {
+	const loaded = await loadGtfs(url);
 	const resource = {
-		data: await loadGtfs(url),
+		data: loaded.data,
 		importedAt: Temporal.Now.instant(),
 	};
+	// Signature de la version chargée (ETag/Last-Modified) : sert à détecter un changement sans
+	// retélécharger l'archive à chaque vérification.
+	let signature = loaded.signature;
 
 	if (currentInterval !== undefined) {
 		clearInterval(currentInterval);
 	}
 
 	currentInterval = setInterval(async () => {
+		// Vérification légère par HEAD : on ne retélécharge que si la version publiée a changé.
+		const remote = await fetchSignature(url);
+		if (remote === null || remote === signature) return; // inchangé, ou signature indisponible → on garde
+
 		const next = await loadGtfs(url);
-		if (next.stopNameIndex.size === 0) return; // chargement échoué → on garde l'ancien
-		resource.data = next;
+		if (next.data.stopNameIndex.size === 0) return; // chargement échoué → on garde l'ancien
+		resource.data = next.data;
 		resource.importedAt = Temporal.Now.instant();
+		signature = next.signature;
+		console.log("✓ Static GTFS updated (new version published).");
 		onReload?.();
-	}, refreshInterval);
+	}, checkInterval);
 
 	return resource;
 }
@@ -93,7 +103,23 @@ function stem(word: string): string {
 
 // ---
 
-async function loadGtfs(url: string): Promise<StaticGtfs> {
+/** Version publiée du GTFS (ETag de préférence, sinon Last-Modified). `null` si aucun en-tête exploitable. */
+function signatureOf(response: { headers: Headers }): string | null {
+	return response.headers.get("etag") ?? response.headers.get("last-modified");
+}
+
+/** Requête HEAD légère : renvoie la signature de la version publiée, ou `null` si indisponible. */
+async function fetchSignature(url: string): Promise<string | null> {
+	try {
+		const response = await fetch(url, { method: "HEAD" });
+		if (!response.ok) return null;
+		return signatureOf(response);
+	} catch {
+		return null;
+	}
+}
+
+async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: string | null }> {
 	console.log("➔ Fetching static GTFS.");
 
 	const empty: StaticGtfs = {
@@ -108,9 +134,10 @@ async function loadGtfs(url: string): Promise<StaticGtfs> {
 		const response = await fetch(url);
 		if (!response.ok) {
 			console.error(`✘ Failed to fetch static GTFS (HTTP ${response.status}).`);
-			return empty;
+			return { data: empty, signature: null };
 		}
 
+		const signature = signatureOf(response);
 		const buffer = new Uint8Array(await response.arrayBuffer());
 		const files = unzipSync(buffer, {
 			filter: (file) => file.name === "stops.txt" || file.name === "trips.txt" || file.name === "stop_times.txt",
@@ -118,7 +145,7 @@ async function loadGtfs(url: string): Promise<StaticGtfs> {
 
 		if (!files["stops.txt"] || !files["trips.txt"]) {
 			console.error("✘ Static GTFS is missing stops.txt or trips.txt.");
-			return empty;
+			return { data: empty, signature: null };
 		}
 
 		const decoder = new TextDecoder();
@@ -131,10 +158,13 @@ async function loadGtfs(url: string): Promise<StaticGtfs> {
 		console.log(
 			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${routeStopSequences.size} route itineraries, ${tripStopSequences.size} trip schedules from GTFS.`,
 		);
-		return { stopNameIndex, stopKeyIndex, routeDirections, routeStopSequences, tripStopSequences };
+		return {
+			data: { stopNameIndex, stopKeyIndex, routeDirections, routeStopSequences, tripStopSequences },
+			signature,
+		};
 	} catch (cause) {
 		console.error("✘ Failed to load static GTFS!", cause);
-		return empty;
+		return { data: empty, signature: null };
 	}
 }
 

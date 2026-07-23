@@ -6,7 +6,7 @@ import { loadCache } from "./ai/analyze-alert.js";
 import {
 	ALERT_CACHE_PATH,
 	ALERTS_POLL_INTERVAL,
-	GTFS_REFRESH_INTERVAL,
+	GTFS_CHECK_INTERVAL,
 	POLL_INTERVAL,
 	PORT,
 	REALTIME_LINES,
@@ -56,7 +56,7 @@ const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL, (verif
 });
 
 loadCache(ALERT_CACHE_PATH);
-const staticGtfs = await useStaticGtfs(STATIC_GTFS_URL, GTFS_REFRESH_INTERVAL);
+const staticGtfs = await useStaticGtfs(STATIC_GTFS_URL, GTFS_CHECK_INTERVAL);
 const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs);
 
 const hono = new Hono();

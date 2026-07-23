@@ -40,6 +40,11 @@ export const VEHICLE_OCCUPANCY_STATUS_URL = atob("aHR0cHM6Ly90Y2FyLmZsb3dseS5yZS
 export const SERVICE_ALERTS_URL = "https://hexatransit.fr/datasets/services_rt/astuce/service_alerts.pb";
 export const STATIC_GTFS_URL = "https://gtfs.bus-tracker.fr/astuce-tcar.zip";
 export const ALERTS_POLL_INTERVAL = Temporal.Duration.from({ minutes: 5 }).total("milliseconds");
-export const GTFS_REFRESH_INTERVAL = Temporal.Duration.from({ hours: 24 }).total("milliseconds");
+/**
+ * Intervalle de vérification de fraîcheur du GTFS statique : une simple requête HEAD compare la
+ * signature (ETag/Last-Modified) et ne déclenche un retéléchargement que si le fichier a changé.
+ * Fréquent à dessein — un GTFS périmé fait échouer la correspondance des identifiants d'arrêt.
+ */
+export const GTFS_CHECK_INTERVAL = Temporal.Duration.from({ minutes: 5 }).total("milliseconds");
 export const ANTHROPIC_MODEL = "claude-haiku-4-5";
 export const ALERT_CACHE_PATH = ".cache/alert-analysis.json";
