@@ -381,28 +381,37 @@ function applyRemovedStop(
 		return count;
 	}
 
-	// Plage : on détermine les arrêts entre les deux extrémités le long de l'itinéraire (par sens),
-	// puis on supprime TOUS les quais de chaque nom (comme pour un arrêt seul) — robuste aux
-	// variantes de quais empruntées par les différentes courses.
+	// Plage : on détermine les arrêts entre les deux extrémités le long de l'itinéraire, puis on
+	// supprime TOUS les quais de chaque nom (comme pour un arrêt seul) — robuste aux variantes de
+	// quais empruntées par les différentes courses.
+	//
+	// Les noms de la plage sont calculés en RÉUNISSANT les deux sens. Une extrémité peut n'être
+	// desservie que dans un sens (arrêt à quai unique, ex. « Église Saint-Romain » sur la 22, absente
+	// du trajet retour) : le découpage échouerait alors dans l'autre sens et retomberait sur les seules
+	// extrémités, perdant tous les arrêts intermédiaires. Le segment physique étant le même quel que
+	// soit le sens de parcours, l'union donne le bon ensemble d'arrêts ; supprimer par nom ne touche de
+	// toute façon que les quais réellement desservis par chaque course.
 	const endName = normalizeStopName(removedStop.toStopName);
-	let count = 0;
 
-	for (const dir of directions) {
+	const rangeNames = new Set<string>();
+	for (const dir of [0, 1]) {
 		const sequence = gtfs.routeStopSequences.get(routeId)?.get(dir);
-		const rangeNames = sequence ? sliceRangeNames(sequence, startName, endName) : undefined;
-		// Repli : si l'itinéraire manque ou qu'une extrémité n'y figure pas, on ne supprime que
-		// les extrémités connues du GTFS (pas de régression, best-effort).
-		const names = rangeNames ?? [startName, endName];
+		const sliced = sequence ? sliceRangeNames(sequence, startName, endName) : undefined;
+		if (sliced) for (const name of sliced) rangeNames.add(name);
+	}
+	// Repli : aucune extrémité sur un itinéraire connu → on ne supprime que les extrémités citées.
+	const names = rangeNames.size > 0 ? [...rangeNames] : [startName, endName];
 
-		const stopIds = new Set<string>();
-		for (const name of names) {
-			for (const id of resolveStopIds(gtfs, name) ?? []) stopIds.add(id);
-		}
+	const stopIds = new Set<string>();
+	for (const name of names) {
+		for (const id of resolveStopIds(gtfs, name) ?? []) stopIds.add(id);
+	}
+	if (stopIds.size === 0) return 0;
 
-		if (stopIds.size > 0) {
-			mergeSkip(skipIndex, routeId, dir, stopIds);
-			count += 1;
-		}
+	let count = 0;
+	for (const dir of directions) {
+		mergeSkip(skipIndex, routeId, dir, stopIds);
+		count += 1;
 	}
 
 	return count;
