@@ -14,7 +14,7 @@ import {
 	type OrderedStop,
 	type StaticGtfs,
 	stopNameKey,
-	stopNameTokens,
+	stopNameMatches,
 } from "./use-static-gtfs.js";
 
 const SKIPPED = GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SKIPPED;
@@ -440,70 +440,6 @@ function sliceRangeNames(sequence: OrderedStop[], startName: string, endName: st
 
 	const [lo, hi] = startIndex <= endIndex ? [startIndex, endIndex] : [endIndex, startIndex];
 	return sequence.slice(lo, hi + 1).map((stop) => stop.name);
-}
-
-/**
- * Rapproche un nom d'arrêt d'alerte d'un nom d'arrêt GTFS (déjà normalisés). Vrai si le nom de
- * l'alerte est une sous-séquence contiguë de mots du nom GTFS — gère les libellés abrégés de l'info
- * trafic (« Piscine » → « Piscine de Bihorel », « Michelet » → « Collège Michelet »). La comparaison
- * porte sur les tokens ({@link stopNameTokens}), à une faute de frappe près par mot : l'appel se
- * fait dans le contexte d'une ligne (quelques dizaines d'arrêts), où le risque de confusion est faible.
- *
- * Le rapprochement est volontairement à SENS UNIQUE : un nom d'alerte plus précis que le nom GTFS
- * ne matche pas. Les mots en trop désignent presque toujours un autre lieu — « Pôle Multimodal-Cotoni »
- * n'est pas l'arrêt « Pôle Multimodal ». Les noms de pôle (station parente) restent rapprochés par
- * `stopNameIndex`, qui les indexe vers leurs quais.
- */
-function stopNameMatches(alertName: string, gtfsName: string): boolean {
-	if (alertName === gtfsName) return true;
-	return containsRun(stopNameTokens(alertName), stopNameTokens(gtfsName));
-}
-
-/** Vrai si `needle` apparaît comme une suite contiguë de mots dans `haystack`. */
-function containsRun(needle: string[], haystack: string[]): boolean {
-	if (needle.length === 0 || needle.length > haystack.length) return false;
-
-	for (let i = 0; i <= haystack.length - needle.length; i += 1) {
-		let match = true;
-		for (let j = 0; j < needle.length; j += 1) {
-			if (!tokenMatches(haystack[i + j] as string, needle[j] as string)) {
-				match = false;
-				break;
-			}
-		}
-		if (match) return true;
-	}
-	return false;
-}
-
-/**
- * Vrai si deux mots sont identiques, ou à une faute près. La tolérance est réservée aux mots assez
- * longs : sur les courts, une faute d'écart confond des noms bel et bien distincts.
- */
-function tokenMatches(a: string, b: string): boolean {
-	if (a === b) return true;
-	if (a.length < 5 && b.length < 5) return false;
-	return withinOneEdit(a, b);
-}
-
-/** Vrai si une seule insertion, suppression ou substitution suffit à passer de `a` à `b`. */
-function withinOneEdit(a: string, b: string): boolean {
-	if (Math.abs(a.length - b.length) > 1) return false;
-
-	const [short, long] = a.length <= b.length ? [a, b] : [b, a];
-	let edited = false;
-	let i = 0;
-	for (let j = 0; j < long.length; j += 1) {
-		if (short[i] === long[j]) {
-			i += 1;
-			continue;
-		}
-		if (edited) return false;
-		edited = true;
-		// Longueurs égales → substitution (on avance des deux côtés) ; sinon insertion dans `long`.
-		if (short.length === long.length) i += 1;
-	}
-	return true;
 }
 
 function mergeSkip(skipIndex: SkipIndex, routeId: string, directionId: number | null, stopIds: Set<string>) {

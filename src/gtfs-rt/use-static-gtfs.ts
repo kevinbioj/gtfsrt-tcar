@@ -101,6 +101,70 @@ function stem(word: string): string {
 	return word.length > 3 ? word.replace(/[sx]$/, "") : word;
 }
 
+/**
+ * Rapproche un nom court d'un libellé plus long (tous deux normalisés). Vrai si `name` apparaît comme
+ * une sous-séquence contiguë de mots de `within` — gère les libellés abrégés de l'info trafic
+ * (« Piscine » → « Piscine de Bihorel », « Michelet » → « Collège Michelet ») et le rapprochement d'une
+ * destination citée avec le terminus d'une ligne. La comparaison porte sur les tokens
+ * ({@link stopNameTokens}), à une faute de frappe près par mot : l'appel se fait dans un contexte
+ * restreint (les arrêts d'une ligne, les terminus d'une ligne), où le risque de confusion est faible.
+ *
+ * Le rapprochement est volontairement à SENS UNIQUE : un nom plus précis que le libellé ne matche pas.
+ * Les mots en trop désignent presque toujours un autre lieu — « Pôle Multimodal-Cotoni » n'est pas
+ * l'arrêt « Pôle Multimodal ».
+ */
+export function stopNameMatches(name: string, within: string): boolean {
+	if (name === within) return true;
+	return containsRun(stopNameTokens(name), stopNameTokens(within));
+}
+
+/** Vrai si `needle` apparaît comme une suite contiguë de mots dans `haystack`. */
+function containsRun(needle: string[], haystack: string[]): boolean {
+	if (needle.length === 0 || needle.length > haystack.length) return false;
+
+	for (let i = 0; i <= haystack.length - needle.length; i += 1) {
+		let match = true;
+		for (let j = 0; j < needle.length; j += 1) {
+			if (!tokenMatches(haystack[i + j] as string, needle[j] as string)) {
+				match = false;
+				break;
+			}
+		}
+		if (match) return true;
+	}
+	return false;
+}
+
+/**
+ * Vrai si deux mots sont identiques, ou à une faute près. La tolérance est réservée aux mots assez
+ * longs : sur les courts, une faute d'écart confond des noms bel et bien distincts.
+ */
+function tokenMatches(a: string, b: string): boolean {
+	if (a === b) return true;
+	if (a.length < 5 && b.length < 5) return false;
+	return withinOneEdit(a, b);
+}
+
+/** Vrai si une seule insertion, suppression ou substitution suffit à passer de `a` à `b`. */
+function withinOneEdit(a: string, b: string): boolean {
+	if (Math.abs(a.length - b.length) > 1) return false;
+
+	const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+	let edited = false;
+	let i = 0;
+	for (let j = 0; j < long.length; j += 1) {
+		if (short[i] === long[j]) {
+			i += 1;
+			continue;
+		}
+		if (edited) return false;
+		edited = true;
+		// Longueurs égales → substitution (on avance des deux côtés) ; sinon insertion dans `long`.
+		if (short.length === long.length) i += 1;
+	}
+	return true;
+}
+
 // ---
 
 /** Version publiée du GTFS (ETag de préférence, sinon Last-Modified). `null` si aucun en-tête exploitable. */

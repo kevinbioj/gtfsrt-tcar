@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 
 import { ANTHROPIC_MODEL } from "../config.js";
-import type { RouteDirection } from "../gtfs-rt/use-static-gtfs.js";
+import { normalizeStopName, type RouteDirection, stopNameMatches } from "../gtfs-rt/use-static-gtfs.js";
 
 export type AlertRouteContext = {
 	routeId: string;
@@ -120,9 +120,11 @@ RÈGLES STRICTES :
 - N'inclus PAS les arrêts simplement reportés, déplacés de quelques mètres, déviés, ni les arrêts de report/substitution, ni les informations d'ascenseurs/escaliers/quais.
 - Pour chaque arrêt supprimé, indique les lignes concernées (uniquement parmi celles fournies) et le sens.
 - Sens : sers-toi des terminus (headsigns) fournis pour chaque ligne afin de déduire directionId ("0" ou "1").
-  - La direction est souvent donnée par le SENS DE LA DÉVIATION, indiqué globalement en tête de l'alerte (« Déviation en direction de X », « vers X »), parfois différent par ligne (« Déviation en direction de X (F2), Y (F7) et Z (22) »). Dans ce cas, applique cette direction aux arrêts supprimés de la ligne concernée, MÊME SI la phrase de suppression ne répète pas le sens. Rapproche le terminus/lieu cité (X) du headsign de la ligne pour trouver directionId.
-  - « dans les deux sens » → "any".
-  - N'utilise "any" que si AUCUNE direction n'est déductible pour la ligne.
+  - Une indication de sens ne vaut QUE pour la ligne à laquelle le texte la rattache. Une même alerte traite souvent plusieurs lignes avec des consignes DIFFÉRENTES (« F8 : Terminus à l'arrêt Rue du 8-Mai, arrêts non desservis de A à B. » / « 43 : Déviation dans les deux sens, arrêts non desservis de C à D. ») : ne REPORTE JAMAIS sur une ligne la direction déduite pour une autre.
+  - « dans les deux sens » (ou « dans les 2 sens ») → "any" pour les lignes que cette mention vise. Elle PRIME sur toute autre déduction.
+  - Sinon, la direction est souvent donnée par le SENS DE LA DÉVIATION, indiqué globalement en tête de l'alerte (« Déviation en direction de X », « vers X »), parfois différent par ligne (« Déviation en direction de X (F2), Y (F7) et Z (22) »). Dans ce cas, applique cette direction aux arrêts supprimés de la ligne concernée, MÊME SI la phrase de suppression ne répète pas le sens. Rapproche le terminus/lieu cité (X) du headsign de la ligne pour trouver directionId.
+  - Une déviation « dans les deux sens » n'implique PAS que chaque arrêt le soit : si la phrase qui supprime l'arrêt précise son propre sens (« Arrêt non desservi Mésangère vers Monod »), c'est CE sens qui vaut.
+  - En l'absence de toute indication exploitable pour la ligne → "any".
 - Utilise EXACTEMENT le nom de l'arrêt tel qu'il est écrit dans l'alerte.
 - Si aucun arrêt n'est supprimé, retourne une liste vide.
 
@@ -240,7 +242,9 @@ export async function analyzeAlerts(alerts: AlertInput[]): Promise<Map<string, A
 		hashById.set(alert.id, hash);
 		const cached = cache.get(alert.id);
 		if (cached?.hash === hash) {
-			result.set(alert.id, cached.result);
+			// Le cache conserve la sortie brute de l'IA : le garde-fou est réappliqué à chaque fois,
+			// pour qu'une correction de sa logique profite aussi aux alertes déjà analysées.
+			result.set(alert.id, resolveDirections(cached.result, alert));
 		} else {
 			toAnalyze.push(alert);
 		}
@@ -255,7 +259,7 @@ export async function analyzeAlerts(alerts: AlertInput[]): Promise<Map<string, A
 				// erreur ne fige pas un résultat vide (elles seront réanalysées au prochain changement).
 				cache.set(alert.id, { hash: hashById.get(alert.id)!, result: analysis });
 				dirty = true;
-				result.set(alert.id, analysis);
+				result.set(alert.id, resolveDirections(analysis, alert));
 			} else {
 				result.set(alert.id, EMPTY);
 			}
@@ -312,6 +316,215 @@ async function runBatch(alerts: AlertInput[]): Promise<Map<string, AlertAnalysis
 
 	return out;
 }
+
+// --- Relecture du sens dans le texte
+//
+// Le modèle rattache parfois à une ligne la direction déduite pour une AUTRE ligne de la même alerte
+// (« F8 : Terminus à l'arrêt Rue du 8-Mai… » / « 43 : Déviation dans les deux sens… ») : l'arrêt n'est
+// alors supprimé que dans un sens. Le texte, lui, est explicite — on le relit donc après coup, sur la
+// sortie de l'IA comme sur celle relue du cache.
+//
+// La lecture se fait au grain de la CLAUSE, car une même phrase mêle les deux cas : « Arrêts non
+// desservis Place Ferrer et Emile Zola dans les deux sens, Complexe Sportif vers Pôle Multimodal ».
+
+/** Mention explicite d'une perturbation bidirectionnelle. */
+const BOTH_DIRECTIONS = /\bdans les (?:deux|2) sens\b/;
+
+/** Sens exprimé par une destination : « … vers Monod », « Déviation en direction de X ». */
+const TOWARDS = /\b(?:vers|en direction(?: des| du| de)?)\s+(.+)$/;
+
+/** Longueur maximale d'un préfixe de lignes (« Lignes 13-14 : ») — au-delà, le « : » sépare de la prose. */
+const MAX_PREFIX_LENGTH = 40;
+
+/**
+ * Sépare deux clauses d'une même puce. Le point ne coupe que s'il termine une phrase : ni celui d'une
+ * initiale (« rue G. Gaillard », « Collège J. Verne »), ni celui d'une date (« 12.01.2025 »), sans quoi
+ * la mention de sens serait tronquée et deviendrait illisible.
+ */
+const CLAUSE_SEPARATOR = /[,;]|(?<!\b\p{L})\.(?=\s|$)/u;
+
+/** Sens exprimé par une clause : les deux sens, ou une destination à rapprocher des terminus. */
+type ClauseDirection = { both: true } | { both: false; towards: string };
+
+/** Un fragment de phrase, avec les lignes qu'il vise et le sens qu'il exprime. */
+type Clause = {
+	/** Texte normalisé, pour y retrouver les noms d'arrêts. */
+	text: string;
+	/** Puce d'origine : le contexte le plus proche prime sur les mentions des autres puces. */
+	bullet: number;
+	/** Lignes visées par le préfixe de la puce (`null` = toute l'alerte). */
+	routeIds: string[] | null;
+	/** `undefined` si la clause n'exprime aucun sens. */
+	direction: ClauseDirection | undefined;
+};
+
+/**
+ * Réécrit le sens des arrêts supprimés à partir du texte, quand celui-ci le dit sans ambiguïté. Corrige
+ * aussi bien un sens unique attribué à tort (« dans les deux sens » → `null`) qu'un « any » trop large
+ * (« Complexe Sportif vers Pôle Multimodal » → le sens de ce terminus).
+ *
+ * Volontairement prudent : on s'abstient dès que le texte est illisible ou que ses mentions se
+ * contredisent, l'analyse de l'IA faisant alors foi.
+ */
+function resolveDirections(analysis: AlertAnalysis, alert: AlertInput): AlertAnalysis {
+	if (analysis.removedStops.length === 0) return analysis;
+
+	const clauses = splitClauses(`${alert.headerText}\n${alert.descriptionText}`, alert.routes);
+	if (!clauses.some((clause) => clause.direction !== undefined)) return analysis;
+
+	const routesById = new Map(alert.routes.map((route) => [route.routeId, route]));
+
+	let changed = false;
+	const removedStops = analysis.removedStops.map((removedStop) => {
+		const names = [removedStop.stopName, removedStop.toStopName].map(normalizeStopName).filter(Boolean);
+		if (names.length === 0) return removedStop;
+
+		const routes = removedStop.routes.map((route) => {
+			const context = routesById.get(route.routeId);
+			if (context === undefined) return route;
+
+			const directionId = textDirection(clauses, names, context);
+			return directionId === undefined || directionId === route.directionId ? route : { ...route, directionId };
+		});
+		if (routes.every((route, index) => route === removedStop.routes[index])) return removedStop;
+
+		changed = true;
+		return { ...removedStop, routes };
+	});
+
+	return changed ? { ...analysis, removedStops } : analysis;
+}
+
+/**
+ * Sens que le texte donne à cet arrêt sur cette ligne, `undefined` s'il n'en donne pas de lisible. On
+ * lit d'abord les clauses qui CITENT l'arrêt, puis le reste de leur puce, puis les mentions générales :
+ * le contexte le plus proche prime (« 43 : Déviation dans les deux sens, arrêts non desservis de X à Y »
+ * porte le sens dans une clause, les arrêts dans l'autre).
+ */
+function textDirection(clauses: Clause[], names: string[], route: AlertRouteContext): number | null | undefined {
+	const applies = (clause: Clause) => clause.routeIds === null || clause.routeIds.includes(route.routeId);
+	const cites = (clause: Clause) => names.some((name) => clause.text.includes(name));
+
+	const candidates = clauses.filter(applies);
+	const citing = candidates.filter(cites);
+	// Arrêt introuvable dans le texte (libellé reformulé par l'IA) : rien ne dit quelle mention le vise.
+	if (citing.length === 0) return undefined;
+
+	const bullets = new Set(citing.map((clause) => clause.bullet));
+	const levels = [
+		citing,
+		candidates.filter((clause) => !cites(clause) && bullets.has(clause.bullet)),
+		candidates.filter((clause) => !cites(clause) && !bullets.has(clause.bullet)),
+	];
+
+	for (const [level, clausesOfLevel] of levels.entries()) {
+		const found = new Set<number | null>();
+		for (const clause of clausesOfLevel) {
+			if (clause.direction === undefined) continue;
+
+			const directionId = clauseDirection(clause.direction, route);
+			if (directionId === undefined) {
+				// La clause CITE l'arrêt et lui donne un sens qu'on ne sait pas lire : se rabattre sur un
+				// contexte plus large dirait autre chose qu'elle. Plus loin, en revanche, une mention
+				// illisible (« déviation vers Collège J. Verne ») ne doit pas masquer celles qui sont claires.
+				if (level === 0) return undefined;
+				continue;
+			}
+			found.add(directionId);
+		}
+		if (found.size === 1) return [...found][0];
+		if (found.size > 1) return undefined; // mentions contradictoires → prudence
+	}
+
+	return undefined;
+}
+
+/**
+ * Traduit le sens d'une clause pour une ligne donnée. Une destination ne vaut que pour les lignes dont
+ * elle est un terminus : dans un lot de lignes (« F3-310-311 : … Complexe Sportif vers Pôle Multimodal /
+ * Tourville »), chacune est confrontée à SES propres headsigns, et celles qui ne vont ni à l'une ni à
+ * l'autre des destinations restent indéterminées.
+ */
+function clauseDirection(direction: ClauseDirection, route: AlertRouteContext): number | null | undefined {
+	if (direction.both) return null;
+
+	const matches = route.directions.filter((candidate) =>
+		candidate.headsigns.some((headsign) =>
+			stopNameMatches(normalizeStopName(headsignName(headsign)), direction.towards),
+		),
+	);
+	// Les deux sens reconnus (terminus cités de part et d'autre) → indécidable, on n'invente pas.
+	return matches.length === 1 ? matches[0]?.directionId : undefined;
+}
+
+/** Nom du terminus, débarrassé de la commune que le GTFS accole en capitales (« Pôle Multimodal OISSEL »). */
+function headsignName(headsign: string): string {
+	return headsign.replace(/\s+\p{Lu}[\p{Lu}\d'’\-\s]*$/u, "").trim() || headsign;
+}
+
+/**
+ * Découpe le texte en clauses : d'abord les puces — dont on lit l'éventuel préfixe de lignes, qui vaut
+ * pour toute la puce — puis les fragments séparés par une virgule, un point-virgule ou un point.
+ */
+function splitClauses(text: string, routes: AlertRouteContext[]): Clause[] {
+	const clauses: Clause[] = [];
+	let bullet = 0;
+
+	for (const raw of text.split(/[\n•]/)) {
+		const trimmed = raw.trim();
+		if (!trimmed) continue;
+
+		const routeIds = routePrefix(trimmed, routes);
+		bullet += 1;
+		for (const fragment of trimmed.split(CLAUSE_SEPARATOR)) {
+			const normalized = normalizeStopName(fragment);
+			if (!normalized) continue;
+			clauses.push({ text: normalized, bullet, routeIds, direction: parseDirectionText(normalized) });
+		}
+	}
+
+	return clauses;
+}
+
+/** Sens exprimé par une clause (texte normalisé), `undefined` si elle n'en exprime aucun. */
+function parseDirectionText(text: string): ClauseDirection | undefined {
+	if (BOTH_DIRECTIONS.test(text)) return { both: true };
+
+	const towards = TOWARDS.exec(text)?.[1]?.trim();
+	return towards ? { both: false, towards } : undefined;
+}
+
+/**
+ * Lignes visées par un segment préfixé (« 43 : … », « Lignes 13-14 : … »), ou `null` s'il vaut pour
+ * toute l'alerte. Le préfixe n'est retenu que si TOUS ses mots désignent une ligne de l'alerte : sinon
+ * le « : » sépare simplement de la prose (« Arrêts non desservis : de Beauvoisine à Foyer Municipal »).
+ */
+function routePrefix(segment: string, routes: AlertRouteContext[]): string[] | null {
+	const colon = segment.indexOf(":");
+	if (colon === -1 || colon > MAX_PREFIX_LENGTH) return null;
+
+	const tokens = normalizeStopName(segment.slice(0, colon))
+		.split(" ")
+		.filter((token) => token && token !== "ligne" && token !== "lignes");
+	if (tokens.length === 0) return null;
+
+	const routeIds: string[] = [];
+	for (const token of tokens) {
+		const number = lineNumber(token);
+		const match = number ? routes.find((route) => lineNumber(route.shortName) === number) : undefined;
+		if (match === undefined) return null;
+		routeIds.push(match.routeId);
+	}
+	return routeIds;
+}
+
+/** Numéro comparable d'une ligne : « F8 », « 08 » et « T8 » donnent tous « 8 ». Vide si ce n'en est pas une. */
+function lineNumber(label: string): string {
+	const digits = normalizeStopName(label).replace(/^[a-z]+/, "");
+	return /^\d+$/.test(digits) ? digits.replace(/^0+/, "") : "";
+}
+
+// ---
 
 function normalizeAnalysis(raw: unknown): AlertAnalysis {
 	if (typeof raw !== "object" || raw === null || !Array.isArray((raw as { removedStops?: unknown }).removedStops)) {
@@ -395,7 +608,7 @@ function getClient(): Anthropic | undefined {
 
 // Version du schéma/prompt d'analyse : à incrémenter quand la logique change, pour invalider
 // proprement les caches existants (ex. ajout des bornes horaires dans la période d'effet).
-const ANALYSIS_VERSION = 6;
+const ANALYSIS_VERSION = 7;
 
 function hashAlert(alert: AlertInput): string {
 	// On inclut le contexte des lignes (terminus/sens) : si le GTFS change, l'analyse est
