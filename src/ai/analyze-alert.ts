@@ -117,6 +117,7 @@ Renvoie un objet par alerte dans "results", en réutilisant EXACTEMENT l'"id" fo
 
 RÈGLES STRICTES :
 - Ne retourne QUE les arrêts explicitement non desservis, supprimés ou sautés.
+- « non accessible » / « inaccessible » valent « non desservi » quand la phrase porte sur des ARRÊTS (« Belvédère à Sente d'Houppeville non accessible ») — mais pas quand elle porte sur une rue, un équipement (ascenseur, escalier, quai) ou l'accessibilité PMR.
 - N'inclus PAS les arrêts simplement reportés, déplacés de quelques mètres, déviés, ni les arrêts de report/substitution, ni les informations d'ascenseurs/escaliers/quais.
 - Pour chaque arrêt supprimé, indique les lignes concernées (uniquement parmi celles fournies) et le sens.
 - Sens : sers-toi des terminus (headsigns) fournis pour chaque ligne afin de déduire directionId ("0" ou "1").
@@ -130,6 +131,7 @@ RÈGLES STRICTES :
 
 PLAGES D'ARRÊTS :
 - Si le texte décrit une PLAGE d'arrêts consécutifs ("de X à Y", "entre X et Y", "des arrêts X à Y", "de X jusqu'à Y"), renvoie UN SEUL removedStop avec stopName="X" (premier arrêt de la plage) et toStopName="Y" (dernier arrêt). Tous les arrêts intermédiaires seront supprimés automatiquement.
+- Le « de » est souvent omis : dès que DEUX noms d'arrêts encadrent un « à », c'est une plage (« terminus provisoire Touyé, Belvédère à Sente d'Houppeville non accessible » → stopName="Belvédère", toStopName="Sente d'Houppeville"). Ne te contente PAS du seul arrêt cité dans le titre : c'est la description qui donne l'étendue exacte.
 - Pour un arrêt seul, ou une liste explicite ("X, Y et Z"), renvoie des entrées séparées avec toStopName="".
 
 PÉRIODE D'EFFET (champ "period") :
@@ -608,7 +610,7 @@ function getClient(): Anthropic | undefined {
 
 // Version du schéma/prompt d'analyse : à incrémenter quand la logique change, pour invalider
 // proprement les caches existants (ex. ajout des bornes horaires dans la période d'effet).
-const ANALYSIS_VERSION = 7;
+const ANALYSIS_VERSION = 8;
 
 function hashAlert(alert: AlertInput): string {
 	// On inclut le contexte des lignes (terminus/sens) : si le GTFS change, l'analyse est

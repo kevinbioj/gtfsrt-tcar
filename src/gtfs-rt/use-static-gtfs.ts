@@ -79,14 +79,15 @@ const ABBREVIATIONS = new Map([
 
 /**
  * Découpe un nom d'arrêt en mots comparables : mots-outils retirés, abréviations développées,
- * pluriels rabotés. Absorbe les approximations de la source, qui n'écrit pas toujours les noms
- * comme le GTFS (« Champs de Mars » et « Champ de Mars » donnent tous deux `["champ", "mar"]`).
+ * pluriels et zéros initiaux rabotés. Absorbe les approximations de la source, qui n'écrit pas
+ * toujours les noms comme le GTFS (« Champs de Mars » et « Champ de Mars » donnent tous deux
+ * `["champ", "mar"]`).
  */
 export function stopNameTokens(name: string): string[] {
 	const tokens: string[] = [];
 	for (const word of normalizeStopName(name).split(" ")) {
 		if (!word || FILLER_WORDS.has(word)) continue;
-		tokens.push(stem(ABBREVIATIONS.get(word) ?? word));
+		tokens.push(stem(unpadNumber(ABBREVIATIONS.get(word) ?? word)));
 	}
 	return tokens;
 }
@@ -99,6 +100,15 @@ export function stopNameKey(name: string): string {
 /** Rabote les marques de pluriel : « champs » → « champ ». Les mots courts sont laissés intacts. */
 function stem(word: string): string {
 	return word.length > 3 ? word.replace(/[sx]$/, "") : word;
+}
+
+/**
+ * Rabote les zéros initiaux d'un nombre : l'info trafic reprend parfois le code interne de l'arrêt
+ * plutôt que son libellé (« 08-Mai » pour « Rue du 8-Mai »). Sans cela, les mots « 08 » et « 8 »,
+ * trop courts pour la tolérance d'une faute, ne se rapprochent jamais.
+ */
+function unpadNumber(word: string): string {
+	return /^\d+$/.test(word) ? word.replace(/^0+(?=\d)/, "") : word;
 }
 
 /**
@@ -135,34 +145,45 @@ function containsRun(needle: string[], haystack: string[]): boolean {
 	return false;
 }
 
+/** Longueur à partir de laquelle un mot tolère deux fautes plutôt qu'une. */
+const LONG_WORD_LENGTH = 9;
+
 /**
  * Vrai si deux mots sont identiques, ou à une faute près. La tolérance est réservée aux mots assez
- * longs : sur les courts, une faute d'écart confond des noms bel et bien distincts.
+ * longs : sur les courts, une faute d'écart confond des noms bel et bien distincts. Les mots vraiment
+ * longs en tolèrent deux — la source écrit parfois un nom de travers (« Sente d'Houppeville » pour
+ * « Sente d'Houdeville ») — sans qu'aucun couple d'arrêts du réseau ne s'y confonde.
  */
 function tokenMatches(a: string, b: string): boolean {
 	if (a === b) return true;
 	if (a.length < 5 && b.length < 5) return false;
-	return withinOneEdit(a, b);
+	return withinEdits(a, b, Math.min(a.length, b.length) >= LONG_WORD_LENGTH ? 2 : 1);
 }
 
-/** Vrai si une seule insertion, suppression ou substitution suffit à passer de `a` à `b`. */
-function withinOneEdit(a: string, b: string): boolean {
-	if (Math.abs(a.length - b.length) > 1) return false;
+/** Vrai si au plus `max` insertions, suppressions ou substitutions suffisent à passer de `a` à `b`. */
+function withinEdits(a: string, b: string, max: number): boolean {
+	if (Math.abs(a.length - b.length) > max) return false;
 
-	const [short, long] = a.length <= b.length ? [a, b] : [b, a];
-	let edited = false;
-	let i = 0;
-	for (let j = 0; j < long.length; j += 1) {
-		if (short[i] === long[j]) {
-			i += 1;
-			continue;
+	// Levenshtein ligne à ligne, abandonné dès qu'une ligne entière dépasse le seuil.
+	let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+	for (let i = 1; i <= a.length; i += 1) {
+		const current = [i];
+		let best = i;
+		for (let j = 1; j <= b.length; j += 1) {
+			const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+			const distance = Math.min(
+				(previous[j] as number) + 1,
+				(current[j - 1] as number) + 1,
+				(previous[j - 1] as number) + cost,
+			);
+			current[j] = distance;
+			if (distance < best) best = distance;
 		}
-		if (edited) return false;
-		edited = true;
-		// Longueurs égales → substitution (on avance des deux côtés) ; sinon insertion dans `long`.
-		if (short.length === long.length) i += 1;
+		if (best > max) return false;
+		previous = current;
 	}
-	return true;
+
+	return (previous[b.length] as number) <= max;
 }
 
 // ---
