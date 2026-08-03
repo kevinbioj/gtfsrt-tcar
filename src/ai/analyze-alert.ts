@@ -125,6 +125,7 @@ RÈGLES STRICTES :
   - « dans les deux sens » (ou « dans les 2 sens ») → "any" pour les lignes que cette mention vise. Elle PRIME sur toute autre déduction.
   - Sinon, la direction est souvent donnée par le SENS DE LA DÉVIATION, indiqué globalement en tête de l'alerte (« Déviation en direction de X », « vers X »), parfois différent par ligne (« Déviation en direction de X (F2), Y (F7) et Z (22) »). Dans ce cas, applique cette direction aux arrêts supprimés de la ligne concernée, MÊME SI la phrase de suppression ne répète pas le sens. Rapproche le terminus/lieu cité (X) du headsign de la ligne pour trouver directionId.
   - Une déviation « dans les deux sens » n'implique PAS que chaque arrêt le soit : si la phrase qui supprime l'arrêt précise son propre sens (« Arrêt non desservi Mésangère vers Monod »), c'est CE sens qui vaut.
+  - Une même phrase enchaîne souvent PLUSIEURS groupes d'arrêts, chacun suivi de SON sens (« arrêts non desservis A et B vers X et de C à D vers Y »). Découpe-la et rattache chaque groupe au « vers » qui le SUIT : A et B vers X d'un côté, la plage C→D vers Y de l'autre. N'étends jamais le sens d'un groupe aux autres, et ne fusionne pas deux groupes en une seule plage — même quand un arrêt apparaît dans les deux, il doit ressortir une fois par sens.
   - En l'absence de toute indication exploitable pour la ligne → "any".
 - Utilise EXACTEMENT le nom de l'arrêt tel qu'il est écrit dans l'alerte.
 - Si aucun arrêt n'est supprimé, retourne une liste vide.
@@ -328,12 +329,16 @@ async function runBatch(alerts: AlertInput[]): Promise<Map<string, AlertAnalysis
 //
 // La lecture se fait au grain de la CLAUSE, car une même phrase mêle les deux cas : « Arrêts non
 // desservis Place Ferrer et Emile Zola dans les deux sens, Complexe Sportif vers Pôle Multimodal ».
+//
+// Une clause porte parfois PLUSIEURS mentions de sens, chacune ne valant que pour le groupe d'arrêts
+// qui la précède (« arrêts non desservis Douaumont et Gare de St Etienne vers Gare de St Etienne et
+// de Gare de St Etienne à Corneille vers Les Bouttières ») : on les repère donc avec leur position.
 
 /** Mention explicite d'une perturbation bidirectionnelle. */
 const BOTH_DIRECTIONS = /\bdans les (?:deux|2) sens\b/;
 
-/** Sens exprimé par une destination : « … vers Monod », « Déviation en direction de X ». */
-const TOWARDS = /\b(?:vers|en direction(?: des| du| de)?)\s+(.+)$/;
+/** Toute mention de sens : les deux sens, ou l'amorce d'une destination (« vers … », « en direction de … »). */
+const DIRECTION_MENTION = /\bdans les (?:deux|2) sens\b|\b(?:vers|en direction(?: des| du| de)?)\b\s*/g;
 
 /** Longueur maximale d'un préfixe de lignes (« Lignes 13-14 : ») — au-delà, le « : » sépare de la prose. */
 const MAX_PREFIX_LENGTH = 40;
@@ -348,7 +353,10 @@ const CLAUSE_SEPARATOR = /[,;]|(?<!\b\p{L})\.(?=\s|$)/u;
 /** Sens exprimé par une clause : les deux sens, ou une destination à rapprocher des terminus. */
 type ClauseDirection = { both: true } | { both: false; towards: string };
 
-/** Un fragment de phrase, avec les lignes qu'il vise et le sens qu'il exprime. */
+/** Mention de sens et sa position dans la clause : elle qualifie les arrêts qui la PRÉCÈDENT. */
+type DirectionMention = { index: number; direction: ClauseDirection };
+
+/** Un fragment de phrase, avec les lignes qu'il vise et les sens qu'il exprime. */
 type Clause = {
 	/** Texte normalisé, pour y retrouver les noms d'arrêts. */
 	text: string;
@@ -356,8 +364,8 @@ type Clause = {
 	bullet: number;
 	/** Lignes visées par le préfixe de la puce (`null` = toute l'alerte). */
 	routeIds: string[] | null;
-	/** `undefined` si la clause n'exprime aucun sens. */
-	direction: ClauseDirection | undefined;
+	/** Mentions de sens portées par la clause, dans l'ordre du texte. Vide si elle n'en exprime aucun. */
+	directions: DirectionMention[];
 };
 
 /**
@@ -372,7 +380,7 @@ function resolveDirections(analysis: AlertAnalysis, alert: AlertInput): AlertAna
 	if (analysis.removedStops.length === 0) return analysis;
 
 	const clauses = splitClauses(`${alert.headerText}\n${alert.descriptionText}`, alert.routes);
-	if (!clauses.some((clause) => clause.direction !== undefined)) return analysis;
+	if (!clauses.some((clause) => clause.directions.length > 0)) return analysis;
 
 	const routesById = new Map(alert.routes.map((route) => [route.routeId, route]));
 
@@ -422,23 +430,47 @@ function textDirection(clauses: Clause[], names: string[], route: AlertRouteCont
 	for (const [level, clausesOfLevel] of levels.entries()) {
 		const found = new Set<number | null>();
 		for (const clause of clausesOfLevel) {
-			if (clause.direction === undefined) continue;
-
-			const directionId = clauseDirection(clause.direction, route);
-			if (directionId === undefined) {
-				// La clause CITE l'arrêt et lui donne un sens qu'on ne sait pas lire : se rabattre sur un
-				// contexte plus large dirait autre chose qu'elle. Plus loin, en revanche, une mention
-				// illisible (« déviation vers Collège J. Verne ») ne doit pas masquer celles qui sont claires.
-				if (level === 0) return undefined;
-				continue;
+			// Une clause qui cite l'arrêt ne vaut que par la mention qui le qualifie ; les autres, plus
+			// lointaines, pèsent de toutes leurs mentions (une seule, le plus souvent).
+			for (const mention of level === 0 ? qualifyingMentions(clause, names) : clause.directions) {
+				const directionId = clauseDirection(mention.direction, route);
+				if (directionId === undefined) {
+					// La clause CITE l'arrêt et lui donne un sens qu'on ne sait pas lire : se rabattre sur un
+					// contexte plus large dirait autre chose qu'elle. Plus loin, en revanche, une mention
+					// illisible (« déviation vers Collège J. Verne ») ne doit pas masquer celles qui sont claires.
+					if (level === 0) return undefined;
+					continue;
+				}
+				found.add(directionId);
 			}
-			found.add(directionId);
 		}
 		if (found.size === 1) return [...found][0];
 		if (found.size > 1) return undefined; // mentions contradictoires → prudence
 	}
 
 	return undefined;
+}
+
+/**
+ * La mention de sens qui, dans cette clause, qualifie ces arrêts : celle qui SUIT le dernier d'entre
+ * eux, car le réseau écrit la destination après le groupe qu'elle concerne (« … Douaumont et Gare de
+ * St Etienne vers Gare de St Etienne et de Gare de St Etienne à Corneille vers Les Bouttières » donne
+ * le premier « vers » à Douaumont, le second à la plage). À défaut, la dernière mention qui les
+ * précède — une clause n'en porte le plus souvent qu'une, dont la place ne change alors rien.
+ */
+function qualifyingMentions(clause: Clause, names: string[]): DirectionMention[] {
+	if (clause.directions.length === 0) return [];
+
+	// Première occurrence de chaque extrémité : un nom répété plus loin l'est dans la destination
+	// d'un « vers » ou dans une autre plage, pas dans le groupe qu'on cherche à situer.
+	let position = -1;
+	for (const name of names) {
+		const index = clause.text.indexOf(name);
+		if (index > position) position = index;
+	}
+
+	const mention = clause.directions.find((candidate) => candidate.index > position) ?? clause.directions.at(-1);
+	return mention === undefined ? [] : [mention];
 }
 
 /**
@@ -481,19 +513,35 @@ function splitClauses(text: string, routes: AlertRouteContext[]): Clause[] {
 		for (const fragment of trimmed.split(CLAUSE_SEPARATOR)) {
 			const normalized = normalizeStopName(fragment);
 			if (!normalized) continue;
-			clauses.push({ text: normalized, bullet, routeIds, direction: parseDirectionText(normalized) });
+			clauses.push({ text: normalized, bullet, routeIds, directions: parseDirections(normalized) });
 		}
 	}
 
 	return clauses;
 }
 
-/** Sens exprimé par une clause (texte normalisé), `undefined` si elle n'en exprime aucun. */
-function parseDirectionText(text: string): ClauseDirection | undefined {
-	if (BOTH_DIRECTIONS.test(text)) return { both: true };
+/**
+ * Mentions de sens d'une clause (texte normalisé), dans l'ordre du texte. La destination d'un « vers »
+ * s'arrête à la mention SUIVANTE, et non à la fin de la clause : sans cela, une phrase qui enchaîne
+ * deux groupes (« … vers Gare de St Etienne et de Gare de St Etienne à Corneille vers Les Bouttières »)
+ * donnerait une destination couvrant les deux terminus de la ligne, donc illisible.
+ */
+function parseDirections(text: string): DirectionMention[] {
+	const matches = [...text.matchAll(DIRECTION_MENTION)];
 
-	const towards = TOWARDS.exec(text)?.[1]?.trim();
-	return towards ? { both: false, towards } : undefined;
+	const mentions: DirectionMention[] = [];
+	for (const [position, match] of matches.entries()) {
+		const index = match.index;
+		if (BOTH_DIRECTIONS.test(match[0])) {
+			mentions.push({ index, direction: { both: true } });
+			continue;
+		}
+
+		const towards = text.slice(index + match[0].length, matches[position + 1]?.index ?? text.length).trim();
+		if (towards) mentions.push({ index, direction: { both: false, towards } });
+	}
+
+	return mentions;
 }
 
 /**
@@ -610,7 +658,7 @@ function getClient(): Anthropic | undefined {
 
 // Version du schéma/prompt d'analyse : à incrémenter quand la logique change, pour invalider
 // proprement les caches existants (ex. ajout des bornes horaires dans la période d'effet).
-const ANALYSIS_VERSION = 8;
+const ANALYSIS_VERSION = 9;
 
 function hashAlert(alert: AlertInput): string {
 	// On inclut le contexte des lignes (terminus/sens) : si le GTFS change, l'analyse est
