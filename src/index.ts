@@ -87,6 +87,9 @@ async function poll() {
 		const response = await fetch(VEHICLE_POSITIONS_URL);
 		if (!response.ok || response.status === 204) {
 			console.error(`✘ Vehicle positions fetch failed (HTTP ${response.status}).`);
+			// Le store n'a pas été vidé : il garde l'état du poll précédent, que l'on complète tout
+			// de même des véhicules vus par la seule source de vérité.
+			console.log(`✓ ${fallbackFromVerificationFeed()} positions from verification feed only.`);
 			return;
 		}
 
@@ -97,6 +100,11 @@ async function poll() {
 		// pouvoir continuer à publier un véhicule dont la ligne est incohérente.
 		const previousPositions = new Map(store.vehiclePositions);
 		store.vehiclePositions.clear();
+
+		// La source de vérité pose le socle : tout véhicule qu'elle voit rouler est publié, ligne et
+		// position seulement. La boucle qui suit ne fait qu'enrichir ce socle avec la course annoncée
+		// par la source principale, et uniquement lorsque celle-ci s'avère cohérente.
+		fallbackFromVerificationFeed();
 
 		for (const entity of feed.entity) {
 			if (!entity.vehicle?.vehicle?.id) continue;
@@ -155,10 +163,62 @@ async function poll() {
 			console.log(`\t⛛ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} ${directionId}`);
 		}
 
-		console.log(`✓ ${store.vehiclePositions.size} positions.`);
+		// Ce que la source principale n'a pas enrichi reste tel que la source de vérité l'a posé :
+		// une ligne, un sens, une position, sans course. C'est le cas d'un véhicule sur une ligne
+		// hors REALTIME_LINES, d'une course absente du flux principal, ou d'un véhicule qu'il ignore.
+		let fallbackVehicles = 0;
+		for (const [key, vehicle] of store.vehiclePositions) {
+			if (vehicle.trip?.tripId) continue;
+			fallbackVehicles += 1;
+			const vehicleId = key.split(":")[2]!;
+			console.log(
+				`\t⛝ ${vehicleId.padEnd(4, " ")}  ${(vehicle.trip?.routeId ?? "").padEnd(10, " ")} ${vehicle.trip?.directionId ?? 0}`,
+			);
+		}
+
+		console.log(`✓ ${store.vehiclePositions.size} positions (${fallbackVehicles} from verification feed only).`);
 	} catch (cause) {
 		console.error("✘ Poll error:", cause);
+		// L'erreur peut survenir en plein remplissage du store : on le complète malgré tout, pour ne
+		// pas publier un feed amputé des véhicules que la source de vérité connaît.
+		console.log(`✓ ${fallbackFromVerificationFeed()} positions from verification feed only.`);
 	}
+}
+
+/**
+ * Peuple le store avec les véhicules connus de la source de vérité, sans écraser une entrée déjà
+ * présente. Aucune course n'est annoncée : uniquement la ligne, le sens et la position — le tripId
+ * de la source de vérité relève d'un autre référentiel que les trips du GTFS statique publié.
+ * Renvoie le nombre de véhicules ajoutés.
+ */
+function fallbackFromVerificationFeed() {
+	const verifiedVehicles = verificationFeed.verifiedVehicles;
+	if (verifiedVehicles === undefined) return 0;
+
+	const now = Temporal.Now.instant();
+	let added = 0;
+
+	for (const [vehicleId, verifiedVehicle] of verifiedVehicles) {
+		const key = `VM:TCAR:${vehicleId}`;
+		if (store.vehiclePositions.has(key)) continue;
+
+		// Même seuil de péremption que pour les véhicules de la source principale : le snapshot de
+		// la source de vérité n'est rechargé qu'une fois par minute et vieillit entre deux polls.
+		if (now.since(Temporal.Instant.fromEpochMilliseconds(verifiedVehicle.recordedAt * 1000)).total("minutes") >= 30) {
+			continue;
+		}
+
+		store.vehiclePositions.set(key, {
+			vehicle: { id: `TCAR:${vehicleId}` },
+			trip: { routeId: verifiedVehicle.routeId, directionId: verifiedVehicle.directionId },
+			position: verifiedVehicle.position,
+			timestamp: verifiedVehicle.recordedAt,
+			occupancyStatus: vehicleOccupancyStatuses.get(vehicleId)?.status,
+		});
+		added += 1;
+	}
+
+	return added;
 }
 
 async function pollTripUpdates() {
