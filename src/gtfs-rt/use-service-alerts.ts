@@ -370,8 +370,8 @@ function applyRemovedStop(
 		// Sinon, match flou dans le contexte de la ligne (ex. « Piscine » → « Piscine de Bihorel »).
 		let count = 0;
 		for (const dir of directions) {
-			const sequence = gtfs.routeStopSequences.get(routeId)?.get(dir);
-			const canonical = sequence?.find((stop) => stopNameMatches(startName, stop.name))?.name;
+			const sequences = gtfs.routeStopSequences.get(routeId)?.get(dir) ?? [];
+			const canonical = sequences.flat().find((stop) => stopNameMatches(startName, stop.name))?.name;
 			const stopIds = canonical ? gtfs.stopNameIndex.get(canonical) : undefined;
 			if (stopIds && stopIds.size > 0) {
 				mergeSkip(skipIndex, routeId, dir, stopIds);
@@ -385,22 +385,40 @@ function applyRemovedStop(
 	// supprime TOUS les quais de chaque nom (comme pour un arrêt seul) — robuste aux variantes de
 	// quais empruntées par les différentes courses.
 	//
-	// Les noms de la plage sont calculés en RÉUNISSANT les deux sens. Une extrémité peut n'être
-	// desservie que dans un sens (arrêt à quai unique, ex. « Église Saint-Romain » sur la 22, absente
-	// du trajet retour) : le découpage échouerait alors dans l'autre sens et retomberait sur les seules
-	// extrémités, perdant tous les arrêts intermédiaires. Le segment physique étant le même quel que
-	// soit le sens de parcours, l'union donne le bon ensemble d'arrêts ; supprimer par nom ne touche de
-	// toute façon que les quais réellement desservis par chaque course.
+	// Les noms de la plage sont calculés en RÉUNISSANT les deux sens, et tous les itinéraires de
+	// chacun. Une extrémité peut n'être desservie que dans un sens (arrêt à quai unique, ex. « Église
+	// Saint-Romain » sur la 22, absente du trajet retour) ou n'exister que sur une branche (le métro
+	// vers Georges Braque) : le découpage échouerait alors et retomberait sur les seules extrémités,
+	// perdant tous les arrêts intermédiaires. Le segment physique étant le même quel que soit le sens
+	// de parcours, l'union donne le bon ensemble d'arrêts ; supprimer par nom ne touche de toute façon
+	// que les quais réellement desservis par chaque course.
 	const endName = normalizeStopName(removedStop.toStopName);
 
 	const rangeNames = new Set<string>();
 	for (const dir of [0, 1]) {
-		const sequence = gtfs.routeStopSequences.get(routeId)?.get(dir);
-		const sliced = sequence ? sliceRangeNames(sequence, startName, endName) : undefined;
-		if (sliced) for (const name of sliced) rangeNames.add(name);
+		for (const sequence of gtfs.routeStopSequences.get(routeId)?.get(dir) ?? []) {
+			const sliced = sliceRangeNames(sequence, startName, endName);
+			if (sliced) for (const name of sliced) rangeNames.add(name);
+		}
 	}
+	const sliced = rangeNames.size > 0;
+
+	if (removedStop.interruption) {
+		// Circulation coupée : les véhicules font demi-tour aux points cités, qui restent desservis en
+		// terminus provisoire. Seule saute la borne qui est DÉJÀ un terminus de la ligne — au-delà, il
+		// n'y a plus rien à desservir (« métro interrompu entre JF Kennedy et Georges Braque » : Kennedy
+		// devient le terminus, Georges Braque et les arrêts qui l'en séparent ne sont plus desservis).
+		//
+		// Sans itinéraire, on ne sait pas départager les bornes : ne rien annoncer vaut mieux que
+		// supprimer un arrêt qui reste desservi. De même si la coupure ne laisse aucun arrêt entre deux
+		// terminus provisoires voisins — le tronçon perdu ne contient alors aucun arrêt.
+		if (!sliced) return 0;
+		removeProvisionalTermini(rangeNames, gtfs, routeId, [startName, endName]);
+		if (rangeNames.size === 0) return 0;
+	}
+
 	// Repli : aucune extrémité sur un itinéraire connu → on ne supprime que les extrémités citées.
-	const names = rangeNames.size > 0 ? [...rangeNames] : [startName, endName];
+	const names = sliced ? [...rangeNames] : [startName, endName];
 
 	const stopIds = new Set<string>();
 	for (const name of names) {
@@ -430,6 +448,36 @@ function resolveStopIds(gtfs: StaticGtfs, normalizedName: string): Set<string> |
 	const names = gtfs.stopKeyIndex.get(stopNameKey(normalizedName));
 	if (names === undefined || names.size !== 1) return undefined;
 	return gtfs.stopNameIndex.get([...names][0] as string);
+}
+
+/**
+ * Retire de la plage les bornes citées qui deviennent des TERMINUS PROVISOIRES : sur une circulation
+ * interrompue, les véhicules s'y arrêtent au lieu de poursuivre. Une borne qui est déjà un terminus
+ * de la ligne est conservée dans la plage — le service n'y va plus du tout.
+ */
+function removeProvisionalTermini(rangeNames: Set<string>, gtfs: StaticGtfs, routeId: string, bounds: string[]) {
+	const termini = routeTerminusNames(gtfs, routeId);
+
+	for (const name of [...rangeNames]) {
+		if (termini.has(name)) continue;
+		if (bounds.some((bound) => stopNameMatches(bound, name))) rangeNames.delete(name);
+	}
+}
+
+/** Noms des terminus de la ligne : première et dernière position de chacun de ses itinéraires. */
+function routeTerminusNames(gtfs: StaticGtfs, routeId: string): Set<string> {
+	const names = new Set<string>();
+
+	for (const sequences of gtfs.routeStopSequences.get(routeId)?.values() ?? []) {
+		for (const sequence of sequences) {
+			const first = sequence[0];
+			const last = sequence.at(-1);
+			if (first) names.add(first.name);
+			if (last) names.add(last.name);
+		}
+	}
+
+	return names;
 }
 
 /** Renvoie les noms d'arrêts de l'itinéraire entre deux arrêts (inclus), quel que soit le sens de citation. */

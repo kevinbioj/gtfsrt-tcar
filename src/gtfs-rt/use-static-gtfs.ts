@@ -15,8 +15,12 @@ export type StaticGtfs = {
 	stopKeyIndex: Map<string, Set<string>>;
 	/** routeId → directions desservies avec leurs terminus (headsigns). */
 	routeDirections: Map<string, RouteDirection[]>;
-	/** routeId → directionId → itinéraire ordonné des arrêts (pour étendre les plages « de X à Y »). */
-	routeStopSequences: Map<string, Map<number, OrderedStop[]>>;
+	/**
+	 * routeId → directionId → itinéraires ordonnés des arrêts (pour étendre les plages « de X à Y »).
+	 * Plusieurs par sens : une ligne à branches (le métro vers Technopôle ou Georges Braque) ne se
+	 * résume pas à un seul parcours, et une plage citée sur une branche resterait introuvable.
+	 */
+	routeStopSequences: Map<string, Map<number, OrderedStop[][]>>;
 	/** tripId → horaire théorique ordonné (pour réinsérer un arrêt supprimé absent du GTFS-RT). */
 	tripStopSequences: Map<string, TripStop[]>;
 };
@@ -85,11 +89,37 @@ const ABBREVIATIONS = new Map([
  */
 export function stopNameTokens(name: string): string[] {
 	const tokens: string[] = [];
-	for (const word of normalizeStopName(name).split(" ")) {
+	for (const word of mergeInitials(normalizeStopName(name).split(" "))) {
 		if (!word || FILLER_WORDS.has(word)) continue;
 		tokens.push(stem(unpadNumber(ABBREVIATIONS.get(word) ?? word)));
 	}
 	return tokens;
+}
+
+/**
+ * Recolle les initiales que la ponctuation a détachées : la source et le GTFS n'écrivent pas le même
+ * sigle de la même façon (« J.F. Kennedy » pour « JF Kennedy », « Z.A. La Maine » pour « ZA La
+ * Maine »), et sans cela le nom compte un mot de plus que le libellé — il ne s'y retrouve donc jamais.
+ * Seules les suites d'AU MOINS deux lettres isolées sont fusionnées : une lettre seule est le plus
+ * souvent un mot-outil (« rue de l'Hôtel de Ville ») ou une initiale de prénom, que le GTFS écrit
+ * lui aussi détachée.
+ */
+function mergeInitials(words: string[]): string[] {
+	const merged: string[] = [];
+
+	for (let index = 0; index < words.length; index += 1) {
+		let end = index;
+		while (end < words.length && /^[a-z]$/.test(words[end] as string)) end += 1;
+
+		if (end - index >= 2) {
+			merged.push(words.slice(index, end).join(""));
+			index = end - 1;
+		} else {
+			merged.push(words[index] as string);
+		}
+	}
+
+	return merged;
 }
 
 /** Clé de rapprochement tolérant d'un nom d'arrêt. Vide si le nom ne porte aucun mot discriminant. */
@@ -240,8 +270,13 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 			? buildSequences(decoder.decode(files["stop_times.txt"]), tripMeta, idToName)
 			: { routeStopSequences: new Map(), tripStopSequences: new Map() };
 
+		let itineraries = 0;
+		for (const directions of routeStopSequences.values()) {
+			for (const variants of directions.values()) itineraries += variants.length;
+		}
+
 		console.log(
-			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${routeStopSequences.size} route itineraries, ${tripStopSequences.size} trip schedules from GTFS.`,
+			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${itineraries} route itineraries, ${tripStopSequences.size} trip schedules from GTFS.`,
 		);
 		return {
 			data: { stopNameIndex, stopKeyIndex, routeDirections, routeStopSequences, tripStopSequences },
@@ -401,8 +436,8 @@ function buildTrips(csv: string): {
 
 /**
  * À partir de stop_times, construit :
- *  - `routeStopSequences` : par (routeId, directionId), l'itinéraire de référence (trip le plus
- *    long) — sert à étendre les plages « de X à Y » ;
+ *  - `routeStopSequences` : par (routeId, directionId), les itinéraires distincts empruntés — sert
+ *    à étendre les plages « de X à Y » ;
  *  - `tripStopSequences` : par tripId, l'horaire théorique ordonné — sert à réinsérer un arrêt
  *    supprimé absent du GTFS-RT, avec son stop_sequence.
  */
@@ -410,8 +445,8 @@ function buildSequences(
 	csv: string,
 	tripMeta: Map<string, { routeId: string; directionId: number }>,
 	idToName: Map<string, string>,
-): { routeStopSequences: Map<string, Map<number, OrderedStop[]>>; tripStopSequences: Map<string, TripStop[]> } {
-	const routeStopSequences = new Map<string, Map<number, OrderedStop[]>>();
+): { routeStopSequences: Map<string, Map<number, OrderedStop[][]>>; tripStopSequences: Map<string, TripStop[]> } {
+	const routeStopSequences = new Map<string, Map<number, OrderedStop[][]>>();
 	const tripStopSequences = new Map<string, TripStop[]>();
 
 	const rows = parseCsv(csv);
@@ -442,28 +477,81 @@ function buildSequences(
 		stops.push({ stopSequence, stopId });
 	}
 
-	const bestLength = new Map<string, number>();
+	// Itinéraires distincts de chaque (route, sens), dédupliqués par suite de quais.
+	const seen = new Map<string, Set<string>>();
+	const variants = new Map<string, OrderedStop[][]>();
+
 	for (const [tripId, stops] of perTrip) {
 		stops.sort((a, b) => a.stopSequence - b.stopSequence);
 		tripStopSequences.set(tripId, stops);
 
-		// Itinéraire de référence : le trip le plus long de chaque (route, sens).
 		const meta = tripMeta.get(tripId);
 		if (meta === undefined) continue;
 		const key = `${meta.routeId}:${meta.directionId}`;
-		if ((bestLength.get(key) ?? 0) >= stops.length) continue;
-		bestLength.set(key, stops.length);
+
+		let signatures = seen.get(key);
+		if (signatures === undefined) {
+			signatures = new Set();
+			seen.set(key, signatures);
+		}
+		const signature = stops.map(({ stopId }) => stopId).join(">");
+		if (signatures.has(signature)) continue;
+		signatures.add(signature);
 
 		const ordered = stops.map(({ stopId }) => ({ stopId, name: normalizeStopName(idToName.get(stopId) ?? "") }));
-		let directions = routeStopSequences.get(meta.routeId);
+		let list = variants.get(key);
+		if (list === undefined) {
+			list = [];
+			variants.set(key, list);
+		}
+		list.push(ordered);
+	}
+
+	for (const [key, list] of variants) {
+		const [routeId, direction] = splitSequenceKey(key);
+		const directionId = Number.parseInt(direction, 10);
+		if (Number.isNaN(directionId)) continue;
+
+		let directions = routeStopSequences.get(routeId);
 		if (directions === undefined) {
 			directions = new Map();
-			routeStopSequences.set(meta.routeId, directions);
+			routeStopSequences.set(routeId, directions);
 		}
-		directions.set(meta.directionId, ordered);
+		directions.set(directionId, maximalVariants(list));
 	}
 
 	return { routeStopSequences, tripStopSequences };
+}
+
+/** Sépare `routeId:directionId` — le routeId porte lui-même des « : » (« TCAR:90 »). */
+function splitSequenceKey(key: string): [string, string] {
+	const colon = key.lastIndexOf(":");
+	return [key.slice(0, colon), key.slice(colon + 1)];
+}
+
+/**
+ * Ne garde que les itinéraires qui ne sont pas déjà contenus dans un plus long : un service partiel
+ * (« Boulingrin > Saint-Sever ») n'apporte rien face au parcours complet de sa branche, alors que
+ * deux branches distinctes se conservent l'une l'autre. Les listes restent ainsi courtes (une à deux
+ * entrées par sens, le plus souvent une seule).
+ */
+function maximalVariants(list: OrderedStop[][]): OrderedStop[][] {
+	const sorted = [...list].sort((a, b) => b.length - a.length);
+
+	const kept: OrderedStop[][] = [];
+	for (const variant of sorted) {
+		if (!kept.some((candidate) => isSubsequence(variant, candidate))) kept.push(variant);
+	}
+	return kept;
+}
+
+/** Vrai si tous les quais de `needle` apparaissent dans `haystack`, dans le même ordre. */
+function isSubsequence(needle: OrderedStop[], haystack: OrderedStop[]): boolean {
+	let index = 0;
+	for (const stop of haystack) {
+		if (index < needle.length && (needle[index] as OrderedStop).stopId === stop.stopId) index += 1;
+	}
+	return index === needle.length;
 }
 
 /** Parseur CSV minimal gérant les champs entre guillemets. */

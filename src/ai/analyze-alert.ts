@@ -24,10 +24,17 @@ export type AlertInput = {
  * Un arrêt supprimé (ou une plage d'arrêts), avec les lignes/sens concernés.
  * `directionId: null` = les deux sens. `toStopName` non vide = plage « de stopName à toStopName »
  * (tous les arrêts intermédiaires de l'itinéraire sont aussi supprimés).
+ *
+ * `interruption` distingue une CIRCULATION COUPÉE entre deux points (« ligne interrompue entre X et
+ * Y ») d'arrêts simplement sautés (« arrêts non desservis de X à Y ») : dans le premier cas les
+ * véhicules font demi-tour aux bornes citées, qui restent donc desservies en terminus provisoire —
+ * sauf celle qui est déjà un terminus de la ligne, au-delà de laquelle il n'y a plus rien à
+ * desservir. Le tri se fait en aval ({@link applyRemovedStop}), seul à connaître les itinéraires.
  */
 export type RemovedStop = {
 	stopName: string;
 	toStopName: string;
+	interruption: boolean;
 	routes: { routeId: string; directionId: number | null }[];
 };
 
@@ -68,6 +75,7 @@ const BATCH_SCHEMA = {
 							properties: {
 								stopName: { type: "string" },
 								toStopName: { type: "string" },
+								interruption: { type: "boolean" },
 								routes: {
 									type: "array",
 									items: {
@@ -81,7 +89,7 @@ const BATCH_SCHEMA = {
 									},
 								},
 							},
-							required: ["stopName", "toStopName", "routes"],
+							required: ["stopName", "toStopName", "interruption", "routes"],
 						},
 					},
 					period: {
@@ -134,6 +142,18 @@ PLAGES D'ARRÊTS :
 - Si le texte décrit une PLAGE d'arrêts consécutifs ("de X à Y", "entre X et Y", "des arrêts X à Y", "de X jusqu'à Y"), renvoie UN SEUL removedStop avec stopName="X" (premier arrêt de la plage) et toStopName="Y" (dernier arrêt). Tous les arrêts intermédiaires seront supprimés automatiquement.
 - Le « de » est souvent omis : dès que DEUX noms d'arrêts encadrent un « à », c'est une plage (« terminus provisoire Touyé, Belvédère à Sente d'Houppeville non accessible » → stopName="Belvédère", toStopName="Sente d'Houppeville"). Ne te contente PAS du seul arrêt cité dans le titre : c'est la description qui donne l'étendue exacte.
 - Pour un arrêt seul, ou une liste explicite ("X, Y et Z"), renvoie des entrées séparées avec toStopName="".
+
+CIRCULATION INTERROMPUE (champ "interruption") :
+- Mets "interruption": true UNIQUEMENT quand le texte décrit une CIRCULATION COUPÉE sur un tronçon, entre deux points
+  (« ligne interrompue entre X et Y », « circulation interrompue entre X et Y », « le métro ne circule plus entre X et
+  Y », « pas de tramway entre X et Y », « trafic interrompu entre X et Y ») : les véhicules font alors demi-tour aux
+  points cités, qui deviennent des terminus provisoires.
+- Renvoie malgré tout la PLAGE COMPLÈTE (stopName=X, toStopName=Y), exactement comme pour une plage ordinaire : c'est
+  le traitement en aval, qui connaît les itinéraires, qui décidera lesquelles des deux bornes restent desservies.
+- Mets false partout ailleurs — en particulier pour « arrêts non desservis de X à Y », « de X à Y non accessibles »,
+  « déviation, arrêts X et Y supprimés » : là, les arrêts cités sont bel et bien sautés, bornes comprises.
+- Une interruption doublée d'une déviation qui saute nommément des arrêts relève du second cas (false) : c'est la
+  liste d'arrêts non desservis qui fait foi, pas le tronçon coupé.
 
 PÉRIODE D'EFFET (champ "period") :
 - Extrais du texte le DÉBUT et la FIN de la perturbation (la période pendant laquelle l'arrêt n'est pas desservi).
@@ -599,7 +619,8 @@ function normalizeAnalysis(raw: unknown): AlertAnalysis {
 		}
 
 		const toStopName = typeof toStopNameRaw === "string" ? toStopNameRaw : "";
-		if (routes.length > 0) removedStops.push({ stopName, toStopName, routes });
+		const interruption = (stop as { interruption?: unknown }).interruption === true;
+		if (routes.length > 0) removedStops.push({ stopName, toStopName, interruption, routes });
 	}
 
 	return { removedStops, period: parsePeriod((raw as { period?: unknown }).period) };
@@ -658,7 +679,7 @@ function getClient(): Anthropic | undefined {
 
 // Version du schéma/prompt d'analyse : à incrémenter quand la logique change, pour invalider
 // proprement les caches existants (ex. ajout des bornes horaires dans la période d'effet).
-const ANALYSIS_VERSION = 9;
+const ANALYSIS_VERSION = 10;
 
 function hashAlert(alert: AlertInput): string {
 	// On inclut le contexte des lignes (terminus/sens) : si le GTFS change, l'analyse est
