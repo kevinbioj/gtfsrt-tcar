@@ -15,6 +15,7 @@ import {
 	type StaticGtfs,
 	stopNameKey,
 	stopNameMatches,
+	type TripStop,
 } from "./use-static-gtfs.js";
 
 const SKIPPED = GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SKIPPED;
@@ -82,6 +83,9 @@ export function skippedStopIds(skipIndex: SkipIndex, routeId: string, directionI
  *  1. arrêt présent dans le GTFS-RT → on le bascule en SKIPPED (temps retirés) ;
  *  2. arrêt supprimé mais ABSENT du GTFS-RT (la source l'a retiré) → on le réinsère comme entrée
  *     SKIPPED, à sa position (stop_sequence issu de l'horaire théorique du trip).
+ *
+ * Les terminus que la course dessert encore sont préservés dans les deux cas (cf.
+ * {@link keepEffectiveTermini}).
  */
 export function applySkippedStops(
 	tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate,
@@ -93,8 +97,16 @@ export function applySkippedStops(
 	if (!stopTimeUpdates?.length) return;
 
 	const directionId = tripUpdate.trip?.directionId ?? 0;
-	const stopIds = skippedStopIds(skipIndex, routeId, directionId);
+	let stopIds = skippedStopIds(skipIndex, routeId, directionId);
 	if (stopIds.size === 0) return;
+
+	// L'horaire théorique sert au garde-fou (terminus de la course) puis à la réinsertion.
+	const tripId = tripUpdate.trip?.tripId;
+	const schedule = tripId ? gtfs.tripStopSequences.get(tripId) : undefined;
+	if (schedule !== undefined) {
+		stopIds = keepEffectiveTermini(stopIds, schedule, gtfs, routeId, directionId);
+		if (stopIds.size === 0) return;
+	}
 
 	// 1. Arrêts déjà présents → bascule en SKIPPED.
 	const presentIds = new Set<string>();
@@ -108,8 +120,6 @@ export function applySkippedStops(
 	}
 
 	// 2. Arrêts supprimés absents du GTFS-RT → réinsertion (à partir de l'horaire théorique du trip).
-	const tripId = tripUpdate.trip?.tripId;
-	const schedule = tripId ? gtfs.tripStopSequences.get(tripId) : undefined;
 	if (schedule === undefined) return;
 
 	const inserted: GtfsRealtime.transit_realtime.TripUpdate.IStopTimeUpdate[] = [];
@@ -203,7 +213,7 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		let removedCount = 0;
 		for (const input of inputs) {
 			const analysis = analyses.get(input.id);
-			if (!analysis || analysis.removedStops.length === 0 || !isPeriodActive(analysis.period, now)) continue;
+			if (!analysis || analysis.removedStops.length === 0 || !isActive(analysis.periods, now)) continue;
 
 			const routeIds = routesById.get(input.id) ?? new Set();
 			for (const removedStop of analysis.removedStops) {
@@ -224,6 +234,14 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		console.error("✘ Failed to load service alerts!", cause);
 		return null;
 	}
+}
+
+/**
+ * Une alerte peut porter plusieurs plages de dates disjointes (« du 17 au 21 et les 24 et 25 août ») :
+ * elle est active dès que l'une d'elles l'est. Aucune période = aucune borne connue, donc toujours active.
+ */
+function isActive(periods: AlertPeriod[], now: Temporal.Instant): boolean {
+	return periods.length === 0 || periods.some((period) => isPeriodActive(period, now));
 }
 
 /**
@@ -448,6 +466,58 @@ function resolveStopIds(gtfs: StaticGtfs, normalizedName: string): Set<string> |
 	const names = gtfs.stopKeyIndex.get(stopNameKey(normalizedName));
 	if (names === undefined || names.size !== 1) return undefined;
 	return gtfs.stopNameIndex.get([...names][0] as string);
+}
+
+/**
+ * Écarte des arrêts à sauter les TERMINUS que la course dessert encore. Quand le GTFS a déjà intégré
+ * une interruption, il tronque les courses au point de rebroussement : ce point devient leur terminus,
+ * et le tronçon supprimé commence juste après. L'annoncer supprimé serait faux — une course qui finit
+ * là s'y arrête bel et bien, et n'aurait plus aucun terminus desservi.
+ *
+ * La coupure se reconnaît au VOISIN : sur l'itinéraire complet de la ligne, l'arrêt situé AU-DELÀ du
+ * terminus (donc hors de la course) est lui aussi supprimé. Sans ce test, on interdirait du même coup
+ * les suppressions de terminus légitimes, celles où le GTFS n'a PAS encore été mis à jour (« terminus
+ * provisoire Technopôle, arrêt non desservi ESIGELEC » : ESIGELEC termine l'itinéraire, rien au-delà).
+ */
+function keepEffectiveTermini(
+	stopIds: Set<string>,
+	schedule: TripStop[],
+	gtfs: StaticGtfs,
+	routeId: string,
+	directionId: number,
+): Set<string> {
+	const first = schedule[0];
+	const last = schedule.at(-1);
+	if (first === undefined || last === undefined) return stopIds;
+
+	const sequences = gtfs.routeStopSequences.get(routeId)?.get(directionId) ?? [];
+	// Le début de la course a son au-delà en amont de l'itinéraire, la fin en aval.
+	const termini = [
+		{ stopId: first.stopId, step: -1 },
+		{ stopId: last.stopId, step: 1 },
+	];
+
+	let kept = stopIds;
+	for (const { stopId, step } of termini) {
+		if (!kept.has(stopId) || !isTruncatedAt(sequences, stopId, step, stopIds)) continue;
+		if (kept === stopIds) kept = new Set(stopIds);
+		kept.delete(stopId);
+	}
+
+	return kept;
+}
+
+/** Vrai si l'arrêt voisin de `stopId`, au-delà du terminus de la course, est lui aussi supprimé. */
+function isTruncatedAt(sequences: OrderedStop[][], stopId: string, step: number, stopIds: Set<string>): boolean {
+	for (const sequence of sequences) {
+		const index = sequence.findIndex((stop) => stop.stopId === stopId);
+		if (index === -1) continue;
+
+		const beyond = sequence[index + step];
+		if (beyond !== undefined && stopIds.has(beyond.stopId)) return true;
+	}
+
+	return false;
 }
 
 /**

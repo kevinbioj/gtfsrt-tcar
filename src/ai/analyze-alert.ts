@@ -52,7 +52,12 @@ export type DailyWindow = { from: string; to: string };
  */
 export type AlertPeriod = { start: string | null; end: string | null; dailyWindow: DailyWindow | null };
 
-export type AlertAnalysis = { removedStops: RemovedStop[]; period: AlertPeriod };
+/**
+ * Une entrée par plage de dates DISJOINTE (« du 17 au 21 et les 24 et 25 août » en donne deux) : la
+ * perturbation est active dès que l'une d'elles l'est. Liste vide = aucune borne connue, donc toujours
+ * active.
+ */
+export type AlertAnalysis = { removedStops: RemovedStop[]; periods: AlertPeriod[] };
 
 // Toutes les alertes sont analysées en UN seul appel : le schéma renvoie un résultat par alerte,
 // identifié par l'`id` fourni en entrée.
@@ -92,26 +97,29 @@ const BATCH_SCHEMA = {
 							required: ["stopName", "toStopName", "interruption", "routes"],
 						},
 					},
-					period: {
-						type: "object",
-						additionalProperties: false,
-						properties: {
-							start: { type: "string" },
-							end: { type: "string" },
-							dailyWindow: {
-								type: "object",
-								additionalProperties: false,
-								properties: {
-									from: { type: "string" },
-									to: { type: "string" },
+					periods: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								start: { type: "string" },
+								end: { type: "string" },
+								dailyWindow: {
+									type: "object",
+									additionalProperties: false,
+									properties: {
+										from: { type: "string" },
+										to: { type: "string" },
+									},
+									required: ["from", "to"],
 								},
-								required: ["from", "to"],
 							},
+							required: ["start", "end", "dailyWindow"],
 						},
-						required: ["start", "end", "dailyWindow"],
 					},
 				},
-				required: ["id", "removedStops", "period"],
+				required: ["id", "removedStops", "periods"],
 			},
 		},
 	},
@@ -150,12 +158,26 @@ CIRCULATION INTERROMPUE (champ "interruption") :
   points cités, qui deviennent des terminus provisoires.
 - Renvoie malgré tout la PLAGE COMPLÈTE (stopName=X, toStopName=Y), exactement comme pour une plage ordinaire : c'est
   le traitement en aval, qui connaît les itinéraires, qui décidera lesquelles des deux bornes restent desservies.
+- Une SUBSTITUTION par bus relève du même cas : « navette bus entre X et Y », « bus de substitution / de
+  remplacement entre X et Y », « service de substitution de X à Y ». Remplacer le métro ou le tramway par un bus
+  sur un tronçon, c'est y couper la circulation : X et Y sont les points de rebroussement. Renvoie donc la plage
+  X→Y avec "interruption": true, et n'omets pas l'alerte sous prétexte qu'aucun arrêt n'y est dit « non desservi ».
+  Le titre suffit à donner la plage (« Métro : Navettes Bus de 8-Mai à Georges Braque » → stopName="Place du 8-Mai",
+  toStopName="Georges Braque"). Une navette qui dessert un arrêt reporté, ou qui renforce une ligne sans rien
+  interrompre, ne compte pas.
 - Mets false partout ailleurs — en particulier pour « arrêts non desservis de X à Y », « de X à Y non accessibles »,
   « déviation, arrêts X et Y supprimés » : là, les arrêts cités sont bel et bien sautés, bornes comprises.
 - Une interruption doublée d'une déviation qui saute nommément des arrêts relève du second cas (false) : c'est la
   liste d'arrêts non desservis qui fait foi, pas le tronçon coupé.
 
-PÉRIODE D'EFFET (champ "period") :
+PÉRIODE D'EFFET (champ "periods") :
+- "periods" est une LISTE : une entrée par plage de dates DISJOINTE. Le cas ordinaire — une seule plage continue —
+  n'en compte qu'une.
+- Dès que le texte énumère des plages séparées par une interruption de service normal, renvoie-en AUTANT d'entrées :
+  « du lundi 17 au vendredi 21 août et lundi 24 et mardi 25 août » → deux entrées ("2026-08-17"→"2026-08-21" et
+  "2026-08-24"→"2026-08-25"), et surtout PAS une seule enveloppe 17→25 qui engloberait le week-end non perturbé.
+  Une dailyWindow éventuelle se répète à l'identique sur chaque entrée.
+- Si le texte ne donne aucune borne, renvoie une liste vide.
 - Extrais du texte le DÉBUT et la FIN de la perturbation (la période pendant laquelle l'arrêt n'est pas desservi).
 - Format : "AAAA-MM-JJ" si le texte ne donne qu'une date, "AAAA-MM-JJTHH:MM" (heure locale) dès qu'il précise une heure.
 - Une borne "AAAA-MM-JJ" couvre la journée entière : le début vaut 00:00 et la fin est INCLUSIVE (toute la journée citée).
@@ -182,10 +204,10 @@ ANNONCE D'UN RETOUR À LA NORMALE :
 - start reste "" si le texte ne dit pas quand la perturbation a commencé : elle est déjà en cours.
 - L'annonce de la reprise ne vide PAS removedStops : tant que la reprise n'a pas eu lieu, la perturbation
   CONTINUE. Si le texte décrit encore des arrêts non desservis (« Arrêts non desservis de X à Y », « l'arrêt
-  X n'est pas desservi »), renvoie-les NORMALEMENT — c'est la period (end = instant de la reprise) qui borne
+  X n'est pas desservi »), renvoie-les NORMALEMENT — c'est la période (end = instant de la reprise) qui borne
   leur suppression dans le temps, PAS leur omission de removedStops.
   Ex. « T1 : Reprise du parcours normal jeudi 23 juillet. […] Arrêts non desservis de X à Y. »
-  → removedStops contient bien la plage X→Y, et period.end vaut "2026-07-23T00:00".
+  → removedStops contient bien la plage X→Y, et l'unique entrée de periods a end "2026-07-23T00:00".
 - N'omets un arrêt que s'il n'est cité QUE comme redevenant desservi à la reprise (« l'arrêt X sera de
   nouveau desservi »), sans jamais être listé comme actuellement non desservi.
 - Si la reprise ne concerne qu'une PARTIE des lignes (« lignes F2 et 22 : reprise du parcours normal, lignes F8-10-43 :
@@ -193,12 +215,19 @@ ANNONCE D'UN RETOUR À LA NORMALE :
   d'annoncer un arrêt non desservi que d'en annoncer un qui l'est de nouveau. Le réseau republie une info à jour pour
   les lignes encore déviées.
 
-TRANCHE HORAIRE RÉCURRENTE (champ "period.dailyWindow") :
+TRANCHE HORAIRE RÉCURRENTE (champ "dailyWindow" de chaque période) :
 - À remplir UNIQUEMENT si la perturbation se répète chaque jour sur une même tranche horaire, sur PLUSIEURS jours
   (ex. « du 20 au 24 juillet, chaque nuit de 20h à 5h », « tous les jours de 9h à 16h jusqu'au 30 août »).
 - Renseigne alors from/to au format "HH:MM" ; si "to" est <= "from", la tranche passe minuit et se termine le lendemain matin.
 - Dans ce cas, start/end sont des DATES SEULES "AAAA-MM-JJ" délimitant les jours où la tranche DÉBUTE
   (start = premier jour concerné, end = dernier jour où la tranche commence).
+- Une perturbation de SOIRÉE annoncée sur plusieurs jours en relève TOUJOURS : « en soirée », « chaque soir »,
+  « tous les soirs à partir de 20h30 », « de 20h30 à la fin du service ». Ne l'exprime JAMAIS comme une période
+  continue, qui la rendrait active en pleine journée alors que le service y est normal.
+- « (jusqu'à) la fin du service », « jusqu'au dernier départ » → to "04:30" (fin conventionnelle de l'exploitation).
+- Ex. « Du lundi 17 au vendredi 21 août, de 20h30 à la fin du service » → UNE entrée : start "2026-08-17",
+  end "2026-08-21", dailyWindow {from "20:30", to "04:30"}. N'écris ni start "2026-08-17T20:30", ni une fin
+  inventée comme end "2026-08-21T23:59" : dès que dailyWindow est renseignée, start/end sont des DATES SEULES.
 - Pour une perturbation continue, ou limitée à une seule nuit / une seule journée, laisse from et to vides ("") et exprime tout via start/end.`;
 
 const cache = new Map<string, { hash: string; result: AlertAnalysis }>();
@@ -208,7 +237,7 @@ let warnedMissingKey = false;
 let cachePath: string | undefined;
 let dirty = false;
 
-const EMPTY: AlertAnalysis = { removedStops: [], period: { start: null, end: null, dailyWindow: null } };
+const EMPTY: AlertAnalysis = { removedStops: [], periods: [] };
 
 /** Charge le cache persistant depuis le disque au démarrage (aucun ré-appel IA si inchangé). */
 export function loadCache(path: string) {
@@ -511,9 +540,12 @@ function clauseDirection(direction: ClauseDirection, route: AlertRouteContext): 
 	return matches.length === 1 ? matches[0]?.directionId : undefined;
 }
 
-/** Nom du terminus, débarrassé de la commune que le GTFS accole en capitales (« Pôle Multimodal OISSEL »). */
+/** Commune que le GTFS accole en capitales à un terminus (« Pôle Multimodal OISSEL »). */
+const TRAILING_LOCALITY = /\s+\p{Lu}[\p{Lu}\d'’\-\s]*$/u;
+
+/** Nom du terminus, débarrassé de sa commune. */
 function headsignName(headsign: string): string {
-	return headsign.replace(/\s+\p{Lu}[\p{Lu}\d'’\-\s]*$/u, "").trim() || headsign;
+	return headsign.replace(TRAILING_LOCALITY, "").trim() || headsign;
 }
 
 /**
@@ -620,17 +652,49 @@ function normalizeAnalysis(raw: unknown): AlertAnalysis {
 
 		const toStopName = typeof toStopNameRaw === "string" ? toStopNameRaw : "";
 		const interruption = (stop as { interruption?: unknown }).interruption === true;
-		if (routes.length > 0) removedStops.push({ stopName, toStopName, interruption, routes });
+		if (routes.length > 0) {
+			removedStops.push({
+				stopName: stripLocality(stopName),
+				toStopName: stripLocality(toStopName),
+				interruption,
+				routes,
+			});
+		}
 	}
 
-	return { removedStops, period: parsePeriod((raw as { period?: unknown }).period) };
+	return { removedStops, periods: parsePeriods((raw as { periods?: unknown }).periods) };
+}
+
+/**
+ * Nom d'arrêt débarrassé de la commune d'un headsign (« Hôtel de Ville SOTTEVILLE-LÈS-ROUEN » → « Hôtel
+ * de Ville ») : le modèle recopie parfois le terminus fourni en contexte plutôt que le libellé de
+ * l'alerte, et ces mots en trop empêchent tout rapprochement avec le nom d'arrêt du GTFS.
+ *
+ * Ne s'applique qu'aux noms qui portent AUSSI des minuscules : un libellé entièrement capitalisé
+ * (« GARE RUE VERTE ») est écrit ainsi par l'info trafic, il n'y a là aucune commune à retirer.
+ */
+function stripLocality(name: string): string {
+	if (!/\p{Ll}/u.test(name)) return name;
+	return name.replace(TRAILING_LOCALITY, "").trim() || name;
 }
 
 /** Validation légère d'un résultat lu depuis le cache disque (forme finale, directionId numérique). */
 function isAlertAnalysis(value: unknown): value is AlertAnalysis {
 	if (typeof value !== "object" || value === null) return false;
-	const candidate = value as { removedStops?: unknown; period?: unknown };
-	return Array.isArray(candidate.removedStops) && typeof candidate.period === "object" && candidate.period !== null;
+	const candidate = value as { removedStops?: unknown; periods?: unknown };
+	return Array.isArray(candidate.removedStops) && Array.isArray(candidate.periods);
+}
+
+/**
+ * Périodes d'effet, une par plage de dates disjointe. Liste vide = perturbation sans borne connue, donc
+ * toujours active — comme une entrée entièrement vide, qu'on écarte à ce titre : la garder au milieu de
+ * périodes bornées rendrait l'alerte permanente.
+ */
+function parsePeriods(raw: unknown): AlertPeriod[] {
+	if (!Array.isArray(raw)) return [];
+	return raw
+		.map(parsePeriod)
+		.filter((period) => period.start !== null || period.end !== null || period.dailyWindow !== null);
 }
 
 function parsePeriod(raw: unknown): AlertPeriod {
@@ -679,7 +743,7 @@ function getClient(): Anthropic | undefined {
 
 // Version du schéma/prompt d'analyse : à incrémenter quand la logique change, pour invalider
 // proprement les caches existants (ex. ajout des bornes horaires dans la période d'effet).
-const ANALYSIS_VERSION = 10;
+const ANALYSIS_VERSION = 11;
 
 function hashAlert(alert: AlertInput): string {
 	// On inclut le contexte des lignes (terminus/sens) : si le GTFS change, l'analyse est
