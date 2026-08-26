@@ -15,6 +15,7 @@ import {
 	type StaticGtfs,
 	stopNameKey,
 	stopNameMatches,
+	stopNameTokens,
 	type TripStop,
 } from "./use-static-gtfs.js";
 
@@ -388,8 +389,8 @@ function applyRemovedStop(
 		// Sinon, match flou dans le contexte de la ligne (ex. « Piscine » → « Piscine de Bihorel »).
 		let count = 0;
 		for (const dir of directions) {
-			const sequences = gtfs.routeStopSequences.get(routeId)?.get(dir) ?? [];
-			const canonical = sequences.flat().find((stop) => stopNameMatches(startName, stop.name))?.name;
+			const stops = (gtfs.routeStopSequences.get(routeId)?.get(dir) ?? []).flat();
+			const canonical = stops[findStopIndex(stops, startName)]?.name;
 			const stopIds = canonical ? gtfs.stopNameIndex.get(canonical) : undefined;
 			if (stopIds && stopIds.size > 0) {
 				mergeSkip(skipIndex, routeId, dir, stopIds);
@@ -552,12 +553,37 @@ function routeTerminusNames(gtfs: StaticGtfs, routeId: string): Set<string> {
 
 /** Renvoie les noms d'arrêts de l'itinéraire entre deux arrêts (inclus), quel que soit le sens de citation. */
 function sliceRangeNames(sequence: OrderedStop[], startName: string, endName: string): string[] | undefined {
-	const startIndex = sequence.findIndex((stop) => stopNameMatches(startName, stop.name));
-	const endIndex = sequence.findIndex((stop) => stopNameMatches(endName, stop.name));
+	const startIndex = findStopIndex(sequence, startName);
+	const endIndex = findStopIndex(sequence, endName);
 	if (startIndex === -1 || endIndex === -1) return undefined;
 
 	const [lo, hi] = startIndex <= endIndex ? [startIndex, endIndex] : [endIndex, startIndex];
 	return sequence.slice(lo, hi + 1).map((stop) => stop.name);
+}
+
+/**
+ * Position d'un arrêt (nom normalisé) dans un itinéraire, du candidat le plus fidèle au plus lâche.
+ * Le rapprochement tolérant de {@link stopNameMatches} colle parfois à PLUSIEURS arrêts d'une même
+ * ligne, et le premier rencontré n'est pas forcément le bon : sur la F8, « La Vielle » se retrouve
+ * dans « Hôtel de Ville Belvédère » (`vielle` ↔ `ville`, une lettre d'écart) — situé bien avant le
+ * vrai arrêt dans le sens aller, il élargissait la plage supprimée à tout le tronçon intermédiaire.
+ *
+ * On essaie donc, dans l'ordre : le nom identique, puis le nom entier rapproché (même nombre de mots,
+ * à une faute près par mot — « La Vielle » ↔ « La Vieille »), et seulement en dernier recours le
+ * rapprochement d'un libellé abrégé dans un nom plus long (« Piscine » → « Piscine de Bihorel »).
+ * Renvoie -1 si aucun arrêt ne correspond.
+ */
+function findStopIndex(sequence: OrderedStop[], normalizedName: string): number {
+	const exact = sequence.findIndex((stop) => stop.name === normalizedName);
+	if (exact !== -1) return exact;
+
+	const wordCount = stopNameTokens(normalizedName).length;
+	const whole = sequence.findIndex(
+		(stop) => stopNameTokens(stop.name).length === wordCount && stopNameMatches(normalizedName, stop.name),
+	);
+	if (whole !== -1) return whole;
+
+	return sequence.findIndex((stop) => stopNameMatches(normalizedName, stop.name));
 }
 
 function mergeSkip(skipIndex: SkipIndex, routeId: string, directionId: number | null, stopIds: Set<string>) {
