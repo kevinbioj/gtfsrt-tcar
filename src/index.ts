@@ -12,6 +12,7 @@ import {
 	REALTIME_LINES,
 	SERVICE_ALERTS_URL,
 	STATIC_GTFS_URL,
+	TRIP_RETENTION_DURATION,
 	TRIP_UPDATES_URL,
 	VEHICLE_POSITIONS_URL,
 	VERIFICATION_FEED_URL,
@@ -38,6 +39,13 @@ console.log(` ,----.,--------.,------.,---.        ,------.,--------. ,--------.
 
 const store = useRealtimeStore();
 const vehicleOccupancyStatuses = useVehicleOccupancyStatuses();
+
+/**
+ * Dernière course cohérente annoncée par la source principale, par véhicule. Sert à conserver la
+ * course lorsqu'un véhicule disparaît de la source principale et retombe sur la seule source de
+ * vérité (cf. `restoreRecentTrips`).
+ */
+const lastStandardTrips = new Map<string, { trip: GtfsRealtime.transit_realtime.ITripDescriptor; seenAt: number }>();
 const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL, (verifiedVehicles) => {
 	for (const [key, storedVehicle] of store.vehiclePositions) {
 		const vehicleId = key.split(":")[2]!;
@@ -90,6 +98,7 @@ async function poll() {
 			// Le store n'a pas été vidé : il garde l'état du poll précédent, que l'on complète tout
 			// de même des véhicules vus par la seule source de vérité.
 			console.log(`✓ ${fallbackFromVerificationFeed()} positions from verification feed only.`);
+			restoreRecentTrips();
 			return;
 		}
 
@@ -160,8 +169,16 @@ async function poll() {
 				occupancyStatus: vehicleOccupancyStatuses.get(vehicleId)?.status,
 			});
 
+			if (entity.vehicle.trip?.tripId) {
+				lastStandardTrips.set(vehicleId, { trip: entity.vehicle.trip, seenAt: now.epochMilliseconds });
+			}
+
 			console.log(`\t⛛ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} ${directionId}`);
 		}
+
+		// Un véhicule qui vient de disparaître de la source principale conserve sa dernière course
+		// tant qu'elle est récente et que la ligne n'a pas changé.
+		const retainedTrips = restoreRecentTrips();
 
 		// Ce que la source principale n'a pas enrichi reste tel que la source de vérité l'a posé :
 		// une ligne, un sens, une position, sans course. C'est le cas d'un véhicule sur une ligne
@@ -176,12 +193,15 @@ async function poll() {
 			);
 		}
 
-		console.log(`✓ ${store.vehiclePositions.size} positions (${fallbackVehicles} from verification feed only).`);
+		console.log(
+			`✓ ${store.vehiclePositions.size} positions (${fallbackVehicles} from verification feed only, ${retainedTrips} with retained trip).`,
+		);
 	} catch (cause) {
 		console.error("✘ Poll error:", cause);
 		// L'erreur peut survenir en plein remplissage du store : on le complète malgré tout, pour ne
 		// pas publier un feed amputé des véhicules que la source de vérité connaît.
 		console.log(`✓ ${fallbackFromVerificationFeed()} positions from verification feed only.`);
+		restoreRecentTrips();
 	}
 }
 
@@ -219,6 +239,49 @@ function fallbackFromVerificationFeed() {
 	}
 
 	return added;
+}
+
+/**
+ * Réapplique la dernière course annoncée par la source principale aux véhicules que la source de
+ * vérité a posés sans course. La course reste publiée tant qu'elle a été vue il y a moins de
+ * `TRIP_RETENTION_DURATION` et que la ligne et le sens de la source de vérité concordent toujours ;
+ * un changement de ligne ou de sens invalide définitivement la mémoire. Renvoie le nombre de
+ * courses conservées.
+ */
+function restoreRecentTrips() {
+	const nowMs = Temporal.Now.instant().epochMilliseconds;
+	let restored = 0;
+
+	for (const [vehicleId, remembered] of lastStandardTrips) {
+		if (nowMs - remembered.seenAt >= TRIP_RETENTION_DURATION) {
+			lastStandardTrips.delete(vehicleId);
+		}
+	}
+
+	for (const [key, vehicle] of store.vehiclePositions) {
+		if (vehicle.trip?.tripId) continue;
+
+		const vehicleId = key.split(":")[2]!;
+		const remembered = lastStandardTrips.get(vehicleId);
+		if (remembered === undefined) continue;
+
+		if (
+			remembered.trip.routeId !== vehicle.trip?.routeId ||
+			(remembered.trip.directionId ?? 0) !== (vehicle.trip?.directionId ?? 0)
+		) {
+			// Le véhicule a changé de ligne ou de sens : la course mémorisée est définitivement obsolète.
+			lastStandardTrips.delete(vehicleId);
+			continue;
+		}
+
+		store.vehiclePositions.set(key, { ...vehicle, trip: remembered.trip });
+		restored += 1;
+		console.log(
+			`\t↻ ${vehicleId.padEnd(4, " ")}  ${(remembered.trip.routeId ?? "").padEnd(10, " ")} ${remembered.trip.directionId ?? 0}`,
+		);
+	}
+
+	return restored;
 }
 
 async function pollTripUpdates() {

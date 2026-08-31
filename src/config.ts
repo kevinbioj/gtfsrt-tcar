@@ -37,6 +37,12 @@ export const VERIFICATION_FEED_URL = "https://reseau-astuce.fr/ftp/gtfsrt/Astuce
 export const VEHICLE_OCCUPANCY_STALENESS = Temporal.Duration.from({ minutes: 3 }).total("milliseconds");
 export const VEHICLE_OCCUPANCY_STATUS_URL = atob("aHR0cHM6Ly90Y2FyLmZsb3dseS5yZS9Qb3J0YWwvTWFwRGV2aWNlcy5hc3B4");
 
+/**
+ * Durée pendant laquelle la dernière course annoncée par la source principale reste publiée pour un
+ * véhicule qui n'est plus vu que par la source de vérité, tant que sa ligne ne change pas.
+ */
+export const TRIP_RETENTION_DURATION = Temporal.Duration.from({ minutes: 15 }).total("milliseconds");
+
 export const SERVICE_ALERTS_URL = "https://hexatransit.fr/datasets/services_rt/astuce/service_alerts.pb";
 export const STATIC_GTFS_URL = "https://gtfs.bus-tracker.fr/astuce-tcar.zip";
 export const ALERTS_POLL_INTERVAL = Temporal.Duration.from({ minutes: 5 }).total("milliseconds");
