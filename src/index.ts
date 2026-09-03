@@ -118,6 +118,14 @@ async function poll() {
 		for (const entity of feed.entity) {
 			if (!entity.vehicle?.vehicle?.id) continue;
 
+			if (entity.vehicle?.trip) {
+				entity.vehicle.trip.scheduleRelationship =
+					GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED;
+				if (entity.vehicle.trip.directionId !== 1) {
+					entity.vehicle.trip.directionId = 0;
+				}
+			}
+
 			const id = entity.vehicle.vehicle.id;
 			const vehicleId = id.split(":")[3]!;
 			const routeId = entity.vehicle.trip?.routeId ?? "";
@@ -301,6 +309,20 @@ async function pollTripUpdates() {
 
 		for (const entity of feed.entity) {
 			if (!entity.tripUpdate) continue;
+
+			if (entity.tripUpdate?.trip) {
+				entity.tripUpdate.trip.scheduleRelationship =
+					GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED;
+				if (entity.tripUpdate.trip.directionId !== 1) {
+					entity.tripUpdate.trip.directionId = 0;
+				}
+			}
+
+			entity.tripUpdate.stopTimeUpdate?.forEach((stopTimeUpdate) => {
+				stopTimeUpdate.scheduleRelationship =
+					GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SCHEDULED;
+			});
+
 			const tripRouteId = entity.tripUpdate.trip?.routeId ?? "";
 			const tripLineId = tripRouteId.split(":").at(-1) ?? "";
 
