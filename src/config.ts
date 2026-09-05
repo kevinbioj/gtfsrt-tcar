@@ -69,8 +69,30 @@ export const VEHICLE_STALENESS = Temporal.Duration.from({ minutes: 10 }).total("
  * délai-ci gouverne l'entretien de ce qui ne s'y voit plus : entre les deux, la course, le quai et
  * le rang continuent de suivre la source, de sorte que le véhicule reparte juste au premier
  * mouvement. Au-delà, plus rien n'est touché.
+ *
+ * Sauf pour un véhicule qui attend son départ : celui-là reste suivi et publié aussi longtemps qu'il
+ * patiente (cf. {@link DEPARTURE_GRACE}).
  */
 export const IMMOBILITY_LIMIT = Temporal.Duration.from({ minutes: 30 }).total("seconds");
+
+/**
+ * Délai accordé à une course après son heure de départ avant de tenir son véhicule pour mort.
+ *
+ * Un véhicule qui attend son départ à son terminus ne bouge pas, et les durées ci-dessus le
+ * sortiraient du feed au bout de dix minutes puis cesseraient de le suivre au bout de trente : il
+ * faudrait alors qu'il démarre pour y revenir, quand c'est justement en tête de course qu'il
+ * intéresse le voyageur. Aucune d'elles ne joue donc contre lui tant que sa course n'a pas dépassé
+ * son départ de ce délai — ni {@link VEHICLE_STALENESS}, ni {@link IMMOBILITY_LIMIT}, ni
+ * {@link VEHICLE_MEMORY_DURATION}. Un véhicule mis à quai une heure et demie avant son service
+ * reste ainsi publié une heure et demie durant (cf. `awaitsDeparture`).
+ *
+ * Ce délai-ci ne mesure donc pas une attente, qui n'a pas de limite, mais le retard au départ
+ * au-delà duquel un véhicule qui n'a toujours pas bougé n'attend visiblement plus rien.
+ *
+ * Le départ retenu est celui du flux temps réel quand il l'annonce — le retard pris avant même de
+ * partir s'y lit — et à défaut celui du GTFS statique.
+ */
+export const DEPARTURE_GRACE = Temporal.Duration.from({ minutes: 10 }).total("seconds");
 
 /**
  * Durée pendant laquelle un véhicule reste mémorisé après son dernier mouvement. Il n'est plus émis

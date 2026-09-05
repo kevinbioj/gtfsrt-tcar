@@ -120,7 +120,11 @@ function isTrackedVehicle(payload: unknown): payload is TrackedVehicle {
 }
 
 function isRegisteredVehicle(payload: unknown): payload is RegisteredVehicle {
-	return isObject(payload) && isObject(payload.entity) && typeof payload.movedAt === "number";
+	if (!isObject(payload)) return false;
+	// `departsAt` manque pour une entrée sans course, et pour une course dont on ignore l'horaire :
+	// JSON n'écrit pas `undefined`.
+	if (payload.departsAt !== undefined && typeof payload.departsAt !== "number") return false;
+	return isObject(payload.entity) && typeof payload.movedAt === "number";
 }
 
 function isLocatedVehicle(payload: unknown): payload is LocatedVehicle {

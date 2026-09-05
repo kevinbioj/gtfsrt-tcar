@@ -30,7 +30,10 @@ export type Movement =
 	 * position et sa date restent celles du dernier mouvement constaté.
 	 */
 	| { kind: "still"; position: GtfsRealtime.transit_realtime.IPosition; timestamp: number }
-	/** Immobile depuis plus longtemps : le véhicule est déconnecté, on n'en relaie plus rien. */
+	/**
+	 * Immobile depuis plus longtemps, et sans départ à attendre : le véhicule est déconnecté, on n'en
+	 * relaie plus rien.
+	 */
 	| { kind: "frozen" };
 
 /**
@@ -65,12 +68,17 @@ export function useMovementTracker(restored: Iterable<readonly [string, TrackedV
 		/**
 		 * Confronte le relevé au précédent et dit ce qu'il faut en faire. `timestamp` est la date brute
 		 * de la source, en secondes epoch ; elle n'est retenue que si le véhicule a bougé.
+		 *
+		 * `awaitingDeparture` dit qu'une course attend encore ce véhicule (cf. `awaitsDeparture`) : son
+		 * immobilité s'explique alors d'elle-même — il patiente à son terminus — et la limite ne joue
+		 * pas, quelle que soit la durée de l'attente.
 		 */
 		observe(
 			vehicleId: string,
 			position: GtfsRealtime.transit_realtime.IPosition,
 			timestamp: number,
 			nowSeconds: number,
+			awaitingDeparture: boolean,
 		): Movement {
 			const signature = `${position.latitude},${position.longitude},${position.bearing}`;
 			const previous = tracked.get(vehicleId);
@@ -93,8 +101,10 @@ export function useMovementTracker(restored: Iterable<readonly [string, TrackedV
 			// date que la source lui prête ne vaut pas constat. Il attend son premier mouvement.
 			if (previous.movedAt === undefined) return { kind: "unproven" };
 
-			// Immobile de longue date : la source a beau continuer d'en parler, elle ne le voit plus.
-			if (nowSeconds - previous.movedAt > IMMOBILITY_LIMIT) return { kind: "frozen" };
+			// Immobile de longue date : la source a beau continuer d'en parler, elle ne le voit plus. À
+			// moins qu'une course ne l'attende — un véhicule mis à quai deux heures avant son départ est
+			// immobile pour une raison qu'on connaît, et il reste suivi jusqu'à ce qu'il reparte.
+			if (nowSeconds - previous.movedAt > IMMOBILITY_LIMIT && !awaitingDeparture) return { kind: "frozen" };
 
 			return { kind: "still", position: previous.position, timestamp: previous.movedAt };
 		},

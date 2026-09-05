@@ -22,13 +22,13 @@ import {
 	VERIFICATION_STALENESS,
 } from "./config.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
-import { useMovementTracker } from "./gtfs-rt/use-movement-tracker.js";
+import { type Movement, useMovementTracker } from "./gtfs-rt/use-movement-tracker.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
 import { applySkippedStops, keepOnlySkippedStops, useServiceAlerts } from "./gtfs-rt/use-service-alerts.js";
-import { useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
+import { departureEpoch, useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
 import { useVehicleLocator, type VehicleLocation } from "./gtfs-rt/use-vehicle-locator.js";
 import { useVehicleMonitoring } from "./gtfs-rt/use-vehicle-monitoring.js";
-import { useVehicleRegistry } from "./gtfs-rt/use-vehicle-registry.js";
+import { awaitsDeparture, useVehicleRegistry } from "./gtfs-rt/use-vehicle-registry.js";
 import { useVerificationFeed, type VerifiedVehicle } from "./gtfs-rt/use-verification-feed.js";
 import { isDepotDestination, verifyVehicle } from "./gtfs-rt/verify-vehicle.js";
 import { loadState, saveState } from "./state-cache.js";
@@ -118,6 +118,7 @@ async function poll() {
 	let staleRecords = 0;
 	let unprovenVehicles = 0;
 	let frozenVehicles = 0;
+	let awaitedVehicles = 0;
 	let untrackedLines = 0;
 	let deadheads = 0;
 	let unknownVehicles = 0;
@@ -153,9 +154,15 @@ async function poll() {
 			continue;
 		}
 
+		// Le départ de la course que la source lui prête. Tant qu'il n'est pas passé, l'immobilité du
+		// véhicule s'explique d'elle-même — il patiente à son terminus — et aucune des durées ne court
+		// contre lui : ni le gel du suivi, ni la sortie du feed, ni l'oubli (cf. `awaitsDeparture`).
+		const departsAt = departureOf(vehicle.trip.tripId, nowSeconds);
+		const awaitingDeparture = awaitsDeparture(departsAt, nowSeconds);
+
 		// Ce qu'elle réhorodate n'en est pas fiable pour autant : seul le mouvement constaté prouve
 		// qu'elle a encore le véhicule au bout du fil, et date sa position.
-		const movement = movementTracker.observe(vehicleId, position, sourceTimestamp, nowSeconds);
+		const movement = movementTracker.observe(vehicleId, position, sourceTimestamp, nowSeconds, awaitingDeparture);
 
 		// Jamais vu bouger : on ne sait pas si ce véhicule roule ou dort depuis des heures. Il n'entre
 		// dans le feed qu'au premier mouvement constaté, et non au relevé suivant sa découverte.
@@ -172,6 +179,7 @@ async function poll() {
 		}
 
 		const { position: movedPosition, timestamp } = movement;
+		if (movement.kind === "still" && awaitingDeparture) awaitedVehicles += 1;
 
 		const occupancyStatus = vehicleOccupancyStatuses.get(vehicleId)?.status;
 		const routeId = vehicle.trip.routeId ?? "";
@@ -204,6 +212,8 @@ async function poll() {
 					occupancyStatus,
 				},
 				timestamp,
+				// Sans course, il n'attend aucun départ : rentré au dépôt, son immobilité est définitive.
+				undefined,
 			);
 			continue;
 		}
@@ -255,10 +265,11 @@ async function poll() {
 				occupancyStatus,
 			},
 			timestamp,
+			departsAt,
 		);
 
 		console.log(
-			`\t⛛ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} ${directionId} (${check.by}${movement.kind === "still" ? ", still" : ""}) — ${describeLocation(location)}`,
+			`\t⛛ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} ${directionId} (${check.by}${describeStillness(movement, departsAt, nowSeconds)}) — ${describeLocation(location)}`,
 		);
 	}
 
@@ -269,8 +280,20 @@ async function poll() {
 	);
 
 	console.log(
-		`✓ ${registry.publishable(nowSeconds).size} positions (${published} verified, ${refreshed} position-only, ${deadheads} deadheading, ${staleRecords} stale records, ${unprovenVehicles} never moved, ${frozenVehicles} motionless, ${untrackedLines} on untracked lines, ${unknownVehicles} never published, ${unlocated} unlocated, ${forgotten} forgotten).`,
+		`✓ ${registry.publishable(nowSeconds).size} positions (${published} verified, ${refreshed} position-only, ${deadheads} deadheading, ${staleRecords} stale records, ${unprovenVehicles} never moved, ${frozenVehicles} motionless, ${awaitedVehicles} awaiting departure, ${untrackedLines} on untracked lines, ${unknownVehicles} never published, ${unlocated} unlocated, ${forgotten} forgotten).`,
 	);
+}
+
+/**
+ * L'immobilité du véhicule, telle qu'elle s'écrit au journal : rien lorsqu'il vient de bouger, et le
+ * temps qu'il lui reste à patienter lorsqu'une course l'attend encore.
+ */
+function describeStillness(movement: Movement, departsAt: number | undefined, nowSeconds: number): string {
+	if (movement.kind !== "still") return "";
+	if (departsAt === undefined || !awaitsDeparture(departsAt, nowSeconds)) return ", still";
+
+	const minutes = Math.round((departsAt - nowSeconds) / 60);
+	return minutes > 0 ? `, departs in ${minutes} min` : ", departing";
 }
 
 /** Le prochain arrêt localisé, tel qu'il s'écrit au journal. */
@@ -300,6 +323,23 @@ function freshDestination(vehicleId: string, nowSeconds: number): string {
 }
 
 /**
+ * Le départ de la course, en secondes epoch : celui qu'annoncent les trip updates dès qu'ils en
+ * parlent, faute de quoi celui qu'inscrit le GTFS statique. Un véhicule mis à quai en avance sur une
+ * course déjà retardée n'est pas en retard pour autant, et le seul horaire théorique le sortirait du
+ * feed avant même son départ.
+ *
+ * `undefined` pour une course qu'aucune des deux sources ne connaît — le GTFS statique peut dater
+ * d'avant le service en cours.
+ */
+function departureOf(tripId: string, nowSeconds: number): number | undefined {
+	const realtime = store.tripDepartures.get(tripId);
+	if (realtime !== undefined) return realtime;
+
+	const scheduled = staticGtfs.data.tripDepartures.get(tripId);
+	return scheduled === undefined ? undefined : departureEpoch(scheduled, nowSeconds);
+}
+
+/**
  * Le relevé du flux de vérification pour ce véhicule, ou `undefined` lorsqu'il l'ignore ou que son
  * relevé est périmé — les deux revenant au même, une source périmée ne confirmant rien.
  */
@@ -321,6 +361,7 @@ async function pollTripUpdates() {
 		const feed = GtfsRealtime.transit_realtime.FeedMessage.decode(buffer);
 
 		store.tripUpdates.clear();
+		store.tripDepartures.clear();
 
 		let skipsOnly = 0;
 
@@ -343,6 +384,15 @@ async function pollTripUpdates() {
 			const tripRouteId = entity.tripUpdate.trip?.routeId ?? "";
 			const tripLineId = tripRouteId.split(":").at(-1) ?? "";
 
+			// Le départ annoncé pour la course, avant que les suppressions d'arrêt ne remanient l'horaire.
+			// Les lignes sans vrai temps réel n'y ont pas droit : la source y rebadge l'horaire théorique,
+			// son « départ » n'en dirait pas plus que le GTFS statique.
+			const tripId = entity.tripUpdate.trip?.tripId;
+			if (tripId && REALTIME_LINES.has(tripLineId)) {
+				const departure = announcedDeparture(entity.tripUpdate, tripId);
+				if (departure !== undefined) store.tripDepartures.set(tripId, departure);
+			}
+
 			applySkippedStops(entity.tripUpdate, tripRouteId, serviceAlerts.skipIndex, staticGtfs.data);
 
 			// Ligne sans vrai temps réel : on ne relaie pas ses horaires, mais on garde ses
@@ -357,10 +407,29 @@ async function pollTripUpdates() {
 			store.tripUpdates.set(`ET:TCAR:${tripEntityId}`, entity.tripUpdate);
 		}
 
-		console.log(`✓ ${store.tripUpdates.size} trip updates (${skipsOnly} skipped-stops only).`);
+		console.log(
+			`✓ ${store.tripUpdates.size} trip updates (${skipsOnly} skipped-stops only, ${store.tripDepartures.size} departures announced).`,
+		);
 	} catch (cause) {
 		console.error("✘ Trip updates poll error:", cause);
 	}
+}
+
+/**
+ * Le départ annoncé pour cette course, en secondes epoch, ou `undefined` lorsque le flux n'en parle
+ * pas : une course déjà partie perd ses premiers arrêts, et l'horaire du suivant ne dit pas quand
+ * elle a démarré. C'est sans conséquence — un véhicule en course n'attend plus rien.
+ */
+function announcedDeparture(tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate, tripId: string): number | undefined {
+	const first = tripUpdate.stopTimeUpdate?.[0];
+	if (first === undefined) return undefined;
+
+	// Le rang du premier arrêt selon l'horaire théorique, et à défaut celui que le GTFS impose.
+	const origin = staticGtfs.data.tripStopSequences.get(tripId)?.[0]?.stopSequence ?? 1;
+	if (first.stopSequence !== origin) return undefined;
+
+	const departure = Number(first.departure?.time ?? first.arrival?.time ?? 0);
+	return departure === 0 ? undefined : departure;
 }
 
 setInterval(poll, POLL_INTERVAL);

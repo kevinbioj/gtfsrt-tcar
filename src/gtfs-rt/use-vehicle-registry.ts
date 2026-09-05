@@ -1,7 +1,23 @@
 import type GtfsRealtime from "gtfs-realtime-bindings";
 
-import { VEHICLE_MEMORY_DURATION, VEHICLE_STALENESS } from "../config.js";
+import { DEPARTURE_GRACE, VEHICLE_MEMORY_DURATION, VEHICLE_STALENESS } from "../config.js";
 import type { VehicleLocation } from "./use-vehicle-locator.js";
+
+/**
+ * Vrai tant que la course dont le départ est donné n'a pas dépassé son heure de plus de
+ * {@link DEPARTURE_GRACE} : le véhicule qui l'assure est alors à son terminus, en attente ou tout
+ * juste parti, et son immobilité ne prouve rien contre lui. `undefined` pour un véhicule qui
+ * n'attend rien — sans course, ou sur une course dont l'horaire est inconnu.
+ *
+ * C'est la seule exception aux durées qui règlent la vie d'une entrée, et elle vaut pour toutes :
+ * ni {@link VEHICLE_STALENESS}, ni {@link VEHICLE_MEMORY_DURATION}, ni la limite d'immobilité du
+ * suivi des mouvements ne court contre un véhicule qui attend son départ. Un service qui reprend
+ * dans une heure et demie le laisse donc dans le feed une heure et demie durant, là où le voyageur
+ * l'attend.
+ */
+export function awaitsDeparture(departsAt: number | undefined, nowSeconds: number): boolean {
+	return departsAt !== undefined && nowSeconds - departsAt <= DEPARTURE_GRACE;
+}
 
 /** Ce que le registre retient d'un véhicule entre deux relevés. */
 export type RegisteredVehicle = {
@@ -15,6 +31,14 @@ export type RegisteredVehicle = {
 	 * dans le feed avec la course de son service du matin.
 	 */
 	movedAt: number;
+	/**
+	 * Départ de la course que porte l'entrée, en secondes epoch. `undefined` lorsqu'on ne le connaît
+	 * pas, et pour un véhicule publié sans course (haut-le-pied) : il n'attend rien.
+	 *
+	 * Il tempère `movedAt` : un véhicule qui patiente à son terminus est immobile sans être perdu, et
+	 * son entrée lui survit jusqu'à {@link DEPARTURE_GRACE} après son départ.
+	 */
+	departsAt?: number;
 };
 
 /**
@@ -30,7 +54,10 @@ export type RegisteredVehicle = {
  *    vérifié.
  *
  * Et les deux durées : passé {@link VEHICLE_STALENESS} l'entrée cesse d'être émise, passé
- * {@link VEHICLE_MEMORY_DURATION} elle est oubliée.
+ * {@link VEHICLE_MEMORY_DURATION} elle est oubliée. Ni l'une ni l'autre ne court toutefois contre un
+ * véhicule qui attend son départ : tant que sa course n'a pas dépassé son heure de départ de
+ * {@link DEPARTURE_GRACE}, son immobilité n'a rien d'anormal et son entrée reste (cf.
+ * {@link awaitsDeparture}).
  *
  * `restored` rend au registre les entrées du dernier arrêt du producteur (cf. `loadState`) : le
  * feed repart ainsi peuplé, et les véhicules trop vieux en sortent d'eux-mêmes au premier relevé.
@@ -58,9 +85,19 @@ export function useVehicleRegistry(restored: Iterable<readonly [string, Register
 			return vehicles.get(vehicleId)?.entity.trip?.tripId ?? undefined;
 		},
 
-		/** Remplace intégralement l'entrée du véhicule par ce que la source vient d'en dire. */
-		publish(vehicleId: string, entity: GtfsRealtime.transit_realtime.IVehiclePosition, movedAt: number): void {
-			vehicles.set(vehicleId, { entity, movedAt });
+		/**
+		 * Remplace intégralement l'entrée du véhicule par ce que la source vient d'en dire.
+		 *
+		 * `departsAt` est le départ de la course publiée, en secondes epoch ; il vaut `undefined` quand
+		 * on ne le connaît pas, et pour un véhicule publié sans course.
+		 */
+		publish(
+			vehicleId: string,
+			entity: GtfsRealtime.transit_realtime.IVehiclePosition,
+			movedAt: number,
+			departsAt: number | undefined,
+		): void {
+			vehicles.set(vehicleId, { entity, movedAt, departsAt });
 		},
 
 		/**
@@ -86,12 +123,16 @@ export function useVehicleRegistry(restored: Iterable<readonly [string, Register
 			return true;
 		},
 
-		/** Oublie les véhicules dont le dernier mouvement remonte à plus de {@link VEHICLE_MEMORY_DURATION}. */
+		/**
+		 * Oublie les véhicules dont le dernier mouvement remonte à plus de
+		 * {@link VEHICLE_MEMORY_DURATION}, hormis ceux qui attendent encore leur départ.
+		 */
 		prune(nowSeconds: number): number {
 			let forgotten = 0;
 
 			for (const [vehicleId, registered] of vehicles) {
 				if (nowSeconds - registered.movedAt <= VEHICLE_MEMORY_DURATION) continue;
+				if (awaitsDeparture(registered.departsAt, nowSeconds)) continue;
 				vehicles.delete(vehicleId);
 				forgotten += 1;
 			}
@@ -101,14 +142,17 @@ export function useVehicleRegistry(restored: Iterable<readonly [string, Register
 
 		/**
 		 * Les entrées à émettre : celles dont le dernier mouvement date de moins de
-		 * {@link VEHICLE_STALENESS}. Les autres restent en mémoire sans être diffusées — un véhicule
-		 * que la source a lâché, comme un véhicule à l'arrêt, sort ainsi du feed de lui-même.
+		 * {@link VEHICLE_STALENESS}, et celles qui attendent leur départ. Les autres restent en mémoire
+		 * sans être diffusées — un véhicule que la source a lâché sort ainsi du feed de lui-même, et un
+		 * véhicule à l'arrêt une fois passée l'heure à laquelle il aurait dû repartir.
 		 */
 		publishable(nowSeconds: number): Map<string, GtfsRealtime.transit_realtime.IVehiclePosition> {
 			const published = new Map<string, GtfsRealtime.transit_realtime.IVehiclePosition>();
 
 			for (const [vehicleId, registered] of vehicles) {
-				if (nowSeconds - registered.movedAt > VEHICLE_STALENESS) continue;
+				if (nowSeconds - registered.movedAt > VEHICLE_STALENESS && !awaitsDeparture(registered.departsAt, nowSeconds)) {
+					continue;
+				}
 				published.set(`VM:TCAR:${vehicleId}`, registered.entity);
 			}
 

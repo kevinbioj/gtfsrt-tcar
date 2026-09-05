@@ -4,6 +4,8 @@ import { type Coordinates, haversine, projectOnShape, type ShapePoint } from "..
 
 export type { ShapePoint };
 
+const TIME_ZONE = "Europe/Paris";
+
 export type RouteDirection = { directionId: number; headsigns: string[] };
 
 /** Un arrêt dans l'itinéraire d'une ligne : son quai (stopId) et son nom normalisé. */
@@ -34,6 +36,12 @@ export type StaticGtfs = {
 	routeStopSequences: Map<string, Map<number, OrderedStop[][]>>;
 	/** tripId → horaire théorique ordonné (pour réinsérer un arrêt supprimé absent du GTFS-RT). */
 	tripStopSequences: Map<string, TripStop[]>;
+	/**
+	 * tripId → départ théorique du premier arrêt, en secondes depuis minuit de la journée de service
+	 * — donc au-delà de 86 400 pour une course qui déborde sur le lendemain, comme le GTFS l'écrit.
+	 * {@link departureEpoch} en fait un instant.
+	 */
+	tripDepartures: Map<string, number>;
 	/** stopId → libellé de l'arrêt, tel que le GTFS l'écrit. */
 	stopNames: Map<string, string>;
 	/** stopId → coordonnées du quai. */
@@ -262,6 +270,7 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		routeDirections: new Map(),
 		routeStopSequences: new Map(),
 		tripStopSequences: new Map(),
+		tripDepartures: new Map(),
 		stopNames: new Map(),
 		stopCoordinates: new Map(),
 		trips: new Map(),
@@ -296,9 +305,9 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		const { shapes, scales } = files["shapes.txt"]
 			? buildShapes(decoder.decode(files["shapes.txt"]))
 			: { shapes: new Map<string, ShapePoint[]>(), scales: new Map<string, number>() };
-		const { routeStopSequences, tripStopSequences, projectedStops } = files["stop_times.txt"]
+		const { routeStopSequences, tripStopSequences, tripDepartures, projectedStops } = files["stop_times.txt"]
 			? buildSequences(decoder.decode(files["stop_times.txt"]), tripMeta, idToName, shapes, scales, coordinates)
-			: { routeStopSequences: new Map(), tripStopSequences: new Map(), projectedStops: 0 };
+			: { routeStopSequences: new Map(), tripStopSequences: new Map(), tripDepartures: new Map(), projectedStops: 0 };
 
 		// Le GTFS actuel déclare une abscisse pour chaque arrêt : qu'il faille en projeter signale une
 		// source qui a changé de forme, et un repli nettement plus fragile sur les shapes à boucle.
@@ -321,6 +330,7 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 				routeDirections,
 				routeStopSequences,
 				tripStopSequences,
+				tripDepartures,
 				stopNames: idToName,
 				stopCoordinates: coordinates,
 				trips: tripMeta,
@@ -570,7 +580,9 @@ function buildShapes(csv: string): { shapes: Map<string, ShapePoint[]>; scales: 
  *  - `routeStopSequences` : par (routeId, directionId), les itinéraires distincts empruntés — sert
  *    à étendre les plages « de X à Y » ;
  *  - `tripStopSequences` : par tripId, l'horaire théorique ordonné — sert à réinsérer un arrêt
- *    supprimé absent du GTFS-RT, avec son stop_sequence, et à situer un véhicule sur sa course.
+ *    supprimé absent du GTFS-RT, avec son stop_sequence, et à situer un véhicule sur sa course ;
+ *  - `tripDepartures` : par tripId, l'heure de départ du premier arrêt — sert à distinguer le
+ *    véhicule qui attend son départ de celui que la source a perdu (cf. `useVehicleRegistry`).
  *
  * Chaque arrêt y reçoit son abscisse curviligne sur la shape de la course, remise à l'échelle de nos
  * kilomètres par le facteur qu'a déduit {@link buildShapes}. `projectedStops` compte les arrêts pour
@@ -586,23 +598,30 @@ function buildSequences(
 ): {
 	routeStopSequences: Map<string, Map<number, OrderedStop[][]>>;
 	tripStopSequences: Map<string, TripStop[]>;
+	tripDepartures: Map<string, number>;
 	projectedStops: number;
 } {
 	const routeStopSequences = new Map<string, Map<number, OrderedStop[][]>>();
 	const tripStopSequences = new Map<string, TripStop[]>();
+	const tripDepartures = new Map<string, number>();
 	let projectedStops = 0;
 
 	const rows = parseCsv(csv);
 	const header = rows.next().value;
-	if (!header) return { routeStopSequences, tripStopSequences, projectedStops };
+	if (!header) return { routeStopSequences, tripStopSequences, tripDepartures, projectedStops };
 
 	const tripCol = header.indexOf("trip_id");
 	const stopCol = header.indexOf("stop_id");
 	const seqCol = header.indexOf("stop_sequence");
 	const distCol = header.indexOf("shape_dist_traveled");
+	const timeCol = header.indexOf("departure_time");
 	if (tripCol === -1 || stopCol === -1 || seqCol === -1) {
-		return { routeStopSequences, tripStopSequences, projectedStops };
+		return { routeStopSequences, tripStopSequences, tripDepartures, projectedStops };
 	}
+
+	// Rang de l'arrêt qui a fourni le départ retenu pour chaque course : le fichier n'est pas tenu
+	// d'être ordonné, et seul le premier arrêt donne l'heure de départ de la course.
+	const departureSequences = new Map<string, number>();
 
 	// Regroupe les arrêts par trip (uniquement les trips connus).
 	const perTrip = new Map<string, TripStop[]>();
@@ -614,6 +633,12 @@ function buildSequences(
 		if (meta === undefined) continue;
 		const stopSequence = Number.parseInt(row[seqCol] ?? "", 10);
 		if (Number.isNaN(stopSequence)) continue;
+
+		const departure = timeCol === -1 ? Number.NaN : parseServiceTime(row[timeCol] ?? "");
+		if (Number.isFinite(departure) && stopSequence < (departureSequences.get(tripId) ?? Number.POSITIVE_INFINITY)) {
+			departureSequences.set(tripId, stopSequence);
+			tripDepartures.set(tripId, departure);
+		}
 
 		let stops = perTrip.get(tripId);
 		if (stops === undefined) {
@@ -688,7 +713,7 @@ function buildSequences(
 		directions.set(directionId, maximalVariants(list));
 	}
 
-	return { routeStopSequences, tripStopSequences, projectedStops };
+	return { routeStopSequences, tripStopSequences, tripDepartures, projectedStops };
 }
 
 /**
@@ -714,6 +739,49 @@ function projectStop(
 
 	cache.set(key, distance);
 	return distance;
+}
+
+/**
+ * Un horaire GTFS (« 07:04:00 ») en secondes depuis minuit de la journée de service, ou `NaN` s'il
+ * ne s'écrit pas ainsi. Les heures au-delà de 24 sont légitimes et se conservent telles quelles :
+ * « 25:10:00 » est une course de la journée de la veille qui déborde sur le lendemain.
+ */
+function parseServiceTime(value: string): number {
+	const parts = value.split(":");
+	if (parts.length < 2) return Number.NaN;
+
+	const hours = Number.parseInt(parts[0] ?? "", 10);
+	const minutes = Number.parseInt(parts[1] ?? "", 10);
+	const seconds = parts.length > 2 ? Number.parseInt(parts[2] ?? "", 10) : 0;
+	if (Number.isNaN(hours) || Number.isNaN(minutes) || Number.isNaN(seconds)) return Number.NaN;
+
+	return hours * 3600 + minutes * 60 + seconds;
+}
+
+/**
+ * L'instant, en secondes epoch, où tombe un horaire théorique donné en secondes depuis minuit.
+ *
+ * Le GTFS-RT ne dit pas à quelle journée de service appartient la course qu'il annonce, et l'horaire
+ * seul ne le dit pas davantage : un départ à « 25:10:00 » et un départ à « 01:10:00 » nomment le
+ * même instant à une journée près. On retient donc, des trois journées de service qui peuvent
+ * l'englober, celle qui place le départ au plus près de maintenant — la seule qui puisse concerner
+ * un véhicule en service à cet instant.
+ *
+ * Les bornes se calculent avec `startOfDay` et non par tranches de 86 400 s : les jours de
+ * changement d'heure ne durent pas vingt-quatre heures, et un départ y serait décalé d'une heure.
+ */
+export function departureEpoch(secondsFromMidnight: number, nowSeconds: number): number {
+	const today = Temporal.Now.zonedDateTimeISO(TIME_ZONE).startOfDay();
+
+	let closest = Number.NaN;
+	for (const days of [-1, 0, 1]) {
+		const departure = Math.floor(today.add({ days }).epochMilliseconds / 1000) + secondsFromMidnight;
+		if (Number.isNaN(closest) || Math.abs(departure - nowSeconds) < Math.abs(closest - nowSeconds)) {
+			closest = departure;
+		}
+	}
+
+	return closest;
 }
 
 /** Sépare `routeId:directionId` — le routeId porte lui-même des « : » (« TCAR:90 »). */
