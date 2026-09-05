@@ -8,6 +8,9 @@ export type OrderedStop = { stopId: string; name: string };
 /** Un arrêt dans l'horaire théorique d'un trip : sa position (stop_sequence) et son quai. */
 export type TripStop = { stopSequence: number; stopId: string };
 
+/** Ce que le GTFS statique dit d'une course : sa ligne, son sens, sa destination affichée. */
+export type TripMeta = { routeId: string; directionId: number; headsign: string };
+
 export type StaticGtfs = {
 	/** Nom d'arrêt normalisé → identifiants des quais (enfants) portant ce nom. */
 	stopNameIndex: Map<string, Set<string>>;
@@ -23,6 +26,10 @@ export type StaticGtfs = {
 	routeStopSequences: Map<string, Map<number, OrderedStop[][]>>;
 	/** tripId → horaire théorique ordonné (pour réinsérer un arrêt supprimé absent du GTFS-RT). */
 	tripStopSequences: Map<string, TripStop[]>;
+	/** stopId → libellé de l'arrêt, tel que le GTFS l'écrit. */
+	stopNames: Map<string, string>;
+	/** tripId → ligne, sens et destination théoriques (pour contrôler ce qu'annonce le SAE). */
+	trips: Map<string, TripMeta>;
 };
 
 let currentInterval: NodeJS.Timeout | undefined;
@@ -243,6 +250,8 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		routeDirections: new Map(),
 		routeStopSequences: new Map(),
 		tripStopSequences: new Map(),
+		stopNames: new Map(),
+		trips: new Map(),
 	};
 
 	try {
@@ -279,7 +288,15 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${itineraries} route itineraries, ${tripStopSequences.size} trip schedules from GTFS.`,
 		);
 		return {
-			data: { stopNameIndex, stopKeyIndex, routeDirections, routeStopSequences, tripStopSequences },
+			data: {
+				stopNameIndex,
+				stopKeyIndex,
+				routeDirections,
+				routeStopSequences,
+				tripStopSequences,
+				stopNames: idToName,
+				trips: tripMeta,
+			},
 			signature,
 		};
 	} catch (cause) {
@@ -381,9 +398,9 @@ function indexStopName(
 
 function buildTrips(csv: string): {
 	routeDirections: Map<string, RouteDirection[]>;
-	tripMeta: Map<string, { routeId: string; directionId: number }>;
+	tripMeta: Map<string, TripMeta>;
 } {
-	const tripMeta = new Map<string, { routeId: string; directionId: number }>();
+	const tripMeta = new Map<string, TripMeta>();
 	const rows = parseCsv(csv);
 	const header = rows.next().value;
 	if (!header) return { routeDirections: new Map(), tripMeta };
@@ -405,9 +422,8 @@ function buildTrips(csv: string): {
 		if (Number.isNaN(directionId)) continue;
 
 		const tripId = tripCol === -1 ? "" : (row[tripCol] ?? "");
-		if (tripId) tripMeta.set(tripId, { routeId, directionId });
-
 		const headsign = headsignCol === -1 ? "" : (row[headsignCol] ?? "");
+		if (tripId) tripMeta.set(tripId, { routeId, directionId, headsign });
 
 		let directions = grouped.get(routeId);
 		if (directions === undefined) {
@@ -443,7 +459,7 @@ function buildTrips(csv: string): {
  */
 function buildSequences(
 	csv: string,
-	tripMeta: Map<string, { routeId: string; directionId: number }>,
+	tripMeta: Map<string, TripMeta>,
 	idToName: Map<string, string>,
 ): { routeStopSequences: Map<string, Map<number, OrderedStop[][]>>; tripStopSequences: Map<string, TripStop[]> } {
 	const routeStopSequences = new Map<string, Map<number, OrderedStop[][]>>();

@@ -12,16 +12,23 @@ import {
 	REALTIME_LINES,
 	SERVICE_ALERTS_URL,
 	STATIC_GTFS_URL,
-	TRIP_RETENTION_DURATION,
 	TRIP_UPDATES_URL,
+	VEHICLE_MONITORING_INTERVAL,
+	VEHICLE_MONITORING_URL,
 	VEHICLE_POSITIONS_URL,
+	VEHICLE_STALENESS,
 	VERIFICATION_FEED_URL,
+	VERIFICATION_STALENESS,
 } from "./config.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
+import { useMovementTracker } from "./gtfs-rt/use-movement-tracker.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
 import { applySkippedStops, keepOnlySkippedStops, useServiceAlerts } from "./gtfs-rt/use-service-alerts.js";
 import { useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
-import { useVerificationFeed } from "./gtfs-rt/use-verification-feed.js";
+import { useVehicleMonitoring } from "./gtfs-rt/use-vehicle-monitoring.js";
+import { useVehicleRegistry } from "./gtfs-rt/use-vehicle-registry.js";
+import { useVerificationFeed, type VerifiedVehicle } from "./gtfs-rt/use-verification-feed.js";
+import { isDepotDestination, verifyVehicle } from "./gtfs-rt/verify-vehicle.js";
 import { useVehicleOccupancyStatuses } from "./utils/use-vehicle-occupancy-status.js";
 
 // Charge un fichier .env s'il existe (clé ANTHROPIC_API_KEY notamment).
@@ -38,32 +45,14 @@ console.log(` ,----.,--------.,------.,---.        ,------.,--------. ,--------.
  \`------' \`--'   \`--'   \`-----'       \`--' '--'  \`--'       \`--'   \`-----'\`--' \`--'\`--' '--'`);
 
 const store = useRealtimeStore();
+const registry = useVehicleRegistry();
+const movementTracker = useMovementTracker();
 const vehicleOccupancyStatuses = useVehicleOccupancyStatuses();
 
-/**
- * Dernière course cohérente annoncée par la source principale, par véhicule. Sert à conserver la
- * course lorsqu'un véhicule disparaît de la source principale et retombe sur la seule source de
- * vérité (cf. `restoreRecentTrips`).
- */
-const lastStandardTrips = new Map<string, { trip: GtfsRealtime.transit_realtime.ITripDescriptor; seenAt: number }>();
-const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL, (verifiedVehicles) => {
-	for (const [key, storedVehicle] of store.vehiclePositions) {
-		const vehicleId = key.split(":")[2]!;
-		const verifiedVehicle = verifiedVehicles.get(vehicleId);
-		if (!verifiedVehicle) continue;
-
-		const entityTimestamp = +(storedVehicle.timestamp ?? 0);
-		if (verifiedVehicle.recordedAt > entityTimestamp) {
-			store.vehiclePositions.set(key, {
-				...storedVehicle,
-				position: verifiedVehicle.position,
-				timestamp: verifiedVehicle.recordedAt,
-			});
-		}
-	}
-});
+const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL);
 
 loadCache(ALERT_CACHE_PATH);
+const vehicleMonitoring = await useVehicleMonitoring(VEHICLE_MONITORING_URL, VEHICLE_MONITORING_INTERVAL);
 const staticGtfs = await useStaticGtfs(STATIC_GTFS_URL, GTFS_CHECK_INTERVAL);
 const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs);
 
@@ -77,12 +66,15 @@ hono.use(
 	}),
 );
 
-hono.get("/vehicle-positions", (c) => handleRequest(c, "protobuf", null, store.vehiclePositions));
-hono.get("/vehicle-positions.json", (c) => handleRequest(c, "json", null, store.vehiclePositions));
+/** Les véhicules à émettre à cet instant : le registre écarte lui-même les relevés périmés. */
+const publishedPositions = () => registry.publishable(Math.floor(Date.now() / 1000));
+
+hono.get("/vehicle-positions", (c) => handleRequest(c, "protobuf", null, publishedPositions()));
+hono.get("/vehicle-positions.json", (c) => handleRequest(c, "json", null, publishedPositions()));
 hono.get("/trip-updates", (c) => handleRequest(c, "protobuf", store.tripUpdates, null));
 hono.get("/trip-updates.json", (c) => handleRequest(c, "json", store.tripUpdates, null));
 hono.get("/", (c) =>
-	handleRequest(c, c.req.query("format") === "json" ? "json" : "protobuf", null, store.vehiclePositions),
+	handleRequest(c, c.req.query("format") === "json" ? "json" : "protobuf", null, publishedPositions()),
 );
 
 serve({ fetch: hono.fetch, port: PORT });
@@ -91,205 +83,174 @@ console.log(`➔ Listening on :${PORT}`);
 // ---
 
 async function poll() {
+	let feed: GtfsRealtime.transit_realtime.FeedMessage;
+
 	try {
 		const response = await fetch(VEHICLE_POSITIONS_URL);
 		if (!response.ok || response.status === 204) {
 			console.error(`✘ Vehicle positions fetch failed (HTTP ${response.status}).`);
-			// Le store n'a pas été vidé : il garde l'état du poll précédent, que l'on complète tout
-			// de même des véhicules vus par la seule source de vérité.
-			console.log(`✓ ${fallbackFromVerificationFeed()} positions from verification feed only.`);
-			restoreRecentTrips();
+			// Le registre n'est pas vidé : ses véhicules gardent leur dernier relevé et cessent d'être
+			// émis d'eux-mêmes en vieillissant.
 			return;
 		}
 
-		const buffer = Buffer.from(await response.arrayBuffer());
-		const feed = GtfsRealtime.transit_realtime.FeedMessage.decode(buffer);
-
-		// Le store est vidé à chaque poll : on garde l'état précédent sous la main pour
-		// pouvoir continuer à publier un véhicule dont la ligne est incohérente.
-		const previousPositions = new Map(store.vehiclePositions);
-		store.vehiclePositions.clear();
-
-		// La source de vérité pose le socle : tout véhicule qu'elle voit rouler est publié, ligne et
-		// position seulement. La boucle qui suit ne fait qu'enrichir ce socle avec la course annoncée
-		// par la source principale, et uniquement lorsque celle-ci s'avère cohérente.
-		fallbackFromVerificationFeed();
-
-		for (const entity of feed.entity) {
-			if (!entity.vehicle?.vehicle?.id) continue;
-
-			if (entity.vehicle?.trip) {
-				entity.vehicle.trip.scheduleRelationship =
-					GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED;
-				if (entity.vehicle.trip.directionId !== 1) {
-					entity.vehicle.trip.directionId = 0;
-				}
-			}
-
-			const id = entity.vehicle.vehicle.id;
-			const vehicleId = id.split(":")[3]!;
-			const routeId = entity.vehicle.trip?.routeId ?? "";
-			const directionId = entity.vehicle.trip?.directionId ?? 0;
-
-			const lineId = routeId.split(":").at(-1) ?? "";
-			if (!REALTIME_LINES.has(lineId)) continue;
-
-			const verifiedVehicle = verificationFeed.verifiedVehicles?.get(vehicleId);
-
-			if (verifiedVehicle === undefined) {
-				continue;
-			}
-
-			const now = Temporal.Now.instant();
-			if (now.since(Temporal.Instant.fromEpochMilliseconds(verifiedVehicle.recordedAt * 1000)).total("minutes") >= 30) {
-				console.warn(`\t✘ ${vehicleId}\tExcluded: last verified position is stale (> 30 min).`);
-				continue;
-			}
-
-			const entityTimestamp = +(entity.vehicle.timestamp ?? 0);
-
-			if (verifiedVehicle.routeId !== routeId) {
-				console.warn(`\t✘ ${vehicleId}\tRoute mismatch! New: '${routeId}' vs. Old: '${verifiedVehicle.routeId}'.`);
-
-				// On ne relaie pas la course incohérente, mais on continue de rafraîchir la
-				// position sur la dernière course connue, sinon le véhicule se fige.
-				const storedVehicle = previousPositions.get(`VM:TCAR:${vehicleId}`);
-				if (storedVehicle !== undefined) {
-					const useVerifiedPosition = verifiedVehicle.recordedAt > entityTimestamp;
-					store.vehiclePositions.set(`VM:TCAR:${vehicleId}`, {
-						...storedVehicle,
-						vehicle: { id: `TCAR:${vehicleId}` },
-						position: useVerifiedPosition ? verifiedVehicle.position : entity.vehicle.position,
-						timestamp: useVerifiedPosition ? verifiedVehicle.recordedAt : entity.vehicle.timestamp,
-						occupancyStatus: vehicleOccupancyStatuses.get(vehicleId)?.status,
-					});
-				}
-
-				continue;
-			}
-
-			const useVerifiedPosition = verifiedVehicle.recordedAt > entityTimestamp;
-			store.vehiclePositions.set(`VM:TCAR:${vehicleId}`, {
-				...entity.vehicle,
-				vehicle: { id: `TCAR:${vehicleId}` },
-				position: useVerifiedPosition ? verifiedVehicle.position : entity.vehicle.position,
-				timestamp: useVerifiedPosition ? verifiedVehicle.recordedAt : entity.vehicle.timestamp,
-				occupancyStatus: vehicleOccupancyStatuses.get(vehicleId)?.status,
-			});
-
-			if (entity.vehicle.trip?.tripId) {
-				lastStandardTrips.set(vehicleId, { trip: entity.vehicle.trip, seenAt: now.epochMilliseconds });
-			}
-
-			console.log(`\t⛛ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} ${directionId}`);
-		}
-
-		// Un véhicule qui vient de disparaître de la source principale conserve sa dernière course
-		// tant qu'elle est récente et que la ligne n'a pas changé.
-		const retainedTrips = restoreRecentTrips();
-
-		// Ce que la source principale n'a pas enrichi reste tel que la source de vérité l'a posé :
-		// une ligne, un sens, une position, sans course. C'est le cas d'un véhicule sur une ligne
-		// hors REALTIME_LINES, d'une course absente du flux principal, ou d'un véhicule qu'il ignore.
-		let fallbackVehicles = 0;
-		for (const [key, vehicle] of store.vehiclePositions) {
-			if (vehicle.trip?.tripId) continue;
-			fallbackVehicles += 1;
-			const vehicleId = key.split(":")[2]!;
-			console.log(
-				`\t⛝ ${vehicleId.padEnd(4, " ")}  ${(vehicle.trip?.routeId ?? "").padEnd(10, " ")} ${vehicle.trip?.directionId ?? 0}`,
-			);
-		}
-
-		console.log(
-			`✓ ${store.vehiclePositions.size} positions (${fallbackVehicles} from verification feed only, ${retainedTrips} with retained trip).`,
-		);
+		feed = GtfsRealtime.transit_realtime.FeedMessage.decode(Buffer.from(await response.arrayBuffer()));
 	} catch (cause) {
 		console.error("✘ Poll error:", cause);
-		// L'erreur peut survenir en plein remplissage du store : on le complète malgré tout, pour ne
-		// pas publier un feed amputé des véhicules que la source de vérité connaît.
-		console.log(`✓ ${fallbackFromVerificationFeed()} positions from verification feed only.`);
-		restoreRecentTrips();
+		return;
 	}
-}
 
-/**
- * Peuple le store avec les véhicules connus de la source de vérité, sans écraser une entrée déjà
- * présente. Aucune course n'est annoncée : uniquement la ligne, le sens et la position — le tripId
- * de la source de vérité relève d'un autre référentiel que les trips du GTFS statique publié.
- * Renvoie le nombre de véhicules ajoutés.
- */
-function fallbackFromVerificationFeed() {
-	const verifiedVehicles = verificationFeed.verifiedVehicles;
-	if (verifiedVehicles === undefined) return 0;
+	const nowSeconds = Math.floor(Date.now() / 1000);
+	const forgotten = registry.prune(nowSeconds);
 
-	const now = Temporal.Now.instant();
-	let added = 0;
+	let published = 0;
+	let refreshed = 0;
+	let staleRecords = 0;
+	let firstSightings = 0;
+	let frozenVehicles = 0;
+	let untrackedLines = 0;
+	let deadheads = 0;
+	let unknownVehicles = 0;
 
-	for (const [vehicleId, verifiedVehicle] of verifiedVehicles) {
-		const key = `VM:TCAR:${vehicleId}`;
-		if (store.vehiclePositions.has(key)) continue;
+	for (const { vehicle } of feed.entity) {
+		// « TCAR:Vehicle::6232:LOC » → « 6232 », le numéro de parc que publient aussi les deux flux
+		// de vérification.
+		const vehicleId = vehicle?.vehicle?.id?.split(":")[3];
+		const position = vehicle?.position;
+		if (!vehicleId || !position || !vehicle.trip?.tripId) continue;
 
-		// Même seuil de péremption que pour les véhicules de la source principale : le snapshot de
-		// la source de vérité n'est rechargé qu'une fois par minute et vieillit entre deux polls.
-		if (now.since(Temporal.Instant.fromEpochMilliseconds(verifiedVehicle.recordedAt * 1000)).total("minutes") >= 30) {
+		// Que la source cesse elle-même de réhorodater un véhicule est un aveu : elle l'a perdu.
+		const sourceTimestamp = Number(vehicle.timestamp ?? 0);
+		if (!sourceTimestamp || nowSeconds - sourceTimestamp > VEHICLE_STALENESS) {
+			staleRecords += 1;
 			continue;
 		}
 
-		store.vehiclePositions.set(key, {
-			vehicle: { id: `TCAR:${vehicleId}` },
-			trip: { routeId: verifiedVehicle.routeId, directionId: verifiedVehicle.directionId },
-			position: verifiedVehicle.position,
-			timestamp: verifiedVehicle.recordedAt,
-			occupancyStatus: vehicleOccupancyStatuses.get(vehicleId)?.status,
-		});
-		added += 1;
-	}
+		// Ce qu'elle réhorodate n'en est pas fiable pour autant : seul le mouvement constaté prouve
+		// qu'elle a encore le véhicule au bout du fil, et date sa position.
+		const movement = movementTracker.observe(vehicleId, position, sourceTimestamp, nowSeconds);
 
-	return added;
-}
-
-/**
- * Réapplique la dernière course annoncée par la source principale aux véhicules que la source de
- * vérité a posés sans course. La course reste publiée tant qu'elle a été vue il y a moins de
- * `TRIP_RETENTION_DURATION` et que la ligne et le sens de la source de vérité concordent toujours ;
- * un changement de ligne ou de sens invalide définitivement la mémoire. Renvoie le nombre de
- * courses conservées.
- */
-function restoreRecentTrips() {
-	const nowMs = Temporal.Now.instant().epochMilliseconds;
-	let restored = 0;
-
-	for (const [vehicleId, remembered] of lastStandardTrips) {
-		if (nowMs - remembered.seenAt >= TRIP_RETENTION_DURATION) {
-			lastStandardTrips.delete(vehicleId);
-		}
-	}
-
-	for (const [key, vehicle] of store.vehiclePositions) {
-		if (vehicle.trip?.tripId) continue;
-
-		const vehicleId = key.split(":")[2]!;
-		const remembered = lastStandardTrips.get(vehicleId);
-		if (remembered === undefined) continue;
-
-		if (
-			remembered.trip.routeId !== vehicle.trip?.routeId ||
-			(remembered.trip.directionId ?? 0) !== (vehicle.trip?.directionId ?? 0)
-		) {
-			// Le véhicule a changé de ligne ou de sens : la course mémorisée est définitivement obsolète.
-			lastStandardTrips.delete(vehicleId);
+		// Première apparition : on ne sait pas encore si ce véhicule roule ou dort depuis des heures.
+		if (movement.kind === "first-sight") {
+			firstSightings += 1;
 			continue;
 		}
 
-		store.vehiclePositions.set(key, { ...vehicle, trip: remembered.trip });
-		restored += 1;
+		// Immobile de longue date : la source parle encore de lui, mais ne le voit plus. L'entrée reste
+		// telle quelle et sortira d'elle-même du feed, faute d'être rafraîchie.
+		if (movement.kind === "frozen") {
+			frozenVehicles += 1;
+			continue;
+		}
+
+		const { position: movedPosition, timestamp } = movement;
+
+		const occupancyStatus = vehicleOccupancyStatuses.get(vehicleId)?.status;
+		const routeId = vehicle.trip.routeId ?? "";
+		const lineId = routeId.split(":").at(-1) ?? "";
+
+		// Ligne sans vrai temps réel : la source y rebadge l'horaire théorique, sa course ne vaut rien.
+		// Le véhicule n'est jamais publié de ce fait — tout au plus voit-il sa position rafraîchie s'il
+		// l'a déjà été depuis une ligne qui, elle, tient debout.
+		if (!REALTIME_LINES.has(lineId)) {
+			untrackedLines += 1;
+			if (registry.refresh(vehicleId, movedPosition, timestamp, occupancyStatus)) refreshed += 1;
+			else unknownVehicles += 1;
+			continue;
+		}
+
+		const destinationName = freshDestination(vehicleId, nowSeconds);
+
+		// Haut-le-pied : le véhicule rentre au dépôt. On le publie parce qu'il roule, mais sans course —
+		// celle que le SAE continue de lui prêter ne dessert plus personne. La girouette porte alors le
+		// seul renseignement utile, on la republie.
+		if (isDepotDestination(destinationName)) {
+			deadheads += 1;
+			registry.publish(
+				vehicleId,
+				{
+					vehicle: { id: `TCAR:${vehicleId}`, label: destinationName },
+					position: movedPosition,
+					timestamp,
+					occupancyStatus,
+				},
+				timestamp,
+			);
+			continue;
+		}
+
+		const directionId = vehicle.trip.directionId ?? 0;
+		const check = verifyVehicle(
+			{ routeId, lineId, directionId },
+			freshVerification(vehicleId, nowSeconds),
+			destinationName,
+		);
+
+		// Ni le flux de vérification ni la girouette ne confirment la ligne annoncée : on ne relaie pas
+		// la course, mais on continue de rafraîchir la position sur la dernière course connue, sinon le
+		// véhicule se fige. Jamais publié, il n'a pas de course à conserver : on ne fait rien.
+		if (!check.valid) {
+			// La girouette est recopiée telle quelle : c'est la chaîne à reporter dans LINE_DESTINATIONS
+			// pour que la ligne cesse d'être écartée.
+			const verified = check.verified;
+			console.warn(
+				`\t✘ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} ${directionId} — flux "${verified ? `${verified.routeId}/${verified.directionId}` : "?"}", girouette "${check.destinationName || "?"}".`,
+			);
+
+			if (registry.refresh(vehicleId, movedPosition, timestamp, occupancyStatus)) refreshed += 1;
+			else unknownVehicles += 1;
+			continue;
+		}
+
+		published += 1;
+		registry.publish(
+			vehicleId,
+			{
+				trip: {
+					tripId: vehicle.trip.tripId,
+					routeId,
+					directionId,
+					scheduleRelationship: GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED,
+				},
+				vehicle: { id: `TCAR:${vehicleId}` },
+				position: movedPosition,
+				currentStopSequence: vehicle.currentStopSequence ?? undefined,
+				stopId: vehicle.stopId ?? undefined,
+				timestamp,
+				occupancyStatus,
+			},
+			timestamp,
+		);
+
 		console.log(
-			`\t↻ ${vehicleId.padEnd(4, " ")}  ${(remembered.trip.routeId ?? "").padEnd(10, " ")} ${remembered.trip.directionId ?? 0}`,
+			`\t⛛ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} ${directionId} (${check.by}${movement.kind === "still" ? ", still" : ""})`,
 		);
 	}
 
-	return restored;
+	console.log(
+		`✓ ${registry.publishable(nowSeconds).size} positions (${published} verified, ${refreshed} position-only, ${deadheads} deadheading, ${staleRecords} stale records, ${firstSightings} first sightings, ${frozenVehicles} motionless, ${untrackedLines} on untracked lines, ${unknownVehicles} never published, ${forgotten} forgotten).`,
+	);
+}
+
+/**
+ * La girouette du véhicule selon l'instantané SAE, ou une chaîne vide lorsqu'il l'ignore ou que son
+ * relevé est périmé. L'instantané n'est rechargé que toutes les cinq minutes : la fraîcheur se
+ * contrôle à la lecture, pas au chargement.
+ */
+function freshDestination(vehicleId: string, nowSeconds: number): string {
+	const monitored = vehicleMonitoring.journeys?.get(vehicleId);
+	if (monitored === undefined || nowSeconds - monitored.recordedAt > VERIFICATION_STALENESS) return "";
+	return monitored.destinationName;
+}
+
+/**
+ * Le relevé du flux de vérification pour ce véhicule, ou `undefined` lorsqu'il l'ignore ou que son
+ * relevé est périmé — les deux revenant au même, une source périmée ne confirmant rien.
+ */
+function freshVerification(vehicleId: string, nowSeconds: number): VerifiedVehicle | undefined {
+	const verified = verificationFeed.verifiedVehicles.get(vehicleId);
+	if (verified === undefined || nowSeconds - verified.recordedAt > VERIFICATION_STALENESS) return undefined;
+	return verified;
 }
 
 async function pollTripUpdates() {
