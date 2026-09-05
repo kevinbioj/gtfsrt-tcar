@@ -25,6 +25,7 @@ import { useMovementTracker } from "./gtfs-rt/use-movement-tracker.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
 import { applySkippedStops, keepOnlySkippedStops, useServiceAlerts } from "./gtfs-rt/use-service-alerts.js";
 import { useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
+import { useVehicleLocator, type VehicleLocation } from "./gtfs-rt/use-vehicle-locator.js";
 import { useVehicleMonitoring } from "./gtfs-rt/use-vehicle-monitoring.js";
 import { useVehicleRegistry } from "./gtfs-rt/use-vehicle-registry.js";
 import { useVerificationFeed, type VerifiedVehicle } from "./gtfs-rt/use-verification-feed.js";
@@ -54,6 +55,9 @@ const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL);
 loadCache(ALERT_CACHE_PATH);
 const vehicleMonitoring = await useVehicleMonitoring(VEHICLE_MONITORING_URL, VEHICLE_MONITORING_INTERVAL);
 const staticGtfs = await useStaticGtfs(STATIC_GTFS_URL, GTFS_CHECK_INTERVAL);
+// Le locator lit `staticGtfs.data` à chaque appel : il suit donc les rechargements du GTFS de
+// lui-même, sans avoir à s'y réabonner.
+const vehicleLocator = useVehicleLocator(staticGtfs);
 const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs);
 
 const hono = new Hono();
@@ -111,6 +115,23 @@ async function poll() {
 	let untrackedLines = 0;
 	let deadheads = 0;
 	let unknownVehicles = 0;
+	let unlocated = 0;
+
+	/** Situe le véhicule sur la course indiquée, en comptant les échecs pour la ligne de synthèse. */
+	const locateOn = (vehicleId: string, tripId: string, position: GtfsRealtime.transit_realtime.IPosition) => {
+		const location = vehicleLocator.locate(vehicleId, tripId, position, nowSeconds);
+		if (location === undefined) unlocated += 1;
+		return location;
+	};
+
+	/**
+	 * Situe le véhicule sur la course que le registre lui connaît. Rien à projeter s'il n'a jamais été
+	 * publié, ou s'il l'a été sans course (haut-le-pied).
+	 */
+	const relocate = (vehicleId: string, position: GtfsRealtime.transit_realtime.IPosition) => {
+		const tripId = registry.trip(vehicleId);
+		return tripId === undefined ? undefined : locateOn(vehicleId, tripId, position);
+	};
 
 	for (const { vehicle } of feed.entity) {
 		// « TCAR:Vehicle::6232:LOC » → « 6232 », le numéro de parc que publient aussi les deux flux
@@ -154,7 +175,8 @@ async function poll() {
 		// l'a déjà été depuis une ligne qui, elle, tient debout.
 		if (!REALTIME_LINES.has(lineId)) {
 			untrackedLines += 1;
-			if (registry.refresh(vehicleId, movedPosition, timestamp, occupancyStatus)) refreshed += 1;
+			if (registry.refresh(vehicleId, movedPosition, timestamp, occupancyStatus, relocate(vehicleId, movedPosition)))
+				refreshed += 1;
 			else unknownVehicles += 1;
 			continue;
 		}
@@ -197,10 +219,15 @@ async function poll() {
 				`\t✘ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} ${directionId} — flux "${verified ? `${verified.routeId}/${verified.directionId}` : "?"}", girouette "${check.destinationName || "?"}".`,
 			);
 
-			if (registry.refresh(vehicleId, movedPosition, timestamp, occupancyStatus)) refreshed += 1;
+			if (registry.refresh(vehicleId, movedPosition, timestamp, occupancyStatus, relocate(vehicleId, movedPosition)))
+				refreshed += 1;
 			else unknownVehicles += 1;
 			continue;
 		}
+
+		// La source annonce bien un quai et un rang, mais on ne les lit plus : ils sont recalculés ici
+		// comme ils le sont pour un véhicule qu'on ne sait pas vérifier, d'après la seule position.
+		const location = locateOn(vehicleId, vehicle.trip.tripId, movedPosition);
 
 		published += 1;
 		registry.publish(
@@ -214,8 +241,9 @@ async function poll() {
 				},
 				vehicle: { id: `TCAR:${vehicleId}` },
 				position: movedPosition,
-				currentStopSequence: vehicle.currentStopSequence ?? undefined,
-				stopId: vehicle.stopId ?? undefined,
+				currentStopSequence: location?.currentStopSequence,
+				stopId: location?.stopId,
+				currentStatus: location?.currentStatus,
 				timestamp,
 				occupancyStatus,
 			},
@@ -223,13 +251,28 @@ async function poll() {
 		);
 
 		console.log(
-			`\t⛛ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} ${directionId} (${check.by}${movement.kind === "still" ? ", still" : ""})`,
+			`\t⛛ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} ${directionId} (${check.by}${movement.kind === "still" ? ", still" : ""}) — ${describeLocation(location)}`,
 		);
 	}
 
 	console.log(
-		`✓ ${registry.publishable(nowSeconds).size} positions (${published} verified, ${refreshed} position-only, ${deadheads} deadheading, ${staleRecords} stale records, ${firstSightings} first sightings, ${frozenVehicles} motionless, ${untrackedLines} on untracked lines, ${unknownVehicles} never published, ${forgotten} forgotten).`,
+		`✓ ${registry.publishable(nowSeconds).size} positions (${published} verified, ${refreshed} position-only, ${deadheads} deadheading, ${staleRecords} stale records, ${firstSightings} first sightings, ${frozenVehicles} motionless, ${untrackedLines} on untracked lines, ${unknownVehicles} never published, ${unlocated} unlocated, ${forgotten} forgotten).`,
 	);
+}
+
+/** Le prochain arrêt localisé, tel qu'il s'écrit au journal. */
+function describeLocation(location: VehicleLocation | undefined): string {
+	if (location === undefined) return "arrêt inconnu";
+
+	const { VehicleStopStatus } = GtfsRealtime.transit_realtime.VehiclePosition;
+	const status =
+		location.currentStatus === VehicleStopStatus.STOPPED_AT
+			? "à quai"
+			: location.currentStatus === VehicleStopStatus.INCOMING_AT
+				? "approche"
+				: "vers";
+
+	return `${status} ${staticGtfs.data.stopNames.get(location.stopId) ?? location.stopId} #${location.currentStopSequence}`;
 }
 
 /**

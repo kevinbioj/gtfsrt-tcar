@@ -1,15 +1,23 @@
 import { unzipSync } from "fflate";
 
+import { type Coordinates, haversine, projectOnShape, type ShapePoint } from "../utils/geometry.js";
+
+export type { ShapePoint };
+
 export type RouteDirection = { directionId: number; headsigns: string[] };
 
 /** Un arrêt dans l'itinéraire d'une ligne : son quai (stopId) et son nom normalisé. */
 export type OrderedStop = { stopId: string; name: string };
 
-/** Un arrêt dans l'horaire théorique d'un trip : sa position (stop_sequence) et son quai. */
-export type TripStop = { stopSequence: number; stopId: string };
+/**
+ * Un arrêt dans l'horaire théorique d'un trip : sa position (stop_sequence), son quai, et son
+ * abscisse curviligne sur la shape de la course, en kilomètres. Celle-ci vaut `NaN` lorsqu'on n'a
+ * pas su la déterminer — le GTFS ne la déclare pas et l'arrêt n'a pas de coordonnées.
+ */
+export type TripStop = { stopSequence: number; stopId: string; distance: number };
 
-/** Ce que le GTFS statique dit d'une course : sa ligne, son sens, sa destination affichée. */
-export type TripMeta = { routeId: string; directionId: number; headsign: string };
+/** Ce que le GTFS statique dit d'une course : sa ligne, son sens, sa destination affichée, son tracé. */
+export type TripMeta = { routeId: string; directionId: number; headsign: string; shapeId: string };
 
 export type StaticGtfs = {
 	/** Nom d'arrêt normalisé → identifiants des quais (enfants) portant ce nom. */
@@ -28,8 +36,12 @@ export type StaticGtfs = {
 	tripStopSequences: Map<string, TripStop[]>;
 	/** stopId → libellé de l'arrêt, tel que le GTFS l'écrit. */
 	stopNames: Map<string, string>;
+	/** stopId → coordonnées du quai. */
+	stopCoordinates: Map<string, Coordinates>;
 	/** tripId → ligne, sens et destination théoriques (pour contrôler ce qu'annonce le SAE). */
 	trips: Map<string, TripMeta>;
+	/** shapeId → tracé de la course, chaque point portant son abscisse curviligne en kilomètres. */
+	shapes: Map<string, ShapePoint[]>;
 };
 
 let currentInterval: NodeJS.Timeout | undefined;
@@ -251,7 +263,9 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		routeStopSequences: new Map(),
 		tripStopSequences: new Map(),
 		stopNames: new Map(),
+		stopCoordinates: new Map(),
 		trips: new Map(),
+		shapes: new Map(),
 	};
 
 	try {
@@ -264,7 +278,11 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		const signature = signatureOf(response);
 		const buffer = new Uint8Array(await response.arrayBuffer());
 		const files = unzipSync(buffer, {
-			filter: (file) => file.name === "stops.txt" || file.name === "trips.txt" || file.name === "stop_times.txt",
+			filter: (file) =>
+				file.name === "stops.txt" ||
+				file.name === "trips.txt" ||
+				file.name === "stop_times.txt" ||
+				file.name === "shapes.txt",
 		});
 
 		if (!files["stops.txt"] || !files["trips.txt"]) {
@@ -273,11 +291,20 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		}
 
 		const decoder = new TextDecoder();
-		const { stopNameIndex, stopKeyIndex, idToName } = buildStops(decoder.decode(files["stops.txt"]));
+		const { stopNameIndex, stopKeyIndex, idToName, coordinates } = buildStops(decoder.decode(files["stops.txt"]));
 		const { routeDirections, tripMeta } = buildTrips(decoder.decode(files["trips.txt"]));
-		const { routeStopSequences, tripStopSequences } = files["stop_times.txt"]
-			? buildSequences(decoder.decode(files["stop_times.txt"]), tripMeta, idToName)
-			: { routeStopSequences: new Map(), tripStopSequences: new Map() };
+		const { shapes, scales } = files["shapes.txt"]
+			? buildShapes(decoder.decode(files["shapes.txt"]))
+			: { shapes: new Map<string, ShapePoint[]>(), scales: new Map<string, number>() };
+		const { routeStopSequences, tripStopSequences, projectedStops } = files["stop_times.txt"]
+			? buildSequences(decoder.decode(files["stop_times.txt"]), tripMeta, idToName, shapes, scales, coordinates)
+			: { routeStopSequences: new Map(), tripStopSequences: new Map(), projectedStops: 0 };
+
+		// Le GTFS actuel déclare une abscisse pour chaque arrêt : qu'il faille en projeter signale une
+		// source qui a changé de forme, et un repli nettement plus fragile sur les shapes à boucle.
+		if (projectedStops > 0) {
+			console.warn(`⚠ ${projectedStops} stop distances projected onto shapes (missing shape_dist_traveled).`);
+		}
 
 		let itineraries = 0;
 		for (const directions of routeStopSequences.values()) {
@@ -285,7 +312,7 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		}
 
 		console.log(
-			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${itineraries} route itineraries, ${tripStopSequences.size} trip schedules from GTFS.`,
+			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${itineraries} route itineraries, ${tripStopSequences.size} trip schedules, ${shapes.size} shapes from GTFS.`,
 		);
 		return {
 			data: {
@@ -295,7 +322,9 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 				routeStopSequences,
 				tripStopSequences,
 				stopNames: idToName,
+				stopCoordinates: coordinates,
 				trips: tripMeta,
+				shapes,
 			},
 			signature,
 		};
@@ -309,18 +338,22 @@ function buildStops(csv: string): {
 	stopNameIndex: Map<string, Set<string>>;
 	stopKeyIndex: Map<string, Set<string>>;
 	idToName: Map<string, string>;
+	coordinates: Map<string, Coordinates>;
 } {
 	const stopNameIndex = new Map<string, Set<string>>();
 	const stopKeyIndex = new Map<string, Set<string>>();
 	const idToName = new Map<string, string>();
+	const coordinates = new Map<string, Coordinates>();
 	const rows = parseCsv(csv);
 	const header = rows.next().value;
-	if (!header) return { stopNameIndex, stopKeyIndex, idToName };
+	if (!header) return { stopNameIndex, stopKeyIndex, idToName, coordinates };
 
 	const idCol = header.indexOf("stop_id");
 	const nameCol = header.indexOf("stop_name");
 	const parentCol = header.indexOf("parent_station");
-	if (idCol === -1 || nameCol === -1) return { stopNameIndex, stopKeyIndex, idToName };
+	const latitudeCol = header.indexOf("stop_lat");
+	const longitudeCol = header.indexOf("stop_lon");
+	if (idCol === -1 || nameCol === -1) return { stopNameIndex, stopKeyIndex, idToName, coordinates };
 
 	const stationNames = new Map<string, string>();
 	const stationStopIds = new Map<string, Set<string>>();
@@ -338,6 +371,10 @@ function buildStops(csv: string): {
 		}
 
 		idToName.set(stopId, stopName);
+
+		const latitude = latitudeCol === -1 ? Number.NaN : Number.parseFloat(row[latitudeCol] ?? "");
+		const longitude = longitudeCol === -1 ? Number.NaN : Number.parseFloat(row[longitudeCol] ?? "");
+		if (!Number.isNaN(latitude) && !Number.isNaN(longitude)) coordinates.set(stopId, { latitude, longitude });
 
 		const parent = parentCol === -1 ? "" : (row[parentCol] ?? "");
 		if (parent) {
@@ -366,7 +403,7 @@ function buildStops(csv: string): {
 		indexStopName(stopNameIndex, stopKeyIndex, stationName, stopIds);
 	}
 
-	return { stopNameIndex, stopKeyIndex, idToName };
+	return { stopNameIndex, stopKeyIndex, idToName, coordinates };
 }
 
 function indexStopName(
@@ -409,6 +446,7 @@ function buildTrips(csv: string): {
 	const tripCol = header.indexOf("trip_id");
 	const headsignCol = header.indexOf("trip_headsign");
 	const directionCol = header.indexOf("direction_id");
+	const shapeCol = header.indexOf("shape_id");
 	if (routeCol === -1 || directionCol === -1) return { routeDirections: new Map(), tripMeta };
 
 	// routeId → directionId → set de headsigns
@@ -423,7 +461,8 @@ function buildTrips(csv: string): {
 
 		const tripId = tripCol === -1 ? "" : (row[tripCol] ?? "");
 		const headsign = headsignCol === -1 ? "" : (row[headsignCol] ?? "");
-		if (tripId) tripMeta.set(tripId, { routeId, directionId, headsign });
+		const shapeId = shapeCol === -1 ? "" : (row[shapeCol] ?? "");
+		if (tripId) tripMeta.set(tripId, { routeId, directionId, headsign, shapeId });
 
 		let directions = grouped.get(routeId);
 		if (directions === undefined) {
@@ -450,29 +489,120 @@ function buildTrips(csv: string): {
 	return { routeDirections, tripMeta };
 }
 
+/** Une ligne de shapes.txt, avant tri et cumul des distances. */
+type ShapeRow = Coordinates & { sequence: number; declared: number };
+
+/**
+ * À partir de shapes.txt, construit les tracés des courses et, pour chacun, le facteur qui ramène
+ * les `shape_dist_traveled` du GTFS à nos kilomètres.
+ *
+ * L'abscisse curviligne de chaque point est **recalculée** plutôt que reprise : le GTFS ne spécifie
+ * pas l'unité de `shape_dist_traveled`, que le producteur choisit (ici des kilomètres, mais rien ne
+ * l'y oblige et rien n'annoncerait un changement). Le rapport entre la longueur déclarée du tracé et
+ * celle qu'on vient de mesurer donne cette unité, et le même facteur remet ensuite à l'échelle les
+ * abscisses des arrêts (cf. {@link buildSequences}). `NaN` lorsque le tracé n'en déclare aucune.
+ */
+function buildShapes(csv: string): { shapes: Map<string, ShapePoint[]>; scales: Map<string, number> } {
+	const shapes = new Map<string, ShapePoint[]>();
+	const scales = new Map<string, number>();
+
+	const rows = parseCsv(csv);
+	const header = rows.next().value;
+	if (!header) return { shapes, scales };
+
+	const idCol = header.indexOf("shape_id");
+	const latitudeCol = header.indexOf("shape_pt_lat");
+	const longitudeCol = header.indexOf("shape_pt_lon");
+	const seqCol = header.indexOf("shape_pt_sequence");
+	const distCol = header.indexOf("shape_dist_traveled");
+	if (idCol === -1 || latitudeCol === -1 || longitudeCol === -1 || seqCol === -1) return { shapes, scales };
+
+	const collected = new Map<string, ShapeRow[]>();
+
+	for (const row of rows) {
+		const shapeId = row[idCol];
+		if (!shapeId) continue;
+
+		const latitude = Number.parseFloat(row[latitudeCol] ?? "");
+		const longitude = Number.parseFloat(row[longitudeCol] ?? "");
+		const sequence = Number.parseInt(row[seqCol] ?? "", 10);
+		if (Number.isNaN(latitude) || Number.isNaN(longitude) || Number.isNaN(sequence)) continue;
+
+		let points = collected.get(shapeId);
+		if (points === undefined) {
+			points = [];
+			collected.set(shapeId, points);
+		}
+		points.push({
+			latitude,
+			longitude,
+			sequence,
+			declared: distCol === -1 ? Number.NaN : Number.parseFloat(row[distCol] ?? ""),
+		});
+	}
+
+	for (const [shapeId, unordered] of collected) {
+		unordered.sort((a, b) => a.sequence - b.sequence);
+		// Un point seul ne fait pas un segment : rien à y projeter.
+		if (unordered.length < 2) continue;
+
+		const points: ShapePoint[] = [];
+		let distance = 0;
+		let previous: ShapeRow | undefined;
+
+		for (const point of unordered) {
+			if (previous !== undefined) distance += haversine(previous, point);
+			points.push({ latitude: point.latitude, longitude: point.longitude, distance });
+			previous = point;
+		}
+
+		shapes.set(shapeId, points);
+
+		const declared = (unordered.at(-1) as ShapeRow).declared;
+		scales.set(shapeId, Number.isFinite(declared) && declared > 0 ? distance / declared : Number.NaN);
+	}
+
+	return { shapes, scales };
+}
+
 /**
  * À partir de stop_times, construit :
  *  - `routeStopSequences` : par (routeId, directionId), les itinéraires distincts empruntés — sert
  *    à étendre les plages « de X à Y » ;
  *  - `tripStopSequences` : par tripId, l'horaire théorique ordonné — sert à réinsérer un arrêt
- *    supprimé absent du GTFS-RT, avec son stop_sequence.
+ *    supprimé absent du GTFS-RT, avec son stop_sequence, et à situer un véhicule sur sa course.
+ *
+ * Chaque arrêt y reçoit son abscisse curviligne sur la shape de la course, remise à l'échelle de nos
+ * kilomètres par le facteur qu'a déduit {@link buildShapes}. `projectedStops` compte les arrêts pour
+ * lesquels il a fallu se rabattre sur une projection des coordonnées, faute d'abscisse déclarée.
  */
 function buildSequences(
 	csv: string,
 	tripMeta: Map<string, TripMeta>,
 	idToName: Map<string, string>,
-): { routeStopSequences: Map<string, Map<number, OrderedStop[][]>>; tripStopSequences: Map<string, TripStop[]> } {
+	shapes: Map<string, ShapePoint[]>,
+	scales: Map<string, number>,
+	stopCoordinates: Map<string, Coordinates>,
+): {
+	routeStopSequences: Map<string, Map<number, OrderedStop[][]>>;
+	tripStopSequences: Map<string, TripStop[]>;
+	projectedStops: number;
+} {
 	const routeStopSequences = new Map<string, Map<number, OrderedStop[][]>>();
 	const tripStopSequences = new Map<string, TripStop[]>();
+	let projectedStops = 0;
 
 	const rows = parseCsv(csv);
 	const header = rows.next().value;
-	if (!header) return { routeStopSequences, tripStopSequences };
+	if (!header) return { routeStopSequences, tripStopSequences, projectedStops };
 
 	const tripCol = header.indexOf("trip_id");
 	const stopCol = header.indexOf("stop_id");
 	const seqCol = header.indexOf("stop_sequence");
-	if (tripCol === -1 || stopCol === -1 || seqCol === -1) return { routeStopSequences, tripStopSequences };
+	const distCol = header.indexOf("shape_dist_traveled");
+	if (tripCol === -1 || stopCol === -1 || seqCol === -1) {
+		return { routeStopSequences, tripStopSequences, projectedStops };
+	}
 
 	// Regroupe les arrêts par trip (uniquement les trips connus).
 	const perTrip = new Map<string, TripStop[]>();
@@ -490,12 +620,20 @@ function buildSequences(
 			stops = [];
 			perTrip.set(tripId, stops);
 		}
-		stops.push({ stopSequence, stopId });
+		// Abscisse encore dans l'unité du producteur : elle est remise à l'échelle plus bas, une fois
+		// la course rattachée à sa shape.
+		stops.push({
+			stopSequence,
+			stopId,
+			distance: distCol === -1 ? Number.NaN : Number.parseFloat(row[distCol] ?? ""),
+		});
 	}
 
 	// Itinéraires distincts de chaque (route, sens), dédupliqués par suite de quais.
 	const seen = new Map<string, Set<string>>();
 	const variants = new Map<string, OrderedStop[][]>();
+	// Un même quai revient sur toutes les courses d'une shape : sa projection ne se calcule qu'une fois.
+	const projected = new Map<string, number>();
 
 	for (const [tripId, stops] of perTrip) {
 		stops.sort((a, b) => a.stopSequence - b.stopSequence);
@@ -503,6 +641,20 @@ function buildSequences(
 
 		const meta = tripMeta.get(tripId);
 		if (meta === undefined) continue;
+
+		const shape = shapes.get(meta.shapeId);
+		const scale = scales.get(meta.shapeId) ?? Number.NaN;
+		for (const stop of stops) {
+			if (Number.isFinite(scale) && Number.isFinite(stop.distance)) {
+				stop.distance *= scale;
+				continue;
+			}
+
+			stop.distance =
+				shape === undefined ? Number.NaN : projectStop(shape, meta.shapeId, stop.stopId, stopCoordinates, projected);
+			if (Number.isFinite(stop.distance)) projectedStops += 1;
+		}
+
 		const key = `${meta.routeId}:${meta.directionId}`;
 
 		let signatures = seen.get(key);
@@ -536,7 +688,32 @@ function buildSequences(
 		directions.set(directionId, maximalVariants(list));
 	}
 
-	return { routeStopSequences, tripStopSequences };
+	return { routeStopSequences, tripStopSequences, projectedStops };
+}
+
+/**
+ * Abscisse d'un quai sur une shape, obtenue en y projetant ses coordonnées. Repli employé quand
+ * stop_times.txt ne déclare pas d'abscisse exploitable : il est nettement moins sûr que la valeur
+ * déclarée, un quai desservi deux fois par une shape à boucle s'y projetant indifféremment sur l'un
+ * ou l'autre passage.
+ */
+function projectStop(
+	shape: ShapePoint[],
+	shapeId: string,
+	stopId: string,
+	stopCoordinates: Map<string, Coordinates>,
+	cache: Map<string, number>,
+): number {
+	const key = `${shapeId}|${stopId}`;
+	const cached = cache.get(key);
+	if (cached !== undefined) return cached;
+
+	const coordinates = stopCoordinates.get(stopId);
+	const distance =
+		coordinates === undefined ? Number.NaN : (projectOnShape(shape, coordinates)?.distance ?? Number.NaN);
+
+	cache.set(key, distance);
+	return distance;
 }
 
 /** Sépare `routeId:directionId` — le routeId porte lui-même des « : » (« TCAR:90 »). */

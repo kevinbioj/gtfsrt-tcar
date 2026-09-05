@@ -89,6 +89,44 @@ export const VEHICLE_MEMORY_DURATION = Temporal.Duration.from({ minutes: 90 }).t
 export const VERIFICATION_STALENESS = Temporal.Duration.from({ minutes: 15 }).total("seconds");
 
 /**
+ * Écart latéral maximal, en kilomètres, entre la position d'un véhicule et la shape de sa course.
+ * Au-delà, la position ne le situe plus sur son itinéraire — déviation, relevé GPS aberrant, shape
+ * qui ne lui correspond pas — et le prochain arrêt qu'on en déduirait ne voudrait rien dire. On
+ * garde alors le dernier qu'on savait juste (cf. `useVehicleLocator`).
+ */
+export const MAX_SHAPE_OFFSET = 0.15;
+
+/**
+ * Rayon du « à quai », en kilomètres. Il joue des deux côtés du point d'arrêt : en deçà le véhicule
+ * y arrive, au-delà il n'en est pas encore reparti. La dérive GPS le pousse volontiers quelques
+ * mètres trop loin, et sans cette marge il annoncerait l'arrêt suivant portes encore ouvertes.
+ */
+export const STOPPED_AT_RADIUS = 0.03;
+
+/** Distance restante, en kilomètres, en deçà de laquelle le véhicule est annoncé en approche. */
+export const INCOMING_AT_RADIUS = 0.1;
+
+/**
+ * Vitesse plafond retenue pour borner l'avance plausible d'un véhicule entre deux relevés, en
+ * kilomètres par seconde (90 km/h). Elle restreint la projection sur la shape autour de la dernière
+ * abscisse connue : une shape qui repasse au même endroit — boucle, tronçon emprunté dans les deux
+ * sens — offre sinon plusieurs projetés également plausibles.
+ */
+export const MAX_VEHICLE_SPEED = 0.025;
+
+/**
+ * Recul toléré sur la shape d'un relevé à l'autre, en kilomètres. Un véhicule n'avance pas toujours :
+ * le bruit GPS le fait osciller, et il manœuvre pour de bon aux terminus.
+ */
+export const PROJECTION_BACKTRACK = 0.2;
+
+/**
+ * Portée minimale de la fenêtre de projection, en kilomètres. Elle absorbe les longues absences — un
+ * véhicule perdu puis retrouvé plus loin — sans pour autant rouvrir la shape entière.
+ */
+export const MIN_PROJECTION_REACH = 2;
+
+/**
  * Girouettes qui signalent un retour au dépôt : un véhicule qui les affiche est haut-le-pied, il
  * roule mais n'assure plus rien. Sa position est publiée avec cette destination-là, mais jamais la
  * course que le SAE continue de lui prêter.
