@@ -59,8 +59,8 @@ export type AlertPeriod = { start: string | null; end: string | null; dailyWindo
  */
 export type AlertAnalysis = { removedStops: RemovedStop[]; periods: AlertPeriod[] };
 
-// Toutes les alertes sont analysées en UN seul appel : le schéma renvoie un résultat par alerte,
-// identifié par l'`id` fourni en entrée.
+// Chaque appel porte plusieurs alertes : le schéma renvoie un résultat par alerte, identifié par
+// l'`id` fourni en entrée.
 const BATCH_SCHEMA = {
 	type: "object",
 	additionalProperties: false,
@@ -150,6 +150,18 @@ PLAGES D'ARRÊTS :
 - Si le texte décrit une PLAGE d'arrêts consécutifs ("de X à Y", "entre X et Y", "des arrêts X à Y", "de X jusqu'à Y"), renvoie UN SEUL removedStop avec stopName="X" (premier arrêt de la plage) et toStopName="Y" (dernier arrêt). Tous les arrêts intermédiaires seront supprimés automatiquement.
 - Le « de » est souvent omis : dès que DEUX noms d'arrêts encadrent un « à », c'est une plage (« terminus provisoire Touyé, Belvédère à Sente d'Houppeville non accessible » → stopName="Belvédère", toStopName="Sente d'Houppeville"). Ne te contente PAS du seul arrêt cité dans le titre : c'est la description qui donne l'étendue exacte.
 - Pour un arrêt seul, ou une liste explicite ("X, Y et Z"), renvoie des entrées séparées avec toStopName="".
+- Quand une phrase enchaîne PLUSIEURS groupes d'arrêts, chacun garde sa propre forme : un groupe écrit
+  en plage RESTE une plage, même si le groupe voisin est une liste d'arrêts isolés. N'aplatis JAMAIS une
+  plage sur sa seule dernière borne.
+- Un arrêt déjà cité — dans un groupe précédent, ou comme destination d'un « vers » — reste une borne
+  valable de la plage suivante : ne l'omets pas sous prétexte qu'il se répète.
+  Ex. « arrêts non desservis Douaumont et Gare de St Etienne vers Gare de St Etienne et de Gare de St
+  Etienne à Corneille vers Les Bouttières » → EXACTEMENT TROIS entrées, aucune de moins :
+    1. stopName="Douaumont", toStopName="" (vers Gare de St Etienne) ;
+    2. stopName="Gare de St Etienne", toStopName="" (vers Gare de St Etienne) — le premier groupe en
+       compte DEUX, ne le réduis pas à Douaumont sous prétexte que la Gare est citée plus loin ;
+    3. stopName="Gare de St Etienne", toStopName="Corneille" (vers Les Bouttières) — la PLAGE du second
+       groupe, et surtout PAS "Corneille" seul.
 
 CIRCULATION INTERROMPUE (champ "interruption") :
 - Mets "interruption": true UNIQUEMENT quand le texte décrit une CIRCULATION COUPÉE sur un tronçon, entre deux points
@@ -282,7 +294,7 @@ export function flushCache() {
 
 /**
  * Analyse un lot d'alertes. Les alertes déjà en cache (hash inchangé) ne sont pas renvoyées à
- * l'IA ; toutes les autres sont traitées en UN SEUL appel. Renvoie un résultat par alerte.
+ * l'IA ; toutes les autres partent en appels de {@link BATCH_SIZE}. Renvoie un résultat par alerte.
  */
 export async function analyzeAlerts(alerts: AlertInput[]): Promise<Map<string, AlertAnalysis>> {
 	const result = new Map<string, AlertAnalysis>();
@@ -323,7 +335,36 @@ export async function analyzeAlerts(alerts: AlertInput[]): Promise<Map<string, A
 
 // ---
 
+/**
+ * Nombre d'alertes envoyées par appel. Le modèle décroche sur un lot trop gros : à une quarantaine
+ * d'alertes en un seul appel, sa sortie varie d'un run à l'autre — sur les alertes qui visent
+ * plusieurs lignes, des lignes entières disparaissent des arrêts supprimés ou changent de sens. Le
+ * surcoût du découpage ne se paie qu'aux changements du flux, le cache servant tout le reste.
+ */
+const BATCH_SIZE = 10;
+
+/**
+ * Analyse un lot d'alertes en le découpant en appels de {@link BATCH_SIZE}. Les appels sont
+ * indépendants et partent ensemble : l'échec de l'un n'emporte pas les autres, et les alertes qu'il
+ * portait seront simplement réanalysées au prochain poll.
+ */
 async function runBatch(alerts: AlertInput[]): Promise<Map<string, AlertAnalysis>> {
+	const out = new Map<string, AlertAnalysis>();
+
+	const chunks: AlertInput[][] = [];
+	for (let index = 0; index < alerts.length; index += BATCH_SIZE) {
+		chunks.push(alerts.slice(index, index + BATCH_SIZE));
+	}
+	console.log(`➔ Analyzing ${alerts.length} alerts in ${chunks.length} batch(es).`);
+
+	for (const analyses of await Promise.all(chunks.map((chunk) => runChunk(chunk)))) {
+		for (const [id, analysis] of analyses) out.set(id, analysis);
+	}
+
+	return out;
+}
+
+async function runChunk(alerts: AlertInput[]): Promise<Map<string, AlertAnalysis>> {
 	const out = new Map<string, AlertAnalysis>();
 
 	const anthropic = getClient();
@@ -743,7 +784,7 @@ function getClient(): Anthropic | undefined {
 
 // Version du schéma/prompt d'analyse : à incrémenter quand la logique change, pour invalider
 // proprement les caches existants (ex. ajout des bornes horaires dans la période d'effet).
-const ANALYSIS_VERSION = 11;
+const ANALYSIS_VERSION = 12;
 
 function hashAlert(alert: AlertInput): string {
 	// On inclut le contexte des lignes (terminus/sens) : si le GTFS change, l'analyse est
