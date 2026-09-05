@@ -15,6 +15,11 @@ services:
       - "127.0.0.1:50001:3000"
     # Persiste le cache d'analyse IA des Service Alerts dans le dossier .cache du projet
     # (le workdir est /app → le cache est écrit dans /app/.cache).
+    #
+    # Et l'état du producteur — mouvements constatés, entrées publiées, localisations — pour qu'un
+    # redémarrage ne se voie pas dans le feed. L'image en embarque un gabarit vide : sans lui, Docker
+    # créerait un dossier à la place du fichier lors du premier démarrage.
     volumes:
       - ./.cache:/app/.cache
+      - ./.state.json:/app/.state.json
     restart: unless-stopped

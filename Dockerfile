@@ -38,5 +38,9 @@ RUN apk add --no-cache tini
 COPY --from=production_dependencies /app/node_modules ./node_modules
 COPY --from=builder /app/dist/ ./dist
 
+# Gabarit du cache d'état : il donne au bind-mount du compose un fichier à recouvrir. Sans lui,
+# Docker créerait côté hôte un dossier .state.json, que le producteur ne saurait ni lire ni écrire.
+RUN touch /app/.state.json
+
 EXPOSE 3000
 CMD ["/sbin/tini", "--", "node", "/app/dist/index.js"]

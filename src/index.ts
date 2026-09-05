@@ -11,6 +11,7 @@ import {
 	PORT,
 	REALTIME_LINES,
 	SERVICE_ALERTS_URL,
+	STATE_CACHE_PATH,
 	STATIC_GTFS_URL,
 	TRIP_UPDATES_URL,
 	VEHICLE_MONITORING_INTERVAL,
@@ -30,6 +31,7 @@ import { useVehicleMonitoring } from "./gtfs-rt/use-vehicle-monitoring.js";
 import { useVehicleRegistry } from "./gtfs-rt/use-vehicle-registry.js";
 import { useVerificationFeed, type VerifiedVehicle } from "./gtfs-rt/use-verification-feed.js";
 import { isDepotDestination, verifyVehicle } from "./gtfs-rt/verify-vehicle.js";
+import { loadState, saveState } from "./state-cache.js";
 import { useVehicleOccupancyStatuses } from "./utils/use-vehicle-occupancy-status.js";
 
 // Charge un fichier .env s'il existe (clé ANTHROPIC_API_KEY notamment).
@@ -45,9 +47,13 @@ console.log(` ,----.,--------.,------.,---.        ,------.,--------. ,--------.
 '  '--'  ||  |   |  |\`  .-'    |      |  |\\  \\   |  |       |  |  '  '--'\\|  | |  ||  |\\  \\
  \`------' \`--'   \`--'   \`-----'       \`--' '--'  \`--'       \`--'   \`-----'\`--' \`--'\`--' '--'`);
 
+// Ce que le producteur savait à son dernier arrêt : sans lui, un redémarrage se verrait dans le feed
+// (cf. `loadState`). `undefined` quand il n'y a rien à relire, ou que ce qu'il y a est trop vieux.
+const restored = loadState(STATE_CACHE_PATH, Math.floor(Date.now() / 1000));
+
 const store = useRealtimeStore();
-const registry = useVehicleRegistry();
-const movementTracker = useMovementTracker();
+const registry = useVehicleRegistry(restored?.vehicles);
+const movementTracker = useMovementTracker(restored?.movements);
 const vehicleOccupancyStatuses = useVehicleOccupancyStatuses();
 
 const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL);
@@ -57,7 +63,7 @@ const vehicleMonitoring = await useVehicleMonitoring(VEHICLE_MONITORING_URL, VEH
 const staticGtfs = await useStaticGtfs(STATIC_GTFS_URL, GTFS_CHECK_INTERVAL);
 // Le locator lit `staticGtfs.data` à chaque appel : il suit donc les rechargements du GTFS de
 // lui-même, sans avoir à s'y réabonner.
-const vehicleLocator = useVehicleLocator(staticGtfs);
+const vehicleLocator = useVehicleLocator(staticGtfs, restored?.locations);
 const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs);
 
 const hono = new Hono();
@@ -110,7 +116,7 @@ async function poll() {
 	let published = 0;
 	let refreshed = 0;
 	let staleRecords = 0;
-	let firstSightings = 0;
+	let unprovenVehicles = 0;
 	let frozenVehicles = 0;
 	let untrackedLines = 0;
 	let deadheads = 0;
@@ -151,9 +157,10 @@ async function poll() {
 		// qu'elle a encore le véhicule au bout du fil, et date sa position.
 		const movement = movementTracker.observe(vehicleId, position, sourceTimestamp, nowSeconds);
 
-		// Première apparition : on ne sait pas encore si ce véhicule roule ou dort depuis des heures.
-		if (movement.kind === "first-sight") {
-			firstSightings += 1;
+		// Jamais vu bouger : on ne sait pas si ce véhicule roule ou dort depuis des heures. Il n'entre
+		// dans le feed qu'au premier mouvement constaté, et non au relevé suivant sa découverte.
+		if (movement.kind === "unproven") {
+			unprovenVehicles += 1;
 			continue;
 		}
 
@@ -255,8 +262,14 @@ async function poll() {
 		);
 	}
 
+	saveState(
+		STATE_CACHE_PATH,
+		{ movements: movementTracker.snapshot(), vehicles: registry.snapshot(), locations: vehicleLocator.snapshot() },
+		nowSeconds,
+	);
+
 	console.log(
-		`✓ ${registry.publishable(nowSeconds).size} positions (${published} verified, ${refreshed} position-only, ${deadheads} deadheading, ${staleRecords} stale records, ${firstSightings} first sightings, ${frozenVehicles} motionless, ${untrackedLines} on untracked lines, ${unknownVehicles} never published, ${unlocated} unlocated, ${forgotten} forgotten).`,
+		`✓ ${registry.publishable(nowSeconds).size} positions (${published} verified, ${refreshed} position-only, ${deadheads} deadheading, ${staleRecords} stale records, ${unprovenVehicles} never moved, ${frozenVehicles} motionless, ${untrackedLines} on untracked lines, ${unknownVehicles} never published, ${unlocated} unlocated, ${forgotten} forgotten).`,
 	);
 }
 

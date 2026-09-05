@@ -4,7 +4,7 @@ import { VEHICLE_MEMORY_DURATION, VEHICLE_STALENESS } from "../config.js";
 import type { VehicleLocation } from "./use-vehicle-locator.js";
 
 /** Ce que le registre retient d'un véhicule entre deux relevés. */
-type RegisteredVehicle = {
+export type RegisteredVehicle = {
 	/** L'entrée telle qu'elle sera émise, position et horodatage compris. */
 	entity: GtfsRealtime.transit_realtime.IVehiclePosition;
 	/**
@@ -31,11 +31,19 @@ type RegisteredVehicle = {
  *
  * Et les deux durées : passé {@link VEHICLE_STALENESS} l'entrée cesse d'être émise, passé
  * {@link VEHICLE_MEMORY_DURATION} elle est oubliée.
+ *
+ * `restored` rend au registre les entrées du dernier arrêt du producteur (cf. `loadState`) : le
+ * feed repart ainsi peuplé, et les véhicules trop vieux en sortent d'eux-mêmes au premier relevé.
  */
-export function useVehicleRegistry() {
-	const vehicles = new Map<string, RegisteredVehicle>();
+export function useVehicleRegistry(restored: Iterable<readonly [string, RegisteredVehicle]> = []) {
+	const vehicles = new Map<string, RegisteredVehicle>(restored);
 
 	return {
+		/** L'état du registre, tel qu'il sera réécrit sur disque. */
+		snapshot(): [string, RegisteredVehicle][] {
+			return [...vehicles];
+		},
+
 		/** Vrai si le véhicule a déjà été vu en circulation, c'est-à-dire publié au moins une fois. */
 		has(vehicleId: string): boolean {
 			return vehicles.has(vehicleId);

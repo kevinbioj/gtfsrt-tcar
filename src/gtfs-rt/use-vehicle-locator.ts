@@ -21,7 +21,7 @@ export type VehicleLocation = {
 };
 
 /** Ce que le locator retient d'un véhicule d'un relevé à l'autre. */
-type LocatedVehicle = {
+export type LocatedVehicle = {
 	/** Course sur laquelle la localisation a été faite : elle ne vaut sur aucune autre. */
 	tripId: string;
 	/** Abscisse curviligne du dernier projeté retenu, en kilomètres. */
@@ -46,11 +46,23 @@ type LocatedVehicle = {
  * puis à chercher le premier arrêt qu'il n'a pas encore dépassé.
  *
  * Rien n'y périme : c'est le registre qui décide de ce qui reste diffusé.
+ *
+ * `restored` reprend les projetés du dernier arrêt du producteur (cf. `loadState`) : sans eux, la
+ * fenêtre de plausibilité repartirait grande ouverte et une shape qui repasse au même endroit
+ * pourrait situer le véhicule à l'autre bout de sa course.
  */
-export function useVehicleLocator(staticGtfs: { data: StaticGtfs }) {
-	const located = new Map<string, LocatedVehicle>();
+export function useVehicleLocator(
+	staticGtfs: { data: StaticGtfs },
+	restored: Iterable<readonly [string, LocatedVehicle]> = [],
+) {
+	const located = new Map<string, LocatedVehicle>(restored);
 
 	return {
+		/** L'état du locator, tel qu'il sera réécrit sur disque. */
+		snapshot(): [string, LocatedVehicle][] {
+			return [...located];
+		},
+
 		/**
 		 * Le prochain arrêt du véhicule sur `tripId`, ou `undefined` quand on ne sait pas le situer et
 		 * qu'on n'a rien de plus ancien à proposer. `position` est celle qui sera publiée, c'est-à-dire
