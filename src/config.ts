@@ -220,6 +220,38 @@ export const LINE_DESTINATIONS = new Map<string, string[]>([
 	["98", ["Hôtel de Ville", "La Pléiade", "Cateliers"]],
 ]);
 
+/**
+ * Un quai qu'une info trafic annonce supprimé mais que les courses desservent bel et bien : la
+ * desserte nominale est supprimée, mais un arrêt provisoire a été graphiqué dans le GTFS, et il n'y a
+ * donc rien à annoncer supprimé.
+ *
+ * L'exception ne vaut que pour l'info trafic citée : si une AUTRE alerte supprime le même quai, il
+ * repasse en supprimé.
+ *
+ *  - `alertId` : numéro de l'info trafic, tel qu'il termine l'identifiant d'entité du flux d'alertes
+ *    (« 00000000-0000-0000-0000-000000022467 » → « 22467 ») ;
+ *  - `routeId` : identifiant GTFS de la ligne — le libellé commercial n'y figure pas (la F7 est
+ *    `TCAR:07`) ;
+ *  - `stopIds` : identifiants GTFS des QUAIS, pas du nom d'arrêt : un arrêt en porte plusieurs, et
+ *    seuls ceux que la ligne dessert vraiment sont visés. Le sens n'a donc pas à être déclaré, le
+ *    quai le porte déjà — un arrêt desservi dans les deux sens y met simplement ses deux quais.
+ *
+ * Un quai inconnu du GTFS est ignoré avec un avertissement dans le journal.
+ */
+export type ServedStop = {
+	alertId: string;
+	routeId: string;
+	stopIds: string[];
+};
+
+/** Quais desservis malgré l'info trafic qui les annonce supprimés (cf. {@link ServedStop}). */
+export const SERVED_STOPS: ServedStop[] = [
+	{ alertId: "23212", routeId: "TCAR:07", stopIds: ["TCAR:DRURO2", "TCAR:DRURO3"] },
+	{ alertId: "22467", routeId: "TCAR:15", stopIds: ["TCAR:MARTA1"] },
+	{ alertId: "315", routeId: "TCAR:15", stopIds: ["TCAR:MARTA4"] },
+	{ alertId: "22083", routeId: "TCAR:20", stopIds: ["TCAR:BEAU10", "TCAR:BEAU3"] },
+];
+
 export const SERVICE_ALERTS_URL = "https://hexatransit.fr/datasets/services_rt/astuce/service_alerts.pb";
 export const STATIC_GTFS_URL = "https://gtfs.bus-tracker.fr/astuce-tcar.zip";
 export const ALERTS_POLL_INTERVAL = Temporal.Duration.from({ minutes: 5 }).total("milliseconds");

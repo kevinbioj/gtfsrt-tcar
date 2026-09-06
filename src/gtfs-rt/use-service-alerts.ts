@@ -9,6 +9,7 @@ import {
 	pruneCache,
 	type RemovedStop,
 } from "../ai/analyze-alert.js";
+import { SERVED_STOPS } from "../config.js";
 import {
 	normalizeStopName,
 	type OrderedStop,
@@ -23,9 +24,15 @@ const SKIPPED = GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.Schedule
 
 const TIME_ZONE = "Europe/Paris";
 
+/** Aucune exception : partagé plutôt que réalloué pour chaque ligne de chaque alerte. */
+const EMPTY_SERVED: ReadonlySet<string> = new Set();
+
 export type SkipBucket = { directionId: number | null; stopIds: Set<string> };
 /** routeId → buckets d'arrêts à sauter (SKIPPED), par sens. */
 export type SkipIndex = Map<string, SkipBucket[]>;
+
+/** Numéro d'info trafic → routeId → quais que cette alerte ne doit PAS faire sauter. */
+type ServedStopIndex = Map<string, Map<string, Set<string>>>;
 
 type AlertsState = { headerTimestamp: string | null };
 type PollResult = { skipIndex: SkipIndex; headerTimestamp: string | null };
@@ -185,6 +192,8 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 
 		const skipIndex: SkipIndex = new Map();
 		const feedAlertIds = new Set<string>();
+		// Résolu à chaque poll : le GTFS statique se recharge sous nos pieds, et avec lui les quais.
+		const servedStops = resolveServedStops(gtfs);
 
 		// 1. Collecte des alertes touchant une ligne du réseau.
 		const inputs: AlertInput[] = [];
@@ -217,10 +226,13 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 			if (!analysis || analysis.removedStops.length === 0 || !isActive(analysis.periods, now)) continue;
 
 			const routeIds = routesById.get(input.id) ?? new Set();
+			const served = servedStops.get(alertNumber(input.id));
 			for (const removedStop of analysis.removedStops) {
 				for (const route of removedStop.routes) {
 					if (!routeIds.has(route.routeId)) continue;
-					removedCount += applyRemovedStop(skipIndex, gtfs, removedStop, route.routeId, route.directionId);
+					const servedIds = served?.get(route.routeId) ?? EMPTY_SERVED;
+					const { routeId, directionId } = route;
+					removedCount += applyRemovedStop(skipIndex, gtfs, removedStop, routeId, directionId, servedIds);
 				}
 			}
 		}
@@ -367,6 +379,9 @@ function buildRouteContext(routeIds: Set<string>, gtfs: StaticGtfs): AlertRouteC
 /**
  * Ajoute à l'index les arrêts à sauter pour un arrêt supprimé (ou une plage « de X à Y »)
  * sur une ligne/sens. Renvoie le nombre de contributions (pour les logs). Hors périmètre → 0.
+ *
+ * `served` porte les quais que l'alerte en cours ne doit pas faire sauter (cf. {@link SERVED_STOPS}) :
+ * ils sont retranchés de chaque contribution.
  */
 function applyRemovedStop(
 	skipIndex: SkipIndex,
@@ -374,6 +389,7 @@ function applyRemovedStop(
 	removedStop: RemovedStop,
 	routeId: string,
 	directionId: number | null,
+	served: ReadonlySet<string>,
 ): number {
 	const startName = normalizeStopName(removedStop.stopName);
 	const directions = directionId === null ? [0, 1] : [directionId];
@@ -383,8 +399,7 @@ function applyRemovedStop(
 		// Match global, exact puis tolérant (chemin rapide).
 		const resolved = resolveStopIds(gtfs, startName);
 		if (resolved !== undefined) {
-			mergeSkip(skipIndex, routeId, directionId, resolved);
-			return 1;
+			return mergeSkipUnlessServed(skipIndex, routeId, directionId, resolved, served);
 		}
 		// Sinon, match flou dans le contexte de la ligne (ex. « Piscine » → « Piscine de Bihorel »).
 		let count = 0;
@@ -393,8 +408,7 @@ function applyRemovedStop(
 			const canonical = stops[findStopIndex(stops, startName)]?.name;
 			const stopIds = canonical ? gtfs.stopNameIndex.get(canonical) : undefined;
 			if (stopIds && stopIds.size > 0) {
-				mergeSkip(skipIndex, routeId, dir, stopIds);
-				count += 1;
+				count += mergeSkipUnlessServed(skipIndex, routeId, dir, stopIds, served);
 			}
 		}
 		return count;
@@ -447,11 +461,82 @@ function applyRemovedStop(
 
 	let count = 0;
 	for (const dir of directions) {
-		mergeSkip(skipIndex, routeId, dir, stopIds);
-		count += 1;
+		count += mergeSkipUnlessServed(skipIndex, routeId, dir, stopIds, served);
 	}
 
 	return count;
+}
+
+/**
+ * Indexe la table {@link SERVED_STOPS} par info trafic et par ligne. Un quai que le GTFS courant ne
+ * connaît pas — coquille, identifiant renuméroté — est ignoré : mieux vaut annoncer l'arrêt supprimé,
+ * comme le veut l'info trafic, que de croire neutraliser une suppression sans rien neutraliser.
+ */
+function resolveServedStops(gtfs: StaticGtfs): ServedStopIndex {
+	const index: ServedStopIndex = new Map();
+
+	for (const servedStop of SERVED_STOPS) {
+		const alertId = alertNumber(servedStop.alertId);
+		let routes = index.get(alertId);
+		if (routes === undefined) {
+			routes = new Map();
+			index.set(alertId, routes);
+		}
+
+		let stopIds = routes.get(servedStop.routeId);
+		if (stopIds === undefined) {
+			stopIds = new Set();
+			routes.set(servedStop.routeId, stopIds);
+		}
+
+		for (const stopId of servedStop.stopIds) {
+			if (!gtfs.stopNames.has(stopId)) {
+				console.warn(`✘ Served stop ignored: unknown stop "${stopId}".`);
+				continue;
+			}
+			stopIds.add(stopId);
+		}
+	}
+
+	return index;
+}
+
+/**
+ * Numéro d'info trafic porté par un identifiant d'entité du flux d'alertes
+ * (« 00000000-0000-0000-0000-000000022467 » → « 22467 »). Les numéros déclarés dans
+ * {@link SERVED_STOPS} passent par la même moulinette, qu'ils soient écrits nus ou en entier.
+ */
+function alertNumber(alertId: string): string {
+	const tail = alertId.split("-").at(-1) ?? alertId;
+	return tail.replace(/^0+(?=\d)/, "");
+}
+
+/**
+ * Verse dans l'index les quais à sauter, moins ceux que `served` déclare desservis. Renvoie 1 si le
+ * sens a été alimenté, 0 s'il ne restait plus rien à supprimer.
+ *
+ * Le retranchement ne regarde pas le sens : un quai n'est desservi que dans un sens, celui-là même
+ * que l'exception vise. Un quai que les deux sens empruntent est de toute façon desservi dans les
+ * deux — l'exception dit qu'on s'y arrête, pas qu'on s'y arrête dans un sens seulement.
+ */
+function mergeSkipUnlessServed(
+	skipIndex: SkipIndex,
+	routeId: string,
+	directionId: number | null,
+	stopIds: Set<string>,
+	served: ReadonlySet<string>,
+): number {
+	let kept = stopIds;
+	if (served.size > 0) {
+		kept = new Set<string>();
+		for (const stopId of stopIds) {
+			if (!served.has(stopId)) kept.add(stopId);
+		}
+	}
+
+	if (kept.size === 0) return 0;
+	mergeSkip(skipIndex, routeId, directionId, kept);
+	return 1;
 }
 
 /**
