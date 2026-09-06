@@ -18,8 +18,35 @@ export type OrderedStop = { stopId: string; name: string };
  */
 export type TripStop = { stopSequence: number; stopId: string; distance: number };
 
-/** Ce que le GTFS statique dit d'une course : sa ligne, son sens, sa destination affichée, son tracé. */
-export type TripMeta = { routeId: string; directionId: number; headsign: string; shapeId: string };
+/**
+ * Ce que le GTFS statique dit d'une course : sa ligne, son sens, sa destination affichée, son tracé,
+ * et le service qui décide des jours où elle circule.
+ */
+export type TripMeta = {
+	routeId: string;
+	directionId: number;
+	headsign: string;
+	shapeId: string;
+	serviceId: string;
+};
+
+/**
+ * Le calendrier hebdomadaire d'un service : les jours qu'il dessert et l'enveloppe de dates où cela
+ * vaut. Les exceptions datées de `calendar_dates.txt` s'y ajoutent ou s'en retranchent ensuite (cf.
+ * {@link StaticGtfs.calendarExceptions}).
+ */
+export type ServiceCalendar = {
+	/** Jours desservis, du lundi (indice 0) au dimanche (indice 6), dans l'ordre des colonnes du GTFS. */
+	weekdays: boolean[];
+	/** Bornes INCLUSES de validité, au format `AAAAMMJJ` du GTFS. Vides si le fichier ne les déclare pas. */
+	startDate: string;
+	endDate: string;
+};
+
+/** Journée ajoutée par une exception de `calendar_dates.txt`. */
+export const SERVICE_ADDED = 1;
+/** Journée retirée par une exception de `calendar_dates.txt`. */
+export const SERVICE_REMOVED = 2;
 
 export type StaticGtfs = {
 	/** Nom d'arrêt normalisé → identifiants des quais (enfants) portant ce nom. */
@@ -42,6 +69,28 @@ export type StaticGtfs = {
 	 * {@link departureEpoch} en fait un instant.
 	 */
 	tripDepartures: Map<string, number>;
+	/**
+	 * tripId → arrivée théorique au dernier arrêt, dans la même unité que {@link tripDepartures}. Les
+	 * deux bornent la course, seule façon de dire si elle circule à un instant donné : son départ ne
+	 * suffit pas, une course partie il y a vingt minutes dessert encore des arrêts.
+	 */
+	tripArrivals: Map<string, number>;
+	/**
+	 * serviceId → jours desservis et enveloppe de validité (`calendar.txt`). Vide lorsque le GTFS ne
+	 * publie pas ce fichier — celui du réseau ne porte que des exceptions datées, qui suffisent alors
+	 * à elles seules.
+	 */
+	calendars: Map<string, ServiceCalendar>;
+	/**
+	 * serviceId → date `AAAAMMJJ` → {@link SERVICE_ADDED} ou {@link SERVICE_REMOVED}, depuis
+	 * `calendar_dates.txt`.
+	 */
+	calendarExceptions: Map<string, Map<string, number>>;
+	/**
+	 * serviceId → courses de ce service : l'index inverse de `trips.txt`, qui permet de parcourir une
+	 * journée de service sans balayer les seize mille courses du GTFS.
+	 */
+	serviceTrips: Map<string, string[]>;
 	/** stopId → libellé de l'arrêt, tel que le GTFS l'écrit. */
 	stopNames: Map<string, string>;
 	/** stopId → coordonnées du quai. */
@@ -271,6 +320,10 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		routeStopSequences: new Map(),
 		tripStopSequences: new Map(),
 		tripDepartures: new Map(),
+		tripArrivals: new Map(),
+		calendars: new Map(),
+		calendarExceptions: new Map(),
+		serviceTrips: new Map(),
 		stopNames: new Map(),
 		stopCoordinates: new Map(),
 		trips: new Map(),
@@ -291,7 +344,9 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 				file.name === "stops.txt" ||
 				file.name === "trips.txt" ||
 				file.name === "stop_times.txt" ||
-				file.name === "shapes.txt",
+				file.name === "shapes.txt" ||
+				file.name === "calendar.txt" ||
+				file.name === "calendar_dates.txt",
 		});
 
 		if (!files["stops.txt"] || !files["trips.txt"]) {
@@ -301,13 +356,25 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 
 		const decoder = new TextDecoder();
 		const { stopNameIndex, stopKeyIndex, idToName, coordinates } = buildStops(decoder.decode(files["stops.txt"]));
-		const { routeDirections, tripMeta } = buildTrips(decoder.decode(files["trips.txt"]));
+		const { routeDirections, tripMeta, serviceTrips } = buildTrips(decoder.decode(files["trips.txt"]));
+		const calendars = files["calendar.txt"] ? buildCalendar(decoder.decode(files["calendar.txt"])) : new Map();
+		const calendarExceptions = files["calendar_dates.txt"]
+			? buildCalendarDates(decoder.decode(files["calendar_dates.txt"]))
+			: new Map();
 		const { shapes, scales } = files["shapes.txt"]
 			? buildShapes(decoder.decode(files["shapes.txt"]))
 			: { shapes: new Map<string, ShapePoint[]>(), scales: new Map<string, number>() };
-		const { routeStopSequences, tripStopSequences, tripDepartures, projectedStops } = files["stop_times.txt"]
+		const { routeStopSequences, tripStopSequences, tripDepartures, tripArrivals, projectedStops } = files[
+			"stop_times.txt"
+		]
 			? buildSequences(decoder.decode(files["stop_times.txt"]), tripMeta, idToName, shapes, scales, coordinates)
-			: { routeStopSequences: new Map(), tripStopSequences: new Map(), tripDepartures: new Map(), projectedStops: 0 };
+			: {
+					routeStopSequences: new Map(),
+					tripStopSequences: new Map(),
+					tripDepartures: new Map(),
+					tripArrivals: new Map(),
+					projectedStops: 0,
+				};
 
 		// Le GTFS actuel déclare une abscisse pour chaque arrêt : qu'il faille en projeter signale une
 		// source qui a changé de forme, et un repli nettement plus fragile sur les shapes à boucle.
@@ -321,7 +388,7 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		}
 
 		console.log(
-			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${itineraries} route itineraries, ${tripStopSequences.size} trip schedules, ${shapes.size} shapes from GTFS.`,
+			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${itineraries} route itineraries, ${tripStopSequences.size} trip schedules, ${shapes.size} shapes, ${serviceTrips.size} services from GTFS.`,
 		);
 		return {
 			data: {
@@ -331,6 +398,10 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 				routeStopSequences,
 				tripStopSequences,
 				tripDepartures,
+				tripArrivals,
+				calendars,
+				calendarExceptions,
+				serviceTrips,
 				stopNames: idToName,
 				stopCoordinates: coordinates,
 				trips: tripMeta,
@@ -446,18 +517,21 @@ function indexStopName(
 function buildTrips(csv: string): {
 	routeDirections: Map<string, RouteDirection[]>;
 	tripMeta: Map<string, TripMeta>;
+	serviceTrips: Map<string, string[]>;
 } {
 	const tripMeta = new Map<string, TripMeta>();
+	const serviceTrips = new Map<string, string[]>();
 	const rows = parseCsv(csv);
 	const header = rows.next().value;
-	if (!header) return { routeDirections: new Map(), tripMeta };
+	if (!header) return { routeDirections: new Map(), tripMeta, serviceTrips };
 
 	const routeCol = header.indexOf("route_id");
 	const tripCol = header.indexOf("trip_id");
 	const headsignCol = header.indexOf("trip_headsign");
 	const directionCol = header.indexOf("direction_id");
 	const shapeCol = header.indexOf("shape_id");
-	if (routeCol === -1 || directionCol === -1) return { routeDirections: new Map(), tripMeta };
+	const serviceCol = header.indexOf("service_id");
+	if (routeCol === -1 || directionCol === -1) return { routeDirections: new Map(), tripMeta, serviceTrips };
 
 	// routeId → directionId → set de headsigns
 	const grouped = new Map<string, Map<number, Set<string>>>();
@@ -472,7 +546,18 @@ function buildTrips(csv: string): {
 		const tripId = tripCol === -1 ? "" : (row[tripCol] ?? "");
 		const headsign = headsignCol === -1 ? "" : (row[headsignCol] ?? "");
 		const shapeId = shapeCol === -1 ? "" : (row[shapeCol] ?? "");
-		if (tripId) tripMeta.set(tripId, { routeId, directionId, headsign, shapeId });
+		const serviceId = serviceCol === -1 ? "" : (row[serviceCol] ?? "");
+		if (tripId) {
+			tripMeta.set(tripId, { routeId, directionId, headsign, shapeId, serviceId });
+			if (serviceId) {
+				let trips = serviceTrips.get(serviceId);
+				if (trips === undefined) {
+					trips = [];
+					serviceTrips.set(serviceId, trips);
+				}
+				trips.push(tripId);
+			}
+		}
 
 		let directions = grouped.get(routeId);
 		if (directions === undefined) {
@@ -496,7 +581,77 @@ function buildTrips(csv: string): {
 		);
 	}
 
-	return { routeDirections, tripMeta };
+	return { routeDirections, tripMeta, serviceTrips };
+}
+
+/** Colonnes des jours de `calendar.txt`, du lundi au dimanche — l'ordre de {@link ServiceCalendar.weekdays}. */
+const DAY_COLUMNS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+
+/**
+ * Calendriers hebdomadaires de `calendar.txt`. Un fichier qui ne déclare pas toutes ses colonnes de
+ * jours est ignoré en bloc : un service dont on ne saurait pas quels jours il dessert vaudrait moins
+ * que pas de service du tout, puisqu'il ferait circuler des courses n'importe quand.
+ */
+function buildCalendar(csv: string): Map<string, ServiceCalendar> {
+	const calendars = new Map<string, ServiceCalendar>();
+
+	const rows = parseCsv(csv);
+	const header = rows.next().value;
+	if (!header) return calendars;
+
+	const idCol = header.indexOf("service_id");
+	const startCol = header.indexOf("start_date");
+	const endCol = header.indexOf("end_date");
+	const dayCols = DAY_COLUMNS.map((day) => header.indexOf(day));
+	if (idCol === -1 || dayCols.some((col) => col === -1)) return calendars;
+
+	for (const row of rows) {
+		const serviceId = row[idCol];
+		if (!serviceId) continue;
+
+		calendars.set(serviceId, {
+			weekdays: dayCols.map((col) => row[col] === "1"),
+			startDate: startCol === -1 ? "" : (row[startCol] ?? ""),
+			endDate: endCol === -1 ? "" : (row[endCol] ?? ""),
+		});
+	}
+
+	return calendars;
+}
+
+/**
+ * Exceptions datées de `calendar_dates.txt`, indexées par service puis par date. Le GTFS du réseau
+ * n'emploie que ce fichier — chaque journée de chaque service y est énumérée en ajout — mais rien
+ * n'oblige son producteur à s'y tenir, et un GTFS classique s'en sert au contraire pour amender un
+ * calendrier hebdomadaire.
+ */
+function buildCalendarDates(csv: string): Map<string, Map<string, number>> {
+	const exceptions = new Map<string, Map<string, number>>();
+
+	const rows = parseCsv(csv);
+	const header = rows.next().value;
+	if (!header) return exceptions;
+
+	const idCol = header.indexOf("service_id");
+	const dateCol = header.indexOf("date");
+	const typeCol = header.indexOf("exception_type");
+	if (idCol === -1 || dateCol === -1 || typeCol === -1) return exceptions;
+
+	for (const row of rows) {
+		const serviceId = row[idCol];
+		const date = row[dateCol];
+		const exceptionType = Number.parseInt(row[typeCol] ?? "", 10);
+		if (!serviceId || !date || Number.isNaN(exceptionType)) continue;
+
+		let dates = exceptions.get(serviceId);
+		if (dates === undefined) {
+			dates = new Map();
+			exceptions.set(serviceId, dates);
+		}
+		dates.set(date, exceptionType);
+	}
+
+	return exceptions;
 }
 
 /** Une ligne de shapes.txt, avant tri et cumul des distances. */
@@ -581,8 +736,10 @@ function buildShapes(csv: string): { shapes: Map<string, ShapePoint[]>; scales: 
  *    à étendre les plages « de X à Y » ;
  *  - `tripStopSequences` : par tripId, l'horaire théorique ordonné — sert à réinsérer un arrêt
  *    supprimé absent du GTFS-RT, avec son stop_sequence, et à situer un véhicule sur sa course ;
- *  - `tripDepartures` : par tripId, l'heure de départ du premier arrêt — sert à distinguer le
- *    véhicule qui attend son départ de celui que la source a perdu (cf. `useVehicleRegistry`).
+ *  - `tripDepartures` et `tripArrivals` : par tripId, le départ du premier arrêt et l'arrivée au
+ *    dernier — le premier sert à distinguer le véhicule qui attend son départ de celui que la source
+ *    a perdu (cf. `useVehicleRegistry`), les deux ensemble à dire quelles courses circulent dans
+ *    l'heure à venir (cf. `scheduledTripUpdates`).
  *
  * Chaque arrêt y reçoit son abscisse curviligne sur la shape de la course, remise à l'échelle de nos
  * kilomètres par le facteur qu'a déduit {@link buildShapes}. `projectedStops` compte les arrêts pour
@@ -599,29 +756,33 @@ function buildSequences(
 	routeStopSequences: Map<string, Map<number, OrderedStop[][]>>;
 	tripStopSequences: Map<string, TripStop[]>;
 	tripDepartures: Map<string, number>;
+	tripArrivals: Map<string, number>;
 	projectedStops: number;
 } {
 	const routeStopSequences = new Map<string, Map<number, OrderedStop[][]>>();
 	const tripStopSequences = new Map<string, TripStop[]>();
 	const tripDepartures = new Map<string, number>();
+	const tripArrivals = new Map<string, number>();
 	let projectedStops = 0;
 
 	const rows = parseCsv(csv);
 	const header = rows.next().value;
-	if (!header) return { routeStopSequences, tripStopSequences, tripDepartures, projectedStops };
+	if (!header) return { routeStopSequences, tripStopSequences, tripDepartures, tripArrivals, projectedStops };
 
 	const tripCol = header.indexOf("trip_id");
 	const stopCol = header.indexOf("stop_id");
 	const seqCol = header.indexOf("stop_sequence");
 	const distCol = header.indexOf("shape_dist_traveled");
 	const timeCol = header.indexOf("departure_time");
+	const arrivalCol = header.indexOf("arrival_time");
 	if (tripCol === -1 || stopCol === -1 || seqCol === -1) {
-		return { routeStopSequences, tripStopSequences, tripDepartures, projectedStops };
+		return { routeStopSequences, tripStopSequences, tripDepartures, tripArrivals, projectedStops };
 	}
 
-	// Rang de l'arrêt qui a fourni le départ retenu pour chaque course : le fichier n'est pas tenu
-	// d'être ordonné, et seul le premier arrêt donne l'heure de départ de la course.
+	// Rangs des arrêts qui ont fourni le départ et l'arrivée retenus pour chaque course : le fichier
+	// n'est pas tenu d'être ordonné, et seuls le premier et le dernier arrêt bornent la course.
 	const departureSequences = new Map<string, number>();
+	const arrivalSequences = new Map<string, number>();
 
 	// Regroupe les arrêts par trip (uniquement les trips connus).
 	const perTrip = new Map<string, TripStop[]>();
@@ -638,6 +799,12 @@ function buildSequences(
 		if (Number.isFinite(departure) && stopSequence < (departureSequences.get(tripId) ?? Number.POSITIVE_INFINITY)) {
 			departureSequences.set(tripId, stopSequence);
 			tripDepartures.set(tripId, departure);
+		}
+
+		const arrival = arrivalCol === -1 ? Number.NaN : parseServiceTime(row[arrivalCol] ?? "");
+		if (Number.isFinite(arrival) && stopSequence > (arrivalSequences.get(tripId) ?? Number.NEGATIVE_INFINITY)) {
+			arrivalSequences.set(tripId, stopSequence);
+			tripArrivals.set(tripId, arrival);
 		}
 
 		let stops = perTrip.get(tripId);
@@ -713,7 +880,7 @@ function buildSequences(
 		directions.set(directionId, maximalVariants(list));
 	}
 
-	return { routeStopSequences, tripStopSequences, tripDepartures, projectedStops };
+	return { routeStopSequences, tripStopSequences, tripDepartures, tripArrivals, projectedStops };
 }
 
 /**

@@ -21,6 +21,7 @@ import {
 } from "./use-static-gtfs.js";
 
 const SKIPPED = GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SKIPPED;
+const NO_DATA = GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.NO_DATA;
 
 const TIME_ZONE = "Europe/Paris";
 
@@ -144,17 +145,45 @@ export function applySkippedStops(
 }
 
 /**
- * Réduit un trip update aux seuls arrêts SKIPPED, en retirant tout horaire. À appliquer aux lignes
- * hors {@link REALTIME_LINES}, dont la source rebadge le théorique en temps réel : ces horaires ne
- * valent rien et ne doivent pas être diffusés, alors que les suppressions d'arrêt — issues des
- * alertes, pas de la source — restent une information exploitable.
- *
- * Un trip qui ne saute aucun arrêt se retrouve donc sans stopTimeUpdate : il n'a plus rien à dire.
+ * Cette course annonce-t-elle au moins un arrêt supprimé ? Sans temps réel ni suppression, il ne
+ * reste d'elle que le NO_DATA de son premier arrêt — rien que l'horaire théorique ne dise déjà. Elle
+ * n'est alors pas publiée du tout, qu'elle vienne du flux source ou du théorique.
  */
-export function keepOnlySkippedStops(tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate) {
-	tripUpdate.stopTimeUpdate = (tripUpdate.stopTimeUpdate ?? []).filter(
+export function hasSkippedStops(tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate): boolean {
+	return tripUpdate.stopTimeUpdate?.some((stopTimeUpdate) => stopTimeUpdate.scheduleRelationship === SKIPPED) ?? false;
+}
+
+/**
+ * Réduit un trip update à ce qu'on sait de sûr d'une course sans temps réel : qu'elle circule, et
+ * quels arrêts elle ne dessert pas. Ses horaires, eux, ne valent rien et ne doivent pas être
+ * diffusés — la source rebadge le théorique en temps réel sur les lignes hors
+ * {@link REALTIME_LINES}, et une course qu'elle ignore n'en a tout simplement aucun. Les
+ * suppressions d'arrêt, elles, viennent des alertes et non de la source : elles restent exploitables.
+ *
+ * Le premier arrêt de l'horaire théorique ouvre donc la liste en NO_DATA, qui vaut « pas de temps
+ * réel ici » pour lui comme pour toute la suite de la course, et le distingue d'une course qu'on
+ * aurait passée sous silence. Sauf lorsqu'il est lui-même supprimé : la suppression prime, elle en
+ * dit davantage. Suivent les arrêts supprimés.
+ *
+ * Une course dont l'horaire théorique est introuvable — un GTFS antérieur au service en cours — et
+ * qui ne saute aucun arrêt se retrouve sans stopTimeUpdate : elle n'a alors plus rien à dire, et
+ * `createFeed` l'écarte à l'émission.
+ */
+export function declareNoRealtime(
+	tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate,
+	schedule: TripStop[] | undefined,
+) {
+	const skipped = (tripUpdate.stopTimeUpdate ?? []).filter(
 		(stopTimeUpdate) => stopTimeUpdate.scheduleRelationship === SKIPPED,
 	);
+
+	// L'horaire étant trié, un premier arrêt supprimé est nécessairement le premier des SKIPPED.
+	const origin = schedule?.[0];
+	tripUpdate.stopTimeUpdate =
+		origin === undefined || skipped[0]?.stopId === origin.stopId
+			? skipped
+			: [{ stopSequence: origin.stopSequence, stopId: origin.stopId, scheduleRelationship: NO_DATA }, ...skipped];
+
 	// Retard global calculé sur du faux temps réel → sans objet.
 	tripUpdate.delay = null;
 }

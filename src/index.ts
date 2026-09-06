@@ -22,9 +22,15 @@ import {
 	VERIFICATION_STALENESS,
 } from "./config.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
+import { scheduledTripUpdates } from "./gtfs-rt/scheduled-trips.js";
 import { type Movement, useMovementTracker } from "./gtfs-rt/use-movement-tracker.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
-import { applySkippedStops, keepOnlySkippedStops, useServiceAlerts } from "./gtfs-rt/use-service-alerts.js";
+import {
+	applySkippedStops,
+	declareNoRealtime,
+	hasSkippedStops,
+	useServiceAlerts,
+} from "./gtfs-rt/use-service-alerts.js";
 import { departureEpoch, useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
 import { useVehicleLocator, type VehicleLocation } from "./gtfs-rt/use-vehicle-locator.js";
 import { useVehicleMonitoring } from "./gtfs-rt/use-vehicle-monitoring.js";
@@ -360,20 +366,28 @@ async function pollTripUpdates() {
 		const buffer = Buffer.from(await response.arrayBuffer());
 		const feed = GtfsRealtime.transit_realtime.FeedMessage.decode(buffer);
 
+		const nowSeconds = Math.floor(Date.now() / 1000);
+
 		store.tripUpdates.clear();
 		store.tripDepartures.clear();
 
-		let skipsOnly = 0;
+		// Les courses dont le flux source parle : celles-là n'ont pas à être reconstruites depuis
+		// l'horaire théorique, ce qu'il en annonce l'emportant toujours.
+		const covered = new Set<string>();
+		let realtimeTrips = 0;
+		let scheduleOnly = 0;
 
 		for (const entity of feed.entity) {
 			if (!entity.tripUpdate) continue;
 
+			const tripId = entity.tripUpdate.trip?.tripId;
+
 			if (entity.tripUpdate?.trip) {
 				entity.tripUpdate.trip.scheduleRelationship =
 					GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED;
-				if (entity.tripUpdate.trip.directionId !== 1) {
-					entity.tripUpdate.trip.directionId = 0;
-				}
+				// Le flux ne renseigne jamais le sens : sans le GTFS statique, toute course passerait pour un
+				// aller et les suppressions déclarées au retour ne s'appliqueraient à rien.
+				entity.tripUpdate.trip.directionId = (tripId ? staticGtfs.data.trips.get(tripId)?.directionId : undefined) ?? 0;
 			}
 
 			entity.tripUpdate.stopTimeUpdate?.forEach((stopTimeUpdate) => {
@@ -387,7 +401,6 @@ async function pollTripUpdates() {
 			// Le départ annoncé pour la course, avant que les suppressions d'arrêt ne remanient l'horaire.
 			// Les lignes sans vrai temps réel n'y ont pas droit : la source y rebadge l'horaire théorique,
 			// son « départ » n'en dirait pas plus que le GTFS statique.
-			const tripId = entity.tripUpdate.trip?.tripId;
 			if (tripId && REALTIME_LINES.has(tripLineId)) {
 				const departure = announcedDeparture(entity.tripUpdate, tripId);
 				if (departure !== undefined) store.tripDepartures.set(tripId, departure);
@@ -395,20 +408,31 @@ async function pollTripUpdates() {
 
 			applySkippedStops(entity.tripUpdate, tripRouteId, serviceAlerts.skipIndex, staticGtfs.data);
 
-			// Ligne sans vrai temps réel : on ne relaie pas ses horaires, mais on garde ses
-			// suppressions d'arrêt. Sans suppression, le trip n'apporte rien → on l'écarte.
-			if (!REALTIME_LINES.has(tripLineId)) {
-				keepOnlySkippedStops(entity.tripUpdate);
-				if (!entity.tripUpdate.stopTimeUpdate?.length) continue;
-				skipsOnly += 1;
+			if (tripId) covered.add(tripId);
+
+			// Ligne sans vrai temps réel : on ne relaie pas ses horaires, seulement l'existence de la course
+			// et ses suppressions d'arrêt — la forme même que prennent les courses reconstruites.
+			if (REALTIME_LINES.has(tripLineId)) {
+				realtimeTrips += 1;
+			} else {
+				// Ni temps réel ni suppression : la course se réduirait au NO_DATA de son premier arrêt, qui
+				// n'apprend rien de plus que l'horaire théorique.
+				if (!hasSkippedStops(entity.tripUpdate)) continue;
+				declareNoRealtime(entity.tripUpdate, tripId ? staticGtfs.data.tripStopSequences.get(tripId) : undefined);
+				scheduleOnly += 1;
 			}
 
 			const tripEntityId = entity.id.split(":").at(-1) ?? entity.id;
 			store.tripUpdates.set(`ET:TCAR:${tripEntityId}`, entity.tripUpdate);
 		}
 
+		// Toutes les autres courses de la journée de service qui n'ont pas fini de circuler : le flux
+		// source les ignore, l'horaire théorique les connaît (cf. `scheduledTripUpdates`).
+		const scheduled = scheduledTripUpdates(staticGtfs.data, serviceAlerts.skipIndex, covered, nowSeconds);
+		for (const [id, tripUpdate] of scheduled) store.tripUpdates.set(id, tripUpdate);
+
 		console.log(
-			`✓ ${store.tripUpdates.size} trip updates (${skipsOnly} skipped-stops only, ${store.tripDepartures.size} departures announced).`,
+			`✓ ${store.tripUpdates.size} trip updates (${realtimeTrips} realtime, ${scheduleOnly} source without realtime, ${scheduled.size} rebuilt from schedule, ${store.tripDepartures.size} departures announced).`,
 		);
 	} catch (cause) {
 		console.error("✘ Trip updates poll error:", cause);

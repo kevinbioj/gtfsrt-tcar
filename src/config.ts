@@ -254,6 +254,7 @@ export const SERVED_STOPS: ServedStop[] = [
 
 export const SERVICE_ALERTS_URL = "https://hexatransit.fr/datasets/services_rt/astuce/service_alerts.pb";
 export const STATIC_GTFS_URL = "https://gtfs.bus-tracker.fr/astuce-tcar.zip";
+
 export const ALERTS_POLL_INTERVAL = Temporal.Duration.from({ minutes: 5 }).total("milliseconds");
 /**
  * Intervalle de vérification de fraîcheur du GTFS statique : une simple requête HEAD compare la
