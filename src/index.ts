@@ -90,7 +90,7 @@ hono.get("/vehicle-positions.json", (c) => handleRequest(c, "json", null, publis
 hono.get("/trip-updates", (c) => handleRequest(c, "protobuf", store.tripUpdates, null));
 hono.get("/trip-updates.json", (c) => handleRequest(c, "json", store.tripUpdates, null));
 hono.get("/", (c) =>
-	handleRequest(c, c.req.query("format") === "json" ? "json" : "protobuf", null, publishedPositions()),
+	handleRequest(c, c.req.query("format") === "json" ? "json" : "protobuf", store.tripUpdates, publishedPositions()),
 );
 
 serve({ fetch: hono.fetch, port: PORT });
