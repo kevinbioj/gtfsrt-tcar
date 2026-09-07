@@ -306,9 +306,9 @@ export async function analyzeAlerts(alerts: AlertInput[]): Promise<Map<string, A
 		hashById.set(alert.id, hash);
 		const cached = cache.get(alert.id);
 		if (cached?.hash === hash) {
-			// Le cache conserve la sortie brute de l'IA : le garde-fou est réappliqué à chaque fois,
-			// pour qu'une correction de sa logique profite aussi aux alertes déjà analysées.
-			result.set(alert.id, resolveDirections(cached.result, alert));
+			// Le cache conserve la sortie brute de l'IA : les garde-fous sont réappliqués à chaque fois,
+			// pour qu'une correction de leur logique profite aussi aux alertes déjà analysées.
+			result.set(alert.id, applyGuards(cached.result, alert));
 		} else {
 			toAnalyze.push(alert);
 		}
@@ -323,7 +323,7 @@ export async function analyzeAlerts(alerts: AlertInput[]): Promise<Map<string, A
 				// erreur ne fige pas un résultat vide (elles seront réanalysées au prochain changement).
 				cache.set(alert.id, { hash: hashById.get(alert.id)!, result: analysis });
 				dirty = true;
-				result.set(alert.id, resolveDirections(analysis, alert));
+				result.set(alert.id, applyGuards(analysis, alert));
 			} else {
 				result.set(alert.id, EMPTY);
 			}
@@ -331,6 +331,14 @@ export async function analyzeAlerts(alerts: AlertInput[]): Promise<Map<string, A
 	}
 
 	return result;
+}
+
+/**
+ * Relectures du texte appliquées à la sortie brute de l'IA : on écarte d'abord ce que le texte ne
+ * cite que comme destination, puis on relit le sens de ce qui reste.
+ */
+function applyGuards(analysis: AlertAnalysis, alert: AlertInput): AlertAnalysis {
+	return resolveDirections(withoutDestinations(analysis, alert), alert);
 }
 
 // ---
@@ -665,6 +673,148 @@ function routePrefix(segment: string, routes: AlertRouteContext[]): string[] | n
 function lineNumber(label: string): string {
 	const digits = normalizeStopName(label).replace(/^[a-z]+/, "");
 	return /^\d+$/.test(digits) ? digits.replace(/^0+/, "") : "";
+}
+
+// --- Destinations prises pour des arrêts supprimés
+//
+// Une alerte qui vise plusieurs lignes énumère derrière un SEUL « vers » une destination par ligne
+// (« Complexe Sportif vers Pôle Multimodal / Tourville, Pôle Multimodal-Cotoni et Champ de Foire ») :
+// le modèle prend celles qui suivent la première pour de nouveaux arrêts supprimés, et annonce ainsi
+// un terminus supprimé dans le sens même qui y mène.
+//
+// On écarte donc l'arrêt supprimé qui est un TERMINUS d'une des lignes de l'alerte et que le texte ne
+// cite QUE dans le sillage d'un « vers ». Les deux conditions comptent : ailleurs qu'après un « vers »
+// un terminus peut être réellement supprimé, et derrière un « vers » un nom qui n'est le terminus
+// d'aucune ligne de l'alerte n'a rien d'une destination.
+
+/**
+ * Élément de texte autonome. Une destination ne déborde pas de l'élément où elle est écrite : les
+ * balises HTML de la description bornent l'énumération autant que les retours à la ligne, chaque
+ * puce du réseau étant un `<li>` distinct.
+ */
+const TEXT_ELEMENT = /[\n•]|<[^>]*>/;
+
+/**
+ * Reprise d'un groupe d'arrêts derrière une destination : l'énumération des terminus s'y arrête
+ * (« … vers Pôle Multimodal, arrêt Champ des Oiseaux non desservi »).
+ */
+const GROUP_RESUMPTION =
+	/\b(?:arret|arrets|non|ne|sans|supprim\w*|ferm\w*|desserv\w*|dessert|interrompu\w*|devi\w*|terminus|circulation|trafic)\b/g;
+
+/** Ouverture (« de ») et charnière (« à ») d'une plage : ce qui suit décrit des arrêts, pas des terminus. */
+const RANGE_OPENER = /\bde\b/g;
+const RANGE_LINK = /\ba\b/g;
+
+/** Un élément de texte normalisé et les tranches où il énumère des destinations. */
+type TextElement = { text: string; destinations: { start: number; end: number }[] };
+
+/**
+ * Retire les arrêts supprimés que le texte ne cite que comme destination d'un « vers ». Volontairement
+ * prudent : on ne retire qu'un nom qui est terminus d'une ligne de l'alerte, seul cas où une lecture
+ * en destination est certaine.
+ */
+function withoutDestinations(analysis: AlertAnalysis, alert: AlertInput): AlertAnalysis {
+	if (analysis.removedStops.length === 0) return analysis;
+
+	const elements = splitElements(`${alert.headerText}\n${alert.descriptionText}`);
+	if (!elements.some((element) => element.destinations.length > 0)) return analysis;
+
+	const removedStops = analysis.removedStops.filter((removedStop) => {
+		// Une plage « de X à Y » se donne pour ce qu'elle est : aucune énumération de destinations ne
+		// s'écrit ainsi, ses deux bornes sont donc bien des arrêts.
+		if (removedStop.toStopName) return true;
+
+		const name = normalizeStopName(removedStop.stopName);
+		return !isTerminus(name, alert.routes) || !citedOnlyAsDestination(name, elements);
+	});
+
+	return removedStops.length === analysis.removedStops.length ? analysis : { ...analysis, removedStops };
+}
+
+/** Découpe le texte en éléments normalisés, chacun avec ses tranches de destinations. */
+function splitElements(text: string): TextElement[] {
+	const elements: TextElement[] = [];
+	for (const raw of text.split(TEXT_ELEMENT)) {
+		const normalized = normalizeStopName(raw);
+		if (normalized) elements.push({ text: normalized, destinations: destinationRanges(normalized) });
+	}
+	return elements;
+}
+
+/**
+ * Tranches d'un élément qui énumèrent des destinations : ce qui suit un « vers » jusqu'à la mention de
+ * sens suivante, la reprise d'un groupe d'arrêts ou l'ouverture d'une plage — la fin de l'élément à
+ * défaut. « dans les deux sens » n'introduit aucune destination.
+ */
+function destinationRanges(text: string): { start: number; end: number }[] {
+	const mentions = [...text.matchAll(DIRECTION_MENTION)];
+
+	const ranges: { start: number; end: number }[] = [];
+	for (const [position, match] of mentions.entries()) {
+		if (BOTH_DIRECTIONS.test(match[0])) continue;
+
+		const start = match.index + match[0].length;
+		const limit = mentions[position + 1]?.index ?? text.length;
+		const end = Math.min(firstIndex(GROUP_RESUMPTION, text, start, limit), rangeStart(text, start, limit));
+		if (end > start) ranges.push({ start, end });
+	}
+
+	return ranges;
+}
+
+/**
+ * Ouverture de la plage « de X à Y » qui suit la destination, `limit` à défaut. On coupe au « de » qui
+ * précède le « à », et au « à » lui-même si aucun « de » ne le précède : le « de » d'un nom d'arrêt
+ * (« Champ de Foire ») coupe ainsi trop tôt plutôt que trop tard, ce qui ne fait que garder un arrêt
+ * de plus.
+ */
+function rangeStart(text: string, start: number, limit: number): number {
+	const link = firstIndex(RANGE_LINK, text, start, limit);
+	return link === limit ? limit : firstIndex(RANGE_OPENER, text, start, link);
+}
+
+/** Position de la première occurrence du motif dans [`start`, `limit`[, `limit` à défaut. */
+function firstIndex(pattern: RegExp, text: string, start: number, limit: number): number {
+	pattern.lastIndex = start;
+	const match = pattern.exec(text);
+	return match !== null && match.index < limit ? match.index : limit;
+}
+
+/** Vrai si le texte cite ce nom, et seulement dans des tranches de destinations. */
+function citedOnlyAsDestination(name: string, elements: TextElement[]): boolean {
+	if (!name) return false;
+
+	let cited = false;
+	for (const element of elements) {
+		for (const index of occurrences(element.text, name)) {
+			cited = true;
+			const inside = element.destinations.some((range) => index >= range.start && index + name.length <= range.end);
+			if (!inside) return false;
+		}
+	}
+
+	return cited;
+}
+
+/** Positions du nom dans le texte normalisé, aux frontières de mots (tout y est séparé par des espaces). */
+function occurrences(text: string, name: string): number[] {
+	const found: number[] = [];
+	for (let index = text.indexOf(name); index !== -1; index = text.indexOf(name, index + 1)) {
+		const end = index + name.length;
+		if ((index === 0 || text[index - 1] === " ") && (end === text.length || text[end] === " ")) {
+			found.push(index);
+		}
+	}
+	return found;
+}
+
+/** Vrai si ce nom est le terminus d'un des sens d'une des lignes de l'alerte. */
+function isTerminus(name: string, routes: AlertRouteContext[]): boolean {
+	return routes.some((route) =>
+		route.directions.some((direction) =>
+			direction.headsigns.some((headsign) => normalizeStopName(headsignName(headsign)) === name),
+		),
+	);
 }
 
 // ---
