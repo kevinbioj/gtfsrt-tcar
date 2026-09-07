@@ -13,9 +13,11 @@ export function handleRequest(
 	const feed = createFeed(tripUpdates, vehiclePositions);
 
 	if (output === "json") {
+		c.header("Content-Type", "application/json");
 		return c.json(feed, 200);
 	}
 
+	c.header("Content-Type", "application/octet-stream");
 	return stream(c, async (stream) => {
 		const encoded = GtfsRealtime.transit_realtime.FeedMessage.encode(feed).finish();
 		await stream.write(encoded);
