@@ -54,7 +54,9 @@ console.log(` ,----.,--------.,------.,---.        ,------.,--------. ,--------.
  \`------' \`--'   \`--'   \`-----'       \`--' '--'  \`--'       \`--'   \`-----'\`--' \`--'\`--' '--'`);
 
 // Ce que le producteur savait à son dernier arrêt : sans lui, un redémarrage se verrait dans le feed
-// (cf. `loadState`). `undefined` quand il n'y a rien à relire, ou que ce qu'il y a est trop vieux.
+// (cf. `loadState`). Il est relu quel que soit son âge — un véhicule peut reparaître des heures après
+// son dernier relevé, et c'est sa dernière position connue qui dit alors d'où il repart.
+// `undefined` quand il n'y a rien à relire.
 const restored = loadState(STATE_CACHE_PATH, Math.floor(Date.now() / 1000));
 
 const store = useRealtimeStore();

@@ -1,6 +1,5 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
-import { STATE_MAX_AGE } from "./config.js";
 import type { TrackedVehicle } from "./gtfs-rt/use-movement-tracker.js";
 import type { LocatedVehicle } from "./gtfs-rt/use-vehicle-locator.js";
 import type { RegisteredVehicle } from "./gtfs-rt/use-vehicle-registry.js";
@@ -27,9 +26,15 @@ export type ProducerState = {
  * par l'attente d'un premier mouvement (cf. `useMovementTracker`) et le feed mettrait de longues
  * minutes à se repeupler — quand il ne ferait pas réapparaître, à l'inverse, des véhicules éteints.
  *
- * L'état ne vaut toutefois que frais : passé {@link STATE_MAX_AGE}, il ne décrit plus le réseau tel
- * qu'il est mais tel qu'il était, et le producteur repart vierge. Un fichier absent, vide, tronqué
- * ou d'un autre format revient au même — il n'y a rien à en tirer, ce n'est pas une erreur.
+ * L'état est relu quel que soit son âge. Un véhicule peut reparaître des heures après son dernier
+ * relevé, et c'est précisément là que la dernière position connue sert : sans elle, le suivi ne sait
+ * plus d'où il repart — le locator projette sur toute la shape faute de savoir où il a laissé le
+ * véhicule, et le registre republie sur ce que la source raconte. Rien n'y périme donc ; le tri se
+ * fait au premier relevé, où le registre laisse tomber ce qui est trop vieux (cf.
+ * `useVehicleRegistry`).
+ *
+ * Un fichier absent, vide, tronqué ou d'un autre format revient au même — il n'y a rien à en tirer,
+ * ce n'est pas une erreur.
  */
 export function loadState(path: string, nowSeconds: number): ProducerState | undefined {
 	let raw: string;
@@ -55,11 +60,6 @@ export function loadState(path: string, nowSeconds: number): ProducerState | und
 	}
 
 	const savedAt = typeof parsed?.savedAt === "number" ? parsed.savedAt : 0;
-	const age = nowSeconds - savedAt;
-	if (!savedAt || age > STATE_MAX_AGE) {
-		console.log(`✘ State cache is ${Math.round(age / 60)} min old — starting fresh.`);
-		return undefined;
-	}
 
 	const state: ProducerState = {
 		movements: entriesOf(parsed.movements, isTrackedVehicle),
@@ -67,8 +67,9 @@ export function loadState(path: string, nowSeconds: number): ProducerState | und
 		locations: entriesOf(parsed.locations, isLocatedVehicle),
 	};
 
+	const age = savedAt ? `saved ${Math.round((nowSeconds - savedAt) / 60)} min ago` : "of unknown age";
 	console.log(
-		`✓ Restored state saved ${Math.round(age / 60)} min ago (${state.vehicles.length} vehicles, ${state.movements.length} tracked, ${state.locations.length} located).`,
+		`✓ Restored state ${age} (${state.vehicles.length} vehicles, ${state.movements.length} tracked, ${state.locations.length} located).`,
 	);
 
 	return state;

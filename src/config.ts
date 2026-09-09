@@ -271,10 +271,3 @@ export const ALERT_CACHE_PATH = ".cache/alert-analysis.json";
  * il se verrait dans le feed pendant de longues minutes (cf. `loadState`).
  */
 export const STATE_CACHE_PATH = ".state.json";
-
-/**
- * Âge au-delà duquel l'état relu au démarrage est jeté. Il décrit alors un réseau qui n'existe plus
- * : véhicules rentrés au dépôt, courses terminées, journée de service changée. Mieux vaut repartir
- * vierge et laisser le feed se repeupler au premier mouvement constaté.
- */
-export const STATE_MAX_AGE = Temporal.Duration.from({ hours: 1 }).total("seconds");
