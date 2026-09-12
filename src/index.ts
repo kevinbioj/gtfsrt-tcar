@@ -22,7 +22,7 @@ import {
 	VERIFICATION_STALENESS,
 } from "./config.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
-import { scheduledTripUpdates } from "./gtfs-rt/scheduled-trips.js";
+import { resolveServiceDate, scheduledTripUpdates, serviceDays, tripRun } from "./gtfs-rt/scheduled-trips.js";
 import { type Movement, useMovementTracker } from "./gtfs-rt/use-movement-tracker.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
 import {
@@ -373,6 +373,11 @@ async function pollTripUpdates() {
 		store.tripUpdates.clear();
 		store.tripDepartures.clear();
 
+		// Journées de service auxquelles une course annoncée peut appartenir. Le lendemain en fait partie :
+		// une course de « 00:20 » annoncée dix minutes plus tôt relève déjà de la journée suivante, quand
+		// le GTFS ne l'écrit pas « 24:20 » sur celle qui s'achève.
+		const candidateDays = serviceDays(staticGtfs.data, [-1, 0, 1]);
+
 		// Les courses dont le flux source parle : celles-là n'ont pas à être reconstruites depuis
 		// l'horaire théorique, ce qu'il en annonce l'emportant toujours.
 		const covered = new Set<string>();
@@ -384,9 +389,21 @@ async function pollTripUpdates() {
 
 			const tripId = entity.tripUpdate.trip?.tripId;
 
+			// La journée de service de la course, que le flux ne nomme pas : sans elle, le consommateur doit
+			// la deviner, et les journées de service se chevauchent — après minuit, celle d'hier est encore
+			// ouverte. On la déduit de l'horaire annoncé (cf. `resolveServiceDate`), et à défaut d'horaire
+			// de l'instant du relevé : le flux ne parle que de courses en train de rouler ou sur le point
+			// de partir. Ce que le producteur déclare lui-même l'emporte, étant de première main.
+			const startDate =
+				entity.tripUpdate.trip?.startDate ||
+				(tripId
+					? resolveServiceDate(staticGtfs.data, candidateDays, tripId, announcedTime(entity.tripUpdate) ?? nowSeconds)
+					: undefined);
+
 			if (entity.tripUpdate?.trip) {
 				entity.tripUpdate.trip.scheduleRelationship =
 					GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED;
+				entity.tripUpdate.trip.startDate = startDate;
 				// Le flux ne renseigne jamais le sens : sans le GTFS statique, toute course passerait pour un
 				// aller et les suppressions déclarées au retour ne s'appliqueraient à rien.
 				entity.tripUpdate.trip.directionId = (tripId ? staticGtfs.data.trips.get(tripId)?.directionId : undefined) ?? 0;
@@ -410,7 +427,7 @@ async function pollTripUpdates() {
 
 			applySkippedStops(entity.tripUpdate, tripRouteId, serviceAlerts.skipIndex, staticGtfs.data);
 
-			if (tripId) covered.add(tripId);
+			if (tripId && startDate) covered.add(tripRun(tripId, startDate));
 
 			// Ligne sans vrai temps réel : on ne relaie pas ses horaires, seulement l'existence de la course
 			// et ses suppressions d'arrêt — la forme même que prennent les courses reconstruites.
@@ -424,8 +441,12 @@ async function pollTripUpdates() {
 				scheduleOnly += 1;
 			}
 
+			// L'identifiant porte la journée de service comme celui des courses reconstruites, et pour la
+			// même raison : deux occurrences d'une même course peuvent circuler ensemble — celle d'hier qui
+			// s'achève après minuit et celle d'aujourd'hui qui part à « 25:10 » — et le flux source les
+			// nomme pareillement, la seconde écrasant alors la première.
 			const tripEntityId = entity.id.split(":").at(-1) ?? entity.id;
-			store.tripUpdates.set(`ET:TCAR:${tripEntityId}`, entity.tripUpdate);
+			store.tripUpdates.set(`ET:TCAR:${tripEntityId}${startDate ? `:${startDate}` : ""}`, entity.tripUpdate);
 		}
 
 		// Toutes les autres courses de la journée de service qui n'ont pas fini de circuler : le flux
@@ -439,6 +460,21 @@ async function pollTripUpdates() {
 	} catch (cause) {
 		console.error("✘ Trip updates poll error:", cause);
 	}
+}
+
+/**
+ * Le premier horaire que le flux annonce pour cette course, en secondes epoch, ou `undefined` s'il
+ * n'en annonce aucun. N'importe lequel de ses arrêts fait l'affaire pour la rapporter à sa journée de
+ * service : tous tombent dans le même créneau de quelques dizaines de minutes, et les journées
+ * candidates sont distantes de vingt-quatre heures.
+ */
+function announcedTime(tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate): number | undefined {
+	for (const stopTimeUpdate of tripUpdate.stopTimeUpdate ?? []) {
+		const time = Number(stopTimeUpdate.departure?.time ?? stopTimeUpdate.arrival?.time ?? 0);
+		if (time > 0) return time;
+	}
+
+	return undefined;
 }
 
 /**
