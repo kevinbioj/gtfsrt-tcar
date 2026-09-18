@@ -91,6 +91,20 @@ export type StaticGtfs = {
 	 * journée de service sans balayer les seize mille courses du GTFS.
 	 */
 	serviceTrips: Map<string, string[]>;
+	/**
+	 * tripId → clé de la course qu'il assure, celle que toutes ses versions partagent (cf.
+	 * {@link courseVersions}).
+	 */
+	tripCourseKeys: Map<string, string>;
+	/**
+	 * Clé de course → les identifiants qui la décrivent, un par service.
+	 *
+	 * Le GTFS décrit une même course autant de fois qu'il y a de services qui l'assurent : mêmes
+	 * ligne, sens, arrêts, horaires et tracé, mais un `trip_id` différent à chaque fois. Le SAE se
+	 * trompe de version — il annonce le samedi un vendredi —, et c'est par cet index qu'on retrouve
+	 * celle qui circule vraiment ce jour-là (cf. `resolveServiceRun`).
+	 */
+	courseVersions: Map<string, string[]>;
 	/** stopId → libellé de l'arrêt, tel que le GTFS l'écrit. */
 	stopNames: Map<string, string>;
 	/** stopId → coordonnées du quai. */
@@ -324,6 +338,8 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		calendars: new Map(),
 		calendarExceptions: new Map(),
 		serviceTrips: new Map(),
+		tripCourseKeys: new Map(),
+		courseVersions: new Map(),
 		stopNames: new Map(),
 		stopCoordinates: new Map(),
 		trips: new Map(),
@@ -382,13 +398,15 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 			console.warn(`⚠ ${projectedStops} stop distances projected onto shapes (missing shape_dist_traveled).`);
 		}
 
+		const { tripCourseKeys, courseVersions } = buildCourses(tripMeta, tripStopSequences, tripDepartures);
+
 		let itineraries = 0;
 		for (const directions of routeStopSequences.values()) {
 			for (const variants of directions.values()) itineraries += variants.length;
 		}
 
 		console.log(
-			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${itineraries} route itineraries, ${tripStopSequences.size} trip schedules, ${shapes.size} shapes, ${serviceTrips.size} services from GTFS.`,
+			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${itineraries} route itineraries, ${tripStopSequences.size} trip schedules, ${shapes.size} shapes, ${serviceTrips.size} services, ${courseVersions.size} courses from GTFS.`,
 		);
 		return {
 			data: {
@@ -402,6 +420,8 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 				calendars,
 				calendarExceptions,
 				serviceTrips,
+				tripCourseKeys,
+				courseVersions,
 				stopNames: idToName,
 				stopCoordinates: coordinates,
 				trips: tripMeta,
@@ -582,6 +602,45 @@ function buildTrips(csv: string): {
 	}
 
 	return { routeDirections, tripMeta, serviceTrips };
+}
+
+/**
+ * Regroupe les courses par ce qu'elles sont réellement, par-delà leurs identifiants.
+ *
+ * Le GTFS décrit une même course une fois par service qui l'assure — mêmes ligne, sens, arrêts,
+ * horaires et tracé, mais un `trip_id` par exemplaire. Le SAE, lui, n'annonce pas toujours celui du
+ * jour : il sort le samedi un vendredi. Cet index permet de retrouver l'exemplaire qui circule
+ * vraiment (cf. `resolveServiceRun`).
+ *
+ * La clé se limite à la ligne, au sens et au quai de départ avec son horaire : c'est assez pour
+ * désigner une course, et les jours où deux d'entre elles se confondent, aucune clé plus fine ne
+ * tranche mieux — les exemplaires en cause circulent alors ensemble, et c'est l'horaire qui départage.
+ * Le quai, en revanche, ne peut pas être omis : sans lui, des courses bel et bien distinctes se
+ * retrouveraient confondues par milliers.
+ */
+function buildCourses(
+	tripMeta: Map<string, TripMeta>,
+	tripStopSequences: Map<string, TripStop[]>,
+	tripDepartures: Map<string, number>,
+): { tripCourseKeys: Map<string, string>; courseVersions: Map<string, string[]> } {
+	const tripCourseKeys = new Map<string, string>();
+	const courseVersions = new Map<string, string[]>();
+
+	for (const [tripId, meta] of tripMeta) {
+		const origin = tripStopSequences.get(tripId)?.[0];
+		const departure = tripDepartures.get(tripId);
+		// Course sans horaire : elle n'a pas de quoi être rapprochée de quoi que ce soit.
+		if (origin === undefined || departure === undefined) continue;
+
+		const key = `${meta.routeId}|${meta.directionId}|${origin.stopId}|${departure}`;
+		tripCourseKeys.set(tripId, key);
+
+		const versions = courseVersions.get(key);
+		if (versions === undefined) courseVersions.set(key, [tripId]);
+		else versions.push(tripId);
+	}
+
+	return { tripCourseKeys, courseVersions };
 }
 
 /** Colonnes des jours de `calendar.txt`, du lundi au dimanche — l'ordre de {@link ServiceCalendar.weekdays}. */

@@ -44,9 +44,30 @@ export const VEHICLE_MONITORING_URL =
 export const VEHICLE_MONITORING_INTERVAL = Temporal.Duration.from({ minutes: 5 }).total("milliseconds");
 export const TRIP_UPDATES_URL =
 	"https://api.mrn.cityway.fr/dataflow/horaire-tc-tr/download?provider=TCAR&dataFormat=GTFS-RT";
+/**
+ * L'ancien GTFS-RT du réseau. Il tranche la ligne et le sens du véhicule, mais il fournit aussi et
+ * surtout la position qu'on publie : celle du flux SAE part parfois à l'autre bout du monde, quand
+ * celle-ci reste juste (cf. {@link PREFERRED_POSITION_STALENESS}).
+ */
 export const VERIFICATION_FEED_URL = "https://reseau-astuce.fr/ftp/gtfsrt/Astuce.VehiclePosition.pb";
-/** Rafraîchissement du flux de vérification : il republie ses relevés à la minute. */
-export const VERIFICATION_FEED_INTERVAL = Temporal.Duration.from({ minutes: 1 }).total("milliseconds");
+/**
+ * Rafraîchissement du flux de vérification. Il republie ses relevés à la minute, mais il est devenu
+ * la source des positions publiées : l'interroger moins souvent que le flux SAE ferait traîner tout
+ * le feed d'autant. D'où le même rythme que {@link POLL_INTERVAL} — c'est un fichier statique léger.
+ */
+export const VERIFICATION_FEED_INTERVAL = POLL_INTERVAL;
+/**
+ * Âge au-delà duquel la position du flux Astuce cesse d'être préférée à celle du flux SAE.
+ *
+ * Le SAE sort par moments des coordonnées aberrantes, et rien en aval ne les rattrape : l'écart à la
+ * shape ne protège que le prochain arrêt calculé, jamais la position publiée. Le flux Astuce, lui,
+ * reste juste. On le préfère donc systématiquement — non pas quand le SAE paraît se tromper, ce qui
+ * demanderait de savoir le dire, mais dès qu'Astuce a quelque chose d'assez frais à proposer.
+ *
+ * Bien plus court que {@link VERIFICATION_STALENESS} : une position de quinze minutes vérifie encore
+ * une ligne, elle ne situe plus un véhicule.
+ */
+export const PREFERRED_POSITION_STALENESS = Temporal.Duration.from({ minutes: 2 }).total("seconds");
 export const VEHICLE_OCCUPANCY_STALENESS = Temporal.Duration.from({ minutes: 3 }).total("milliseconds");
 export const VEHICLE_OCCUPANCY_STATUS_URL = atob("aHR0cHM6Ly90Y2FyLmZsb3dseS5yZS9Qb3J0YWwvTWFwRGV2aWNlcy5hc3B4");
 

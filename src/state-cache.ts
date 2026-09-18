@@ -11,7 +11,11 @@ import type { RegisteredVehicle } from "./gtfs-rt/use-vehicle-registry.js";
  * rechargent d'eux-mêmes dès le démarrage, et les relire ne ferait que ressortir du périmé.
  */
 export type ProducerState = {
-	/** L'empreinte de position qui date les mouvements (cf. `useMovementTracker`). */
+	/**
+	 * L'empreinte de position qui date les mouvements, un jeu par flux (cf. `useMovementTracker`).
+	 * Les entrées d'une forme antérieure sont jetées : le parc repasse alors par un ou deux relevés
+	 * d'attente, le temps qu'un premier mouvement le prouve à nouveau.
+	 */
 	movements: [string, TrackedVehicle][];
 	/** Les entrées du feed, publiées ou en sursis (cf. `useVehicleRegistry`). */
 	vehicles: [string, RegisteredVehicle][];
@@ -114,10 +118,16 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 function isTrackedVehicle(payload: unknown): payload is TrackedVehicle {
-	if (!isObject(payload)) return false;
-	// `movedAt` manque tant qu'aucun mouvement n'a été constaté : JSON n'écrit pas `undefined`.
-	if (payload.movedAt !== undefined && typeof payload.movedAt !== "number") return false;
-	return typeof payload.signature === "string" && isObject(payload.position);
+	if (!isObject(payload) || !isObject(payload.readings)) return false;
+
+	for (const reading of Object.values(payload.readings)) {
+		if (!isObject(reading)) return false;
+		// `movedAt` manque tant qu'aucun mouvement n'a été constaté : JSON n'écrit pas `undefined`.
+		if (reading.movedAt !== undefined && typeof reading.movedAt !== "number") return false;
+		if (typeof reading.signature !== "string" || !isObject(reading.position)) return false;
+	}
+
+	return true;
 }
 
 function isRegisteredVehicle(payload: unknown): payload is RegisteredVehicle {

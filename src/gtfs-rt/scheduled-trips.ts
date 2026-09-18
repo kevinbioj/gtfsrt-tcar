@@ -36,44 +36,67 @@ export function serviceDays(gtfs: StaticGtfs, offsets: readonly number[]): Servi
 	});
 }
 
+/** Une course rattachée à la journée de service où elle circule. */
+export type ServiceRun = { tripId: string; date: string };
+
 /**
- * La journée de service dont relève une course que le flux source annonce sans la nommer, ou
- * `undefined` pour une course que le GTFS ne décrit plus — elle n'a alors aucun horaire à quoi la
- * rapporter.
+ * L'exemplaire de la course qui circule vraiment, et la journée de service dont il relève.
+ * `undefined` lorsqu'aucun n'est rattachable à l'une des journées candidates — course que le GTFS ne
+ * décrit plus, ou horaire théorique en retard sur le service en cours.
  *
- * Le GTFS écrit l'horaire d'une course en secondes depuis le minuit de sa journée de service, jamais
- * en instants : posé sur deux journées différentes, le même horaire donne deux créneaux distants de
+ * Deux corrections en une, parce que c'est le même geste.
+ *
+ * La première est la journée, que le flux ne nomme pas : sans elle, le consommateur doit la deviner,
+ * et les journées de service se chevauchent — après minuit, celle d'hier est encore ouverte. Le GTFS
+ * écrit l'horaire d'une course en secondes depuis le minuit de sa journée de service, jamais en
+ * instants : posé sur deux journées différentes, le même horaire donne deux créneaux distants de
  * vingt-quatre heures. Il suffit donc de regarder lequel encadre `reference` — l'instant que le flux
  * annonce pour la course. Le retard d'un véhicule se compte en minutes, l'écart entre deux journées
  * candidates en heures : aucune confusion possible, y compris pour une course écrite « 25:10 » que le
  * GTFS range la veille du soir où elle roule.
  *
- * Ne sont mises en balance que les journées où le service de la course circule réellement : le
+ * La seconde est l'identifiant lui-même. Le GTFS décrit une même course une fois par service qui
+ * l'assure, sous un `trip_id` par exemplaire, et le SAE se trompe d'exemplaire : il annonce le
+ * vendredi la course du samedi, qui existe bel et bien mais ne circule pas ce jour-là. On met donc en
+ * balance toutes les versions de la course (cf. `courseVersions`), et non la seule annoncée ; sans
+ * quoi celle du samedi, jugée valide demain, sortirait avec la journée de demain.
+ *
+ * Ne sont retenues que les journées où le service de la version examinée circule réellement : le
  * calendrier écarte à lui seul la plupart des ambiguïtés, l'horaire tranche le reste.
  */
-export function resolveServiceDate(
+export function resolveServiceRun(
 	gtfs: StaticGtfs,
 	days: readonly ServiceDay[],
 	tripId: string,
 	reference: number,
-): string | undefined {
-	const serviceId = gtfs.trips.get(tripId)?.serviceId;
-	const departure = gtfs.tripDepartures.get(tripId);
-	const arrival = gtfs.tripArrivals.get(tripId);
-	if (serviceId === undefined || departure === undefined || arrival === undefined) return undefined;
+): ServiceRun | undefined {
+	const courseKey = gtfs.tripCourseKeys.get(tripId);
+	// Course absente de l'index : elle n'a pas d'horaire, donc pas de version connue. Elle reste seule
+	// candidate — le calendrier tranchera, ou personne.
+	const versions = (courseKey === undefined ? undefined : gtfs.courseVersions.get(courseKey)) ?? [tripId];
 
-	let best: string | undefined;
+	let best: ServiceRun | undefined;
 	let bestDistance = Number.POSITIVE_INFINITY;
 
-	for (const { date, midnight, services } of days) {
-		if (!services.has(serviceId)) continue;
+	for (const candidate of versions) {
+		const serviceId = gtfs.trips.get(candidate)?.serviceId;
+		const departure = gtfs.tripDepartures.get(candidate);
+		const arrival = gtfs.tripArrivals.get(candidate);
+		if (serviceId === undefined || departure === undefined || arrival === undefined) continue;
 
-		// Distance de `reference` au créneau de la course ce jour-là : nulle pendant qu'elle roule, et
-		// c'est de combien elle le manque sinon.
-		const distance = Math.max(0, midnight + departure - reference, reference - (midnight + arrival));
-		if (distance < bestDistance) {
-			bestDistance = distance;
-			best = date;
+		for (const { date, midnight, services } of days) {
+			if (!services.has(serviceId)) continue;
+
+			// Distance de `reference` au créneau de la course ce jour-là : nulle pendant qu'elle roule, et
+			// c'est de combien elle le manque sinon.
+			const distance = Math.max(0, midnight + departure - reference, reference - (midnight + arrival));
+
+			// À égalité — deux versions qui circulent le même jour —, on garde celle que la source annonce :
+			// un identifiant ne se réécrit que lorsqu'il le faut.
+			if (distance < bestDistance || (distance === bestDistance && candidate === tripId)) {
+				bestDistance = distance;
+				best = { tripId: candidate, date };
+			}
 		}
 	}
 

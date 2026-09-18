@@ -9,6 +9,7 @@ import {
 	GTFS_CHECK_INTERVAL,
 	POLL_INTERVAL,
 	PORT,
+	PREFERRED_POSITION_STALENESS,
 	REALTIME_LINES,
 	SERVICE_ALERTS_URL,
 	STATE_CACHE_PATH,
@@ -22,7 +23,7 @@ import {
 	VERIFICATION_STALENESS,
 } from "./config.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
-import { resolveServiceDate, scheduledTripUpdates, serviceDays, tripRun } from "./gtfs-rt/scheduled-trips.js";
+import { resolveServiceRun, scheduledTripUpdates, serviceDays, tripRun } from "./gtfs-rt/scheduled-trips.js";
 import { type Movement, useMovementTracker } from "./gtfs-rt/use-movement-tracker.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
 import {
@@ -121,7 +122,13 @@ async function poll() {
 	const nowSeconds = Math.floor(Date.now() / 1000);
 	const forgotten = registry.prune(nowSeconds);
 
+	// Journées de service auxquelles une course annoncée peut appartenir, calculées une fois pour tout
+	// le relevé : le calendrier ne change pas d'un véhicule à l'autre.
+	const candidateDays = serviceDays(staticGtfs.data, [-1, 0, 1]);
+
 	let published = 0;
+	let preferredPositions = 0;
+	let unresolvedTrips = 0;
 	let refreshed = 0;
 	let staleRecords = 0;
 	let unprovenVehicles = 0;
@@ -155,22 +162,51 @@ async function poll() {
 		const position = vehicle?.position;
 		if (!vehicleId || !position || !vehicle.trip?.tripId) continue;
 
-		// Que la source cesse elle-même de réhorodater un véhicule est un aveu : elle l'a perdu.
-		const sourceTimestamp = Number(vehicle.timestamp ?? 0);
-		if (!sourceTimestamp || nowSeconds - sourceTimestamp > VEHICLE_STALENESS) {
+		// D'où vient la position qu'on publiera. Le flux SAE sort par moments des coordonnées
+		// aberrantes ; l'ancien GTFS-RT, lui, reste juste. On le préfère donc chaque fois qu'il a
+		// quelque chose d'assez frais à dire, et le SAE n'est plus qu'un repli. Tout ce qui suit ne
+		// connaît que ce relevé-là — position, date, péremption, mouvement.
+		const preferred = verificationFeed.verifiedVehicles.get(vehicleId);
+		const reading =
+			preferred !== undefined && nowSeconds - preferred.recordedAt <= PREFERRED_POSITION_STALENESS
+				? ({ source: "astuce", position: preferred.position, timestamp: preferred.recordedAt } as const)
+				: ({ source: "cityway", position, timestamp: Number(vehicle.timestamp ?? 0) } as const);
+
+		if (reading.source === "astuce") preferredPositions += 1;
+
+		// Qu'une source cesse elle-même de réhorodater un véhicule est un aveu : elle l'a perdu. Le
+		// contrôle porte sur le relevé retenu — un véhicule que le SAE a lâché mais qu'Astuce voit frais
+		// reste donc publié, et c'est bien ce qu'on veut.
+		if (!reading.timestamp || nowSeconds - reading.timestamp > VEHICLE_STALENESS) {
 			staleRecords += 1;
 			continue;
 		}
 
-		// Le départ de la course que la source lui prête. Tant qu'il n'est pas passé, l'immobilité du
-		// véhicule s'explique d'elle-même — il patiente à son terminus — et aucune des durées ne court
-		// contre lui : ni le gel du suivi, ni la sortie du feed, ni l'oubli (cf. `awaitsDeparture`).
-		const departsAt = departureOf(vehicle.trip.tripId, nowSeconds);
+		// La course que la source annonce n'est pas toujours celle qui circule : le GTFS décrit une même
+		// course une fois par service, et le SAE se trompe d'exemplaire — il sort le samedi un vendredi.
+		// On rattache donc l'annonce à la version du jour. Le flux ne parle que de courses en train de
+		// rouler : l'instant du relevé suffit à les situer.
+		const run = resolveServiceRun(staticGtfs.data, candidateDays, vehicle.trip.tripId, nowSeconds);
+		if (run === undefined) unresolvedTrips += 1;
+		const tripId = run?.tripId ?? vehicle.trip.tripId;
+
+		// Le départ de la course. Tant qu'il n'est pas passé, l'immobilité du véhicule s'explique
+		// d'elle-même — il patiente à son terminus — et aucune des durées ne court contre lui : ni le gel
+		// du suivi, ni la sortie du feed, ni l'oubli (cf. `awaitsDeparture`).
+		const departsAt = departureOf(tripId, nowSeconds);
 		const awaitingDeparture = awaitsDeparture(departsAt, nowSeconds);
 
-		// Ce qu'elle réhorodate n'en est pas fiable pour autant : seul le mouvement constaté prouve
-		// qu'elle a encore le véhicule au bout du fil, et date sa position.
-		const movement = movementTracker.observe(vehicleId, position, sourceTimestamp, nowSeconds, awaitingDeparture);
+		// Ce qu'une source réhorodate n'est pas fiable pour autant : seul le mouvement constaté prouve
+		// qu'elle a encore le véhicule au bout du fil, et date sa position. L'empreinte se tient par flux,
+		// deux sources ne donnant jamais tout à fait la même coordonnée.
+		const movement = movementTracker.observe(
+			vehicleId,
+			reading.source,
+			reading.position,
+			reading.timestamp,
+			nowSeconds,
+			awaitingDeparture,
+		);
 
 		// Jamais vu bouger : on ne sait pas si ce véhicule roule ou dort depuis des heures. Il n'entre
 		// dans le feed qu'au premier mouvement constaté, et non au relevé suivant sa découverte.
@@ -252,16 +288,17 @@ async function poll() {
 
 		// La source annonce bien un quai et un rang, mais on ne les lit plus : ils sont recalculés ici
 		// comme ils le sont pour un véhicule qu'on ne sait pas vérifier, d'après la seule position.
-		const location = locateOn(vehicleId, vehicle.trip.tripId, movedPosition);
+		const location = locateOn(vehicleId, tripId, movedPosition);
 
 		published += 1;
 		registry.publish(
 			vehicleId,
 			{
 				trip: {
-					tripId: vehicle.trip.tripId,
+					tripId,
 					routeId,
 					directionId,
+					startDate: run?.date,
 					scheduleRelationship: GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED,
 				},
 				vehicle: { id: `TCAR:${vehicleId}` },
@@ -288,7 +325,7 @@ async function poll() {
 	);
 
 	console.log(
-		`✓ ${registry.publishable(nowSeconds).size} positions (${published} verified, ${refreshed} position-only, ${deadheads} deadheading, ${staleRecords} stale records, ${unprovenVehicles} never moved, ${frozenVehicles} motionless, ${awaitedVehicles} awaiting departure, ${untrackedLines} on untracked lines, ${unknownVehicles} never published, ${unlocated} unlocated, ${forgotten} forgotten).`,
+		`✓ ${registry.publishable(nowSeconds).size} positions (${published} verified, ${refreshed} position-only, ${deadheads} deadheading, ${preferredPositions} located by the legacy feed, ${unresolvedTrips} unresolved trips, ${staleRecords} stale records, ${unprovenVehicles} never moved, ${frozenVehicles} motionless, ${awaitedVehicles} awaiting departure, ${untrackedLines} on untracked lines, ${unknownVehicles} never published, ${unlocated} unlocated, ${forgotten} forgotten).`,
 	);
 }
 
@@ -383,30 +420,46 @@ async function pollTripUpdates() {
 		const covered = new Set<string>();
 		let realtimeTrips = 0;
 		let scheduleOnly = 0;
+		let unresolvedTrips = 0;
 
 		for (const entity of feed.entity) {
 			if (!entity.tripUpdate) continue;
 
 			const tripId = entity.tripUpdate.trip?.tripId;
 
-			// La journée de service de la course, que le flux ne nomme pas : sans elle, le consommateur doit
-			// la deviner, et les journées de service se chevauchent — après minuit, celle d'hier est encore
-			// ouverte. On la déduit de l'horaire annoncé (cf. `resolveServiceDate`), et à défaut d'horaire
-			// de l'instant du relevé : le flux ne parle que de courses en train de rouler ou sur le point
-			// de partir. Ce que le producteur déclare lui-même l'emporte, étant de première main.
-			const startDate =
-				entity.tripUpdate.trip?.startDate ||
-				(tripId
-					? resolveServiceDate(staticGtfs.data, candidateDays, tripId, announcedTime(entity.tripUpdate) ?? nowSeconds)
-					: undefined);
+			// La course qui circule vraiment, et la journée de service dont elle relève — deux choses que le
+			// flux dit mal. Il ne nomme pas la journée, quand les journées de service se chevauchent : après
+			// minuit, celle d'hier est encore ouverte. Et il se trompe d'exemplaire de la course, le GTFS en
+			// décrivant un par service qui l'assure. On tranche les deux sur l'horaire annoncé, et à défaut
+			// d'horaire sur l'instant du relevé : le flux ne parle que de courses en train de rouler ou sur
+			// le point de partir.
+			//
+			// Le `start_date` que le producteur déclare parfois lui-même n'est plus retenu : une source qui
+			// se trompe de version de la course se trompe de journée par la même occasion.
+			const run = tripId
+				? resolveServiceRun(staticGtfs.data, candidateDays, tripId, announcedTime(entity.tripUpdate) ?? nowSeconds)
+				: undefined;
+
+			if (tripId && run === undefined) {
+				unresolvedTrips += 1;
+				console.warn(`\t✘ ${tripId} — aucune version rattachable à une journée de service, relayée telle quelle.`);
+			}
+
+			// Faute de rattachement, la course est relayée comme la source l'annonce : l'horaire théorique
+			// peut être en retard sur le service en cours, et l'écarter ferait disparaître du feed une course
+			// qui roule bel et bien.
+			const resolvedTripId = run?.tripId ?? tripId;
+			const startDate = run?.date;
 
 			if (entity.tripUpdate?.trip) {
 				entity.tripUpdate.trip.scheduleRelationship =
 					GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED;
+				entity.tripUpdate.trip.tripId = resolvedTripId;
 				entity.tripUpdate.trip.startDate = startDate;
 				// Le flux ne renseigne jamais le sens : sans le GTFS statique, toute course passerait pour un
 				// aller et les suppressions déclarées au retour ne s'appliqueraient à rien.
-				entity.tripUpdate.trip.directionId = (tripId ? staticGtfs.data.trips.get(tripId)?.directionId : undefined) ?? 0;
+				entity.tripUpdate.trip.directionId =
+					(resolvedTripId ? staticGtfs.data.trips.get(resolvedTripId)?.directionId : undefined) ?? 0;
 			}
 
 			entity.tripUpdate.stopTimeUpdate?.forEach((stopTimeUpdate) => {
@@ -420,14 +473,14 @@ async function pollTripUpdates() {
 			// Le départ annoncé pour la course, avant que les suppressions d'arrêt ne remanient l'horaire.
 			// Les lignes sans vrai temps réel n'y ont pas droit : la source y rebadge l'horaire théorique,
 			// son « départ » n'en dirait pas plus que le GTFS statique.
-			if (tripId && REALTIME_LINES.has(tripLineId)) {
-				const departure = announcedDeparture(entity.tripUpdate, tripId);
-				if (departure !== undefined) store.tripDepartures.set(tripId, departure);
+			if (resolvedTripId && REALTIME_LINES.has(tripLineId)) {
+				const departure = announcedDeparture(entity.tripUpdate, resolvedTripId);
+				if (departure !== undefined) store.tripDepartures.set(resolvedTripId, departure);
 			}
 
 			applySkippedStops(entity.tripUpdate, tripRouteId, serviceAlerts.skipIndex, staticGtfs.data);
 
-			if (tripId && startDate) covered.add(tripRun(tripId, startDate));
+			if (resolvedTripId && startDate) covered.add(tripRun(resolvedTripId, startDate));
 
 			// Ligne sans vrai temps réel : on ne relaie pas ses horaires, seulement l'existence de la course
 			// et ses suppressions d'arrêt — la forme même que prennent les courses reconstruites.
@@ -437,15 +490,22 @@ async function pollTripUpdates() {
 				// Ni temps réel ni suppression : la course se réduirait au NO_DATA de son premier arrêt, qui
 				// n'apprend rien de plus que l'horaire théorique.
 				if (!hasSkippedStops(entity.tripUpdate)) continue;
-				declareNoRealtime(entity.tripUpdate, tripId ? staticGtfs.data.tripStopSequences.get(tripId) : undefined);
+				declareNoRealtime(
+					entity.tripUpdate,
+					resolvedTripId ? staticGtfs.data.tripStopSequences.get(resolvedTripId) : undefined,
+				);
 				scheduleOnly += 1;
 			}
 
-			// L'identifiant porte la journée de service comme celui des courses reconstruites, et pour la
-			// même raison : deux occurrences d'une même course peuvent circuler ensemble — celle d'hier qui
-			// s'achève après minuit et celle d'aujourd'hui qui part à « 25:10 » — et le flux source les
-			// nomme pareillement, la seconde écrasant alors la première.
-			const tripEntityId = entity.id.split(":").at(-1) ?? entity.id;
+			// L'identifiant est celui de la course retenue, et non celui qu'annonce l'entité : la course a pu
+			// être réappariée, et il désignerait alors l'exemplaire d'une autre journée. C'est le moule des
+			// courses reconstruites depuis le théorique, pour que les deux ne puissent pas se dédoubler.
+			//
+			// Il porte la journée de service pour la même raison qu'elles : deux occurrences d'une même
+			// course peuvent circuler ensemble — celle d'hier qui s'achève après minuit et celle
+			// d'aujourd'hui qui part à « 25:10 » — et sous un identifiant nu, la seconde écraserait la
+			// première.
+			const tripEntityId = (resolvedTripId ?? entity.id).split(":").at(-1) ?? entity.id;
 			store.tripUpdates.set(`ET:TCAR:${tripEntityId}${startDate ? `:${startDate}` : ""}`, entity.tripUpdate);
 		}
 
@@ -455,7 +515,7 @@ async function pollTripUpdates() {
 		for (const [id, tripUpdate] of scheduled) store.tripUpdates.set(id, tripUpdate);
 
 		console.log(
-			`✓ ${store.tripUpdates.size} trip updates (${realtimeTrips} realtime, ${scheduleOnly} source without realtime, ${scheduled.size} rebuilt from schedule, ${store.tripDepartures.size} departures announced).`,
+			`✓ ${store.tripUpdates.size} trip updates (${realtimeTrips} realtime, ${scheduleOnly} source without realtime, ${scheduled.size} rebuilt from schedule, ${store.tripDepartures.size} departures announced, ${unresolvedTrips} unresolved trips).`,
 		);
 	} catch (cause) {
 		console.error("✘ Trip updates poll error:", cause);
