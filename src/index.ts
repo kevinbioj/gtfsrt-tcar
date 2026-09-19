@@ -14,6 +14,7 @@ import {
 	PORT,
 	PREFERRED_POSITION_STALENESS,
 	REALTIME_LINES,
+	ROAD_GRAPH_PATH,
 	SERVICE_ALERTS_URL,
 	STATE_CACHE_PATH,
 	STATIC_GTFS_URL,
@@ -44,6 +45,7 @@ import { useVehicleMonitoring } from "./gtfs-rt/use-vehicle-monitoring.js";
 import { awaitsDeparture, useVehicleRegistry } from "./gtfs-rt/use-vehicle-registry.js";
 import { useVerificationFeed, type VerifiedVehicle } from "./gtfs-rt/use-verification-feed.js";
 import { isDepotDestination, verifyVehicle } from "./gtfs-rt/verify-vehicle.js";
+import { useRoadGraph } from "./routing/road-graph.js";
 import { loadState, saveState } from "./state-cache.js";
 import { useVehicleOccupancyStatuses } from "./utils/use-vehicle-occupancy-status.js";
 
@@ -81,6 +83,8 @@ const staticGtfs = await useStaticGtfs(STATIC_GTFS_URL, GTFS_CHECK_INTERVAL);
 const vehicleLocator = useVehicleLocator(staticGtfs, restored?.locations);
 const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs);
 const detourStore = useDetourStore(DETOURS_DB_PATH);
+// Sa présence est constatée ici, ses octets ne seront lus qu'au premier accrochage.
+const roadGraph = useRoadGraph(ROAD_GRAPH_PATH);
 
 const hono = new Hono();
 
@@ -106,6 +110,7 @@ if (ADMIN_USERNAME && ADMIN_PASSWORD) {
 			store: detourStore,
 			gtfs: staticGtfs,
 			serviceAlerts,
+			roadGraph,
 			rebuild: () => rebuildDetourEntities(),
 		}),
 	);

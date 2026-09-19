@@ -9,6 +9,7 @@
 	"scripts": {
 		"dev": "tsx --env-file .env src/index.ts",
 		"build": "tsc",
+		"build:graph": "tsx src/tools/build-road-graph.ts",
 		"start": "node dist/index.js",
 		"check": "biome check",
 		"check:fix": "biome check --fix"

@@ -1,3 +1,4 @@
+import { DETOUR_REJOIN_OFFSET } from "../config.js";
 import { type Coordinates, projectOnShape, type ShapePoint } from "../utils/geometry.js";
 
 /**
@@ -39,12 +40,17 @@ export type SpliceOutcome =
  * deux infos trafic se succèdent dans le sens de la marche.
  *
  * Le point de divergence d'un tracé est le projeté de son PREMIER point, et lui seul commande la
- * coupe. Le dernier point ne sert qu'à décider si la course reprend son itinéraire : elle ne le
- * reprend que s'il se projette PLUS LOIN que le premier. Sinon le trajet s'achève sur le dessin, ce
- * qui est exactement ce qu'il faut pour un terminus provisoire — le véhicule fait demi-tour et ne va
- * pas au-delà. C'est même le cas le plus fréquent, et le confondre avec une erreur reviendrait à
- * refuser de publier les déviations qui coupent une ligne en deux. Les tracés suivants sont alors
- * hors d'atteinte, et {@link SpliceOutcome.unreachable} les compte.
+ * coupe.
+ *
+ * La course ne reprend son itinéraire que si le tracé l'a RAMENÉE dessus : son dernier point doit
+ * tomber sur la ligne — à moins de {@link DETOUR_REJOIN_OFFSET} — et en aval du point de divergence,
+ * faute de quoi la course remonterait. Rien n'est relié automatiquement : un tracé qui s'arrête à
+ * l'écart de l'itinéraire s'y arrête pour de bon, et le trajet publié s'achève là. C'est ce qu'il
+ * faut pour un terminus provisoire ou une ligne coupée en deux, et cela se dessine sans rien
+ * déclarer — il suffit de ne pas ramener le tracé sur la ligne.
+ *
+ * Les tracés qui suivaient un tracé sans retour sont alors hors d'atteinte, et
+ * {@link SpliceOutcome.unreachable} les compte.
  *
  * Rien n'est refusé pour cause de raccord douteux. Les écarts aux points de divergence sont rapportés
  * ({@link SpliceOutcome.startOffsets}) pour que l'appelant les signale, pas pour qu'il renonce.
@@ -53,7 +59,14 @@ export function spliceShape(original: ShapePoint[], drawn: readonly (readonly Co
 	if (original.length < 2) return { ok: false, degenerate: true };
 
 	/** Chaque tracé rapporté à l'itinéraire : où il le quitte, où il le rejoint. */
-	const projected: { points: readonly Coordinates[]; from: number; to: number; offset: number }[] = [];
+	const projected: {
+		points: readonly Coordinates[];
+		from: number;
+		to: number;
+		offset: number;
+		/** Le tracé ramène-t-il la course sur l'itinéraire ? */
+		rejoins: boolean;
+	}[] = [];
 	let degenerate = 0;
 
 	for (const path of drawn) {
@@ -71,7 +84,13 @@ export function spliceShape(original: ShapePoint[], drawn: readonly (readonly Co
 			continue;
 		}
 
-		projected.push({ points: path, from: from.distance, to: to.distance, offset: from.offset });
+		projected.push({
+			points: path,
+			from: from.distance,
+			to: to.distance,
+			offset: from.offset,
+			rejoins: to.offset <= DETOUR_REJOIN_OFFSET && to.distance > from.distance,
+		});
 	}
 
 	if (projected.length === 0) return { ok: false, degenerate: true };
@@ -101,7 +120,7 @@ export function spliceShape(original: ShapePoint[], drawn: readonly (readonly Co
 		points.push(...path.points.map((point) => ({ latitude: point.latitude, longitude: point.longitude })));
 		startOffsets.push(path.offset);
 
-		if (path.to > path.from) cursor = path.to;
+		if (path.rejoins) cursor = path.to;
 		else open = false;
 	}
 

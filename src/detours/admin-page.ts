@@ -104,6 +104,20 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	.alertbox { background: #fdf6e3; border: 1px solid #e6d39a; color: var(--warn);
 		padding: 8px 10px; border-radius: 6px; font-size: 13px; margin-bottom: 10px; }
 	.row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+	button.grow { flex: 1; }
+	/*
+	 * Deux choix qui s'excluent, dessinés comme un seul objet plutôt que comme deux boutons côte à
+	 * côte : on voit alors qu'on règle une chose, et non qu'on en déclenche deux. Les bordures se
+	 * chevauchent d'un pixel pour n'en former qu'une entre les deux moitiés.
+	 */
+	.segmented { display: flex; flex: 1; }
+	.segmented button { flex: 1; border-radius: 0; margin-left: -1px; }
+	.segmented button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+	.segmented button:last-child { border-radius: 0 6px 6px 0; }
+	.segmented button.active { position: relative; z-index: 1; }
+	/* Les gestes de la carte : une liste serrée, à lire une fois et à retrouver du coin de l'œil. */
+	.hints { margin: 0 0 8px; padding-left: 16px; color: var(--muted); font-size: 13px; }
+	.hints li { margin: 2px 0; }
 	.stop { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
 	.stop .head { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
 	.stop .num { width: 22px; height: 22px; flex: none; border-radius: 50%; background: var(--accent);
@@ -112,6 +126,11 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	.field { display: flex; gap: 6px; align-items: center; }
 	.field label { flex: none; font-size: 12px; color: var(--muted); width: 74px; }
 	.actions { display: flex; gap: 8px; margin-top: 16px; }
+	/*
+	 * Un filet là où l'on passe des réglages — ce que le prochain clic fera — aux actions — ce qui se
+	 * produit tout de suite. Les deux vivent dans la même section et se ressemblaient trop.
+	 */
+	.actions.divided { border-top: 1px solid var(--line); padding-top: 12px; }
 	.status { margin-top: 10px; font-size: 13px; }
 	.hidden { display: none; }
 	.results { max-height: 220px; overflow-y: auto; border: 1px solid var(--line);
@@ -176,10 +195,31 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		</div>
 
 		<h2>Tracé du tronçon</h2>
-		<p class="note">Cliquer pour prolonger, glisser un sommet pour le déplacer. Partir d'où la
-			course quitte son itinéraire, y revenir plus loin — ou s'arrêter là si la ligne est coupée.</p>
-		<div class="row">
-			<button id="draw">Dessiner</button>
+		<p class="note">Partir d'où la course quitte son itinéraire, et y revenir plus loin — ou
+			s'arrêter à l'écart si la ligne est coupée.</p>
+
+		<ul class="hints">
+			<li>Clic : poser un point de passage. Glisser : le déplacer. Alt+clic : le retirer.</li>
+			<li>Clic sur une jambe : y insérer un point. Sa pastille centrale la bascule entre rue et
+				ligne droite.</li>
+			<li>En « suivre les rues », le point posé se recale sur la chaussée : c'est lui qui sera
+				publié, pas le clic.</li>
+			<li>Sens interdits et accès réservés ne sont pas opposés au tracé : l'itinéraire remonte une
+				rue à sens unique si c'est le plus court.</li>
+			<li>La course ne reprend sa ligne que si le tracé l'y ramène. Le finir à l'écart, c'est
+				l'arrêter là : terminus provisoire, ligne coupée.</li>
+		</ul>
+
+		<div class="row"><button id="draw" class="grow">Dessiner</button></div>
+		<div class="field"><label>Trait</label>
+			<div class="segmented">
+				<button id="penRoute">Suivre les rues</button>
+				<button id="penFree">Ligne droite</button>
+			</div>
+		</div>
+		<p class="note" id="penNote"></p>
+
+		<div class="actions divided">
 			<button id="undo">Annuler le dernier point</button>
 			<button id="clearPath" class="danger">Effacer</button>
 		</div>
@@ -202,7 +242,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	var state = {
 		detail: null, rows: [], segments: [], active: 0, mode: "idle",
 		map: null, base: null, routeLayer: null, otherLayer: null, drawLayer: null, previewLine: null,
-		stopMarkers: [], vertexMarkers: [], pathLine: null, shapes: [], searchTimer: null, countTimer: null
+		stopMarkers: [], waypointMarkers: [], legLines: [], legToggles: [], pen: "free",
+		shapes: [], searchTimer: null, countTimer: null
 	};
 
 	/** Le tronçon en cours d'édition. Il y en a toujours au moins un dès qu'un détail est ouvert. */
@@ -225,6 +266,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	/** Écart au-delà duquel le point de divergence est signalé — cf. MAX_DETOUR_JUNCTION_OFFSET. */
 	var MAX_JUNCTION_METRES = 200;
+
+	/** En deçà, le tracé a ramené la course sur l'itinéraire — cf. DETOUR_REJOIN_OFFSET. */
+	var REJOIN_METRES = 50;
 
 	function el(id) { return document.getElementById(id); }
 
@@ -525,14 +569,77 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 * qu'il y a d'interruptions sur l'itinéraire.
 	 */
 	function adoptSegment(segment) {
-		return {
+		var adopted = {
 			startStopId: segment.startStopId, endStopId: segment.endStopId,
 			propagatedDelay: segment.propagatedDelay,
 			stops: segment.stops.map(adoptStop),
-			path: segment.path.map(function (point) { return [point.latitude, point.longitude]; }),
+			path: segment.path.map(asPair),
+			waypoints: [], legs: [],
 			publishable: segment.publishable,
 			matchingTrips: segment.matchingTrips
 		};
+
+		adoptDrawing(adopted, (segment.waypoints || []).map(function (waypoint) {
+			return { point: asPair(waypoint), mode: waypoint.mode === "route" ? "route" : "free" };
+		}));
+
+		return adopted;
+	}
+
+	function asPair(point) { return [point.latitude, point.longitude]; }
+
+	function samePoint(a, b) { return a[0] === b[0] && a[1] === b[1]; }
+
+	function newLeg(points) { return { points: points || [], status: "ok", token: 0, message: "" }; }
+
+	/**
+	 * Redécoupe en jambes le tracé enregistré.
+	 *
+	 * Seuls les points de passage et le tracé aplati traversent l'enregistrement : les frontières des
+	 * jambes se retrouvent en suivant le tracé et en y reconnaissant, dans l'ordre, chaque point de
+	 * passage — ce sont très exactement les endroits où les jambes ont été recousues.
+	 *
+	 * Si la lecture ne retombe pas sur ses pieds — tracé repris à la main, enregistrement d'une autre
+	 * version — on garde le tracé TEL QUEL et l'on revient au dessin libre : chaque point devient un
+	 * point de passage, et le trajet publié n'est pas touché d'un pouce. C'est ce qui compte : le
+	 * découpage en jambes n'est qu'un plan de montage.
+	 */
+	function adoptDrawing(segment, waypoints) {
+		var path = segment.path;
+
+		if (path.length >= 2 && waypoints.length >= 2 && samePoint(path[0], waypoints[0].point)) {
+			var legs = [];
+			var points = [path[0]];
+			var next = 1;
+
+			for (var index = 1; index < path.length; index += 1) {
+				points.push(path[index]);
+				if (next < waypoints.length && samePoint(path[index], waypoints[next].point)) {
+					legs.push(newLeg(points));
+					points = [path[index]];
+					next += 1;
+				}
+			}
+
+			if (next === waypoints.length && legs.length === waypoints.length - 1) {
+				segment.waypoints = waypoints;
+				segment.legs = legs;
+				return;
+			}
+		}
+
+		segment.waypoints = path.length >= 2
+			? path.map(function (point) { return { point: point, mode: "free" }; })
+			: [];
+		straightenLegs(segment);
+	}
+
+	/** Une jambe droite entre chaque point de passage : le dessin libre, tel qu'il a toujours été. */
+	function straightenLegs(segment) {
+		segment.legs = [];
+		for (var index = 0; index + 1 < segment.waypoints.length; index += 1) {
+			segment.legs.push(newLeg([segment.waypoints[index].point, segment.waypoints[index + 1].point]));
+		}
 	}
 
 	function openDetail(key) {
@@ -541,6 +648,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			state.segments = detail.segments.map(adoptSegment);
 			if (state.segments.length === 0) state.segments = [emptySegment()];
 			state.active = 0;
+			// L'accrochage aux rues est ce qu'on veut presque toujours ; le dessin libre reste à un clic.
+			state.pen = detail.roadRouting ? "route" : "free";
 
 			el("listView").className = "wrap hidden";
 			el("detailView").className = "detail";
@@ -554,13 +663,17 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	}
 
 	function emptySegment() {
-		return { startStopId: null, endStopId: null, propagatedDelay: 0, stops: [], path: [], matchingTrips: 0 };
+		return {
+			startStopId: null, endStopId: null, propagatedDelay: 0, stops: [],
+			waypoints: [], legs: [], path: [], matchingTrips: 0
+		};
 	}
 
 	// --- tronçons ---
 
 	/** Tout ce qui dépend du tronçon actif, d'un bloc : on ne repeint jamais l'un sans les autres. */
 	function renderSegment() {
+		renderPen();
 		renderSegments();
 		renderBounds();
 		renderStops();
@@ -864,7 +977,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		state.mode = mode;
 		var searching = mode === "search" || mode === "place";
 		el("addStop").className = searching ? "active" : "";
-		el("draw").className = mode === "draw" ? "active" : "";
+		el("draw").className = mode === "draw" ? "grow active" : "grow";
 		el("draw").textContent = mode === "draw" ? "Terminer le tracé" : "Dessiner";
 		el("stopSearch").className = searching ? "" : "hidden";
 		// Seuls la pose d'un arrêt et le tracé se prennent sur la carte ; la recherche, au clavier.
@@ -877,9 +990,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		if (state.mode === "place") {
 			placeProvisionalStop(event.latlng);
 		} else if (state.mode === "draw") {
-			seg().path.push([event.latlng.lat, event.latlng.lng]);
-			renderPath();
-			renderSegments();
+			addWaypoint(event.latlng);
 		}
 	}
 
@@ -1096,40 +1207,264 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	// --- tracé ---
 
+	/**
+	 * Le tracé se tient en POINTS DE PASSAGE — ceux que l'on clique — et en JAMBES — ce qui les relie.
+	 * Une jambe suit les rues d'OpenStreetMap ou file tout droit, et c'est le point de passage qui
+	 * l'ouvre qui porte ce choix. Le trajet publié, lui, reste la simple suite des points : il se
+	 * recompose à chaque rendu, et rien en aval ne sait qu'il y a eu des jambes.
+	 */
+	function rebuildPath() {
+		var segment = seg();
+		var path = [];
+
+		segment.legs.forEach(function (leg, index) {
+			// Le premier point d'une jambe est le dernier de la précédente : il ne compte qu'une fois.
+			for (var point = index === 0 ? 0 : 1; point < leg.points.length; point += 1) {
+				path.push(leg.points[point]);
+			}
+		});
+
+		// Un point de passage seul ne décrit aucun trajet, et le serveur le refuserait.
+		segment.path = segment.waypoints.length >= 2 ? path : [];
+	}
+
+	/** Pose un point de passage au bout du tracé, et résout la jambe qu'il ferme. */
+	function addWaypoint(latlng) {
+		var segment = seg();
+
+		// Le mode vit sur le point qui OUVRE la jambe : c'est donc le dernier posé qui prend le trait
+		// courant, et non celui qu'on ajoute. Sans quoi changer de trait puis cliquer laisserait la
+		// jambe qu'on vient de tirer au trait d'avant, et n'agirait que sur la suivante.
+		if (segment.waypoints.length > 0) segment.waypoints[segment.waypoints.length - 1].mode = state.pen;
+		segment.waypoints.push({ point: [latlng.lat, latlng.lng], mode: state.pen });
+
+		if (segment.waypoints.length < 2) {
+			renderPath();
+			renderSegments();
+			return;
+		}
+
+		segment.legs.push(newLeg());
+		resolveLeg(segment.legs.length - 1);
+	}
+
+	/** Insère un point de passage au milieu d'une jambe, qui se scinde en deux du même mode. */
+	function insertWaypoint(index, latlng) {
+		var segment = seg();
+		segment.waypoints.splice(index + 1, 0, { point: [latlng.lat, latlng.lng], mode: segment.waypoints[index].mode });
+		segment.legs.splice(index + 1, 0, newLeg());
+		resolveLeg(index);
+		resolveLeg(index + 1);
+	}
+
+	/** Retire un point de passage : ses deux jambes n'en font plus qu'une. */
+	function removeWaypoint(index) {
+		var segment = seg();
+		if (index < 0 || index >= segment.waypoints.length) return;
+		segment.waypoints.splice(index, 1);
+
+		if (segment.waypoints.length < 2) {
+			segment.legs = [];
+		} else if (index === 0) {
+			segment.legs.shift();
+		} else if (index === segment.waypoints.length) {
+			segment.legs.pop();
+		} else {
+			segment.legs.splice(index, 1);
+			resolveLeg(index - 1);
+			return;
+		}
+
+		renderPath();
+		renderSegments();
+	}
+
+	/**
+	 * Recalcule une jambe.
+	 *
+	 * Le routage part au serveur, seul à tenir le graphe : la réponse peut donc revenir après qu'on a
+	 * redéplacé le point de passage. Chaque jambe porte un jeton, incrémenté à chaque demande, et une
+	 * réponse dont le jeton n'est plus le bon décrit un tracé qui n'existe plus — on la laisse tomber.
+	 *
+	 * Un routage qui échoue ne bascule PAS la jambe en ligne droite et n'empêche pas d'enregistrer :
+	 * elle se dessine en rouge, reste déclarée comme suivant les rues, et c'est au dessinateur de
+	 * trancher — poser un point intermédiaire, ou la passer en ligne droite. Deviner à sa place
+	 * publierait un raccourci qu'il n'a pas vu.
+	 */
+	function resolveLeg(index) {
+		var segment = seg();
+		var leg = segment.legs[index];
+		var from = segment.waypoints[index];
+		var to = segment.waypoints[index + 1];
+		if (!leg || !from || !to) return;
+
+		leg.token += 1;
+		leg.message = "";
+		leg.points = [from.point, to.point];
+		var token = leg.token;
+
+		if (from.mode !== "route") {
+			leg.status = "ok";
+			renderPath();
+			renderSegments();
+			return;
+		}
+
+		leg.status = "pending";
+		renderPath();
+
+		request(API + "/api/route", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ from: from.point, to: to.point })
+		}).then(function (result) {
+			if (leg.token !== token) return;
+			leg.points = result.path;
+			leg.status = "ok";
+			adoptSnapped(index);
+			renderPath();
+			renderSegments();
+		}).catch(function (error) {
+			if (leg.token !== token) return;
+			leg.status = "failed";
+			leg.message = error.message;
+			renderPath();
+			renderSegments();
+			setStatus("Jambe " + (index + 1) + " : " + error.message, "error");
+		});
+	}
+
+	/**
+	 * Les deux points de passage d'une jambe accrochée rejoignent la chaussée.
+	 *
+	 * Le serveur n'a pas routé depuis le clic mais depuis son PROJETÉ sur la rue la plus proche, et
+	 * c'est ce projeté qui sera publié. Laisser la pastille là où la souris est tombée montrerait un
+	 * tracé qui n'existe pas : on la ramène où elle a effectivement accroché, quitte à ce qu'elle
+	 * saute de quelques dizaines de mètres sous le curseur — c'est très exactement ce que le mode
+	 * fait, et le voir vaut mieux que de le deviner à l'enregistrement.
+	 *
+	 * Une jambe droite voisine se retend d'autant, sans rien redemander : ses bouts ont bougé.
+	 */
+	function adoptSnapped(index) {
+		var segment = seg();
+		var leg = segment.legs[index];
+		if (!leg || leg.points.length < 2) return;
+
+		segment.waypoints[index].point = leg.points[0];
+		segment.waypoints[index + 1].point = leg.points[leg.points.length - 1];
+
+		if (index > 0 && segment.waypoints[index - 1].mode !== "route") stretchLeg(index - 1);
+		if (segment.waypoints[index + 1].mode !== "route") stretchLeg(index + 1);
+	}
+
+	/** Les deux jambes que touche un point de passage. */
+	function resolveAround(index) {
+		if (index > 0) resolveLeg(index - 1);
+		if (index < seg().legs.length) resolveLeg(index);
+	}
+
+	/** L'état des deux boutons de trait : ce que suivra la PROCHAINE jambe. */
+	function renderPen() {
+		var routing = state.detail && state.detail.roadRouting;
+		if (!routing) state.pen = "free";
+
+		el("penRoute").className = state.pen === "route" ? "active" : "";
+		el("penFree").className = state.pen === "free" ? "active" : "";
+		el("penRoute").disabled = !routing;
+		el("penNote").textContent = routing
+			? ""
+			: "Graphe routier absent : le construire avec pnpm build:graph pour accrocher aux rues.";
+	}
+
 	function renderPath() {
-		if (state.pathLine) state.drawLayer.removeLayer(state.pathLine);
-		state.vertexMarkers.forEach(function (marker) { state.drawLayer.removeLayer(marker); });
-		state.vertexMarkers = [];
+		rebuildPath();
+
+		state.legLines.concat(state.legToggles, state.waypointMarkers).forEach(function (layer) {
+			if (layer) state.drawLayer.removeLayer(layer);
+		});
+		state.legLines = [];
+		state.legToggles = [];
+		state.waypointMarkers = [];
 		if (state.previewLine) { state.base.removeLayer(state.previewLine); state.previewLine = null; }
 
 		drawOtherSegments();
 
-		var path = seg().path;
-		if (path.length > 0) {
-			state.pathLine = L.polyline(path, { color: "#fb8500", weight: 5 }).addTo(state.drawLayer);
+		var segment = seg();
+		var failed = 0;
 
-			path.forEach(function (point, index) {
-				var marker = L.circleMarker(point, { radius: 4, color: "#fb8500", fillColor: "#fff", fillOpacity: 1, weight: 2 })
-					.addTo(state.drawLayer);
-				marker.on("mousedown", function () { startDragVertex(index, marker); });
-				state.vertexMarkers.push(marker);
+		// Une action qui ne ferait rien ne s'offre pas : c'est ce qui distingue, d'un coup d'œil, les
+		// deux boutons d'action des réglages au-dessus, qui eux sont toujours actifs.
+		el("undo").disabled = segment.waypoints.length === 0;
+		el("clearPath").disabled = segment.waypoints.length === 0;
+
+		segment.legs.forEach(function (leg, index) {
+			state.legLines[index] = null;
+			state.legToggles[index] = null;
+			if (leg.points.length < 2) return;
+			if (leg.status === "failed") failed += 1;
+
+			var routed = segment.waypoints[index].mode === "route";
+			var color = leg.status === "failed" ? "#d1242f" : "#fb8500";
+			// Le pointillé dit la ligne droite : ce qui ne suit aucune rue, qu'on l'ait voulu ou que le
+			// routage ait échoué.
+			var line = L.polyline(leg.points, {
+				color: color, weight: 5, opacity: leg.status === "pending" ? .45 : 1,
+				dashArray: routed && leg.status === "ok" ? null : "6 4"
+			}).addTo(state.drawLayer);
+
+			line.on("click", function (event) {
+				L.DomEvent.stopPropagation(event);
+				insertWaypoint(index, event.latlng);
 			});
-		} else {
-			state.pathLine = null;
-		}
+			state.legLines[index] = line;
+
+			// La pastille du milieu bascule la jambe entre rue et ligne droite : un geste visible plutôt
+			// qu'une combinaison de touches, car c'est le réglage qu'on reprend le plus souvent.
+			var toggle = L.circleMarker(leg.points[Math.floor(leg.points.length / 2)], {
+				radius: 5, color: color, fillColor: routed ? color : "#fff", fillOpacity: 1, weight: 2
+			}).addTo(state.drawLayer);
+
+			toggle.bindTooltip("Jambe " + (index + 1) + " · " + (routed ? "suit les rues" : "ligne droite"));
+			toggle.on("click", function (event) {
+				L.DomEvent.stopPropagation(event);
+				segment.waypoints[index].mode = routed ? "free" : "route";
+				resolveLeg(index);
+			});
+			state.legToggles[index] = toggle;
+		});
+
+		// Seuls les points de passage se matérialisent. Les centaines de points qu'une jambe accrochée
+		// rapporte sont de la géométrie, pas des prises : les montrer rendrait le tracé illisible et
+		// laisserait croire qu'on peut les saisir.
+		segment.waypoints.forEach(function (waypoint, index) {
+			var marker = L.circleMarker(waypoint.point, {
+				radius: 6, color: "#fb8500", fillColor: "#fb8500", fillOpacity: 1, weight: 2
+			}).addTo(state.drawLayer);
+
+			marker.on("mousedown", function (event) {
+				if (!event.originalEvent.altKey) startDragWaypoint(index, marker);
+			});
+			marker.on("click", function (event) {
+				L.DomEvent.stopPropagation(event);
+				if (event.originalEvent.altKey) removeWaypoint(index);
+			});
+
+			state.waypointMarkers.push(marker);
+		});
 
 		// La prévisualisation vaut pour la course entière, et non pour le seul tronçon actif : c'est un
 		// unique trajet qui sera publié, cousu de tous les tracés déclarés.
 		var preview = drawPreview();
 		var note = el("pathNote");
+		var counted = segment.waypoints.length + " points de passage, " + segment.path.length + " points publiés";
 
 		if (preview === null) {
-			note.textContent = path.length === 0 ? "Aucun tracé." : path.length + " points, rien à prévisualiser.";
+			note.textContent = segment.waypoints.length === 0 ? "Aucun tracé." : counted + ", rien à prévisualiser.";
 			note.style.color = "var(--muted)";
 			return;
 		}
 
-		var text = (path.length === 0 ? "Aucun tracé ici. En bleu" : path.length + " points. En bleu")
+		var text = (segment.waypoints.length === 0 ? "Aucun tracé ici. En bleu" : counted + ". En bleu")
 			+ ", le trajet publié — ";
 		text += preview.rejoined
 			? "il revient sur l'itinéraire."
@@ -1138,9 +1473,14 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		if (preview.offset > MAX_JUNCTION_METRES) {
 			text += " Départ à " + Math.round(preview.offset) + " m de la ligne grise : la coupe se fera là.";
 		}
+		if (failed > 0) {
+			text += " " + failed + " jambe(s) sans itinéraire, tracées droit : les basculer en ligne droite,"
+				+ " ou poser un point de passage intermédiaire.";
+		}
 
 		note.textContent = text;
-		note.style.color = preview.offset > MAX_JUNCTION_METRES || preview.unreachable > 0 ? "var(--warn)" : "var(--muted)";
+		note.style.color = failed > 0 || preview.offset > MAX_JUNCTION_METRES || preview.unreachable > 0
+			? "var(--warn)" : "var(--muted)";
 	}
 
 	/**
@@ -1171,23 +1511,39 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		});
 	}
 
-	/** Déplacement d'un sommet : Leaflet ne rend pas les cercles déplaçables, on suit la souris. */
-	function startDragVertex(index, marker) {
-		var path = seg().path;
+	/** Déplacement : Leaflet ne rend pas les cercles déplaçables, on suit la souris nous-mêmes. */
+	function startDragWaypoint(index, marker) {
+		var segment = seg();
 		state.map.dragging.disable();
+
 		function onMove(event) {
-			path[index] = [event.latlng.lat, event.latlng.lng];
+			segment.waypoints[index].point = [event.latlng.lat, event.latlng.lng];
 			marker.setLatLng(event.latlng);
-			if (state.pathLine) state.pathLine.setLatLngs(path);
+			// Pendant le geste, les deux jambes voisines se tendent en droites : router à chaque pixel
+			// ferait une requête par mouvement de souris, pour un tracé qu'on n'a pas fini de choisir.
+			stretchLeg(index - 1);
+			stretchLeg(index);
 		}
+
 		function onUp() {
 			state.map.off("mousemove", onMove);
 			state.map.off("mouseup", onUp);
 			state.map.dragging.enable();
-			renderPath();
+			resolveAround(index);
 		}
+
 		state.map.on("mousemove", onMove);
 		state.map.on("mouseup", onUp);
+	}
+
+	/** La jambe tendue entre ses deux points de passage, le temps du geste. */
+	function stretchLeg(index) {
+		var segment = seg();
+		var leg = segment.legs[index];
+		if (!leg) return;
+
+		leg.points = [segment.waypoints[index].point, segment.waypoints[index + 1].point];
+		if (state.legLines[index]) state.legLines[index].setLatLngs(leg.points);
 	}
 
 	/**
@@ -1215,7 +1571,11 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			if (segment.path.length < 2) return;
 			var from = nearestIndex(shape.points, segment.path[0]);
 			var to = nearestIndex(shape.points, segment.path[segment.path.length - 1]);
-			drawn.push({ path: segment.path, from: from.index, to: to.index, offset: from.offset });
+			// Reprend-on l'itinéraire ? Seulement si le tracé y ramène : cf. spliceShape, côté serveur.
+			drawn.push({
+				path: segment.path, from: from.index, to: to.index, offset: from.offset,
+				rejoins: to.offset <= REJOIN_METRES && to.index > from.index
+			});
 		});
 		if (drawn.length === 0) return null;
 		drawn.sort(function (a, b) { return a.from - b.from; });
@@ -1227,7 +1587,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			if (!open || item.from < cursor) { unreachable += 1; return; }
 			preview = preview.concat(shape.points.slice(Math.max(cursor, 0), item.from)).concat(item.path);
 			offset = Math.max(offset, item.offset);
-			if (item.to > item.from) cursor = item.to + 1;
+			if (item.rejoins) cursor = item.to + 1;
 			else open = false;
 		});
 		if (open) preview = preview.concat(shape.points.slice(cursor));
@@ -1267,7 +1627,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 					stops: segment.stops.map(function (stop) {
 						return { stopId: stop.stopId, travelTime: stop.travelTime };
 					}),
-					path: segment.path
+					path: segment.path,
+					// Le plan de montage, pour pouvoir reprendre le tracé plus tard. Un point de passage
+					// esseulé ne décrit rien : il ne part pas, comme le tracé lui-même.
+					waypoints: segment.waypoints.length >= 2 ? segment.waypoints : []
 				};
 			})
 		};
@@ -1332,17 +1695,22 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		state.searchTimer = setTimeout(searchStops, 200);
 	};
 	el("draw").onclick = function () { setMode(state.mode === "draw" ? "idle" : "draw"); };
-	el("undo").onclick = function () { seg().path.pop(); renderPath(); renderSegments(); };
-	el("clearPath").onclick = function () { seg().path = []; renderPath(); renderSegments(); };
+	el("penRoute").onclick = function () { state.pen = "route"; renderPen(); };
+	el("penFree").onclick = function () { state.pen = "free"; renderPen(); };
+	el("undo").onclick = function () { removeWaypoint(seg().waypoints.length - 1); };
+	el("clearPath").onclick = function () {
+		seg().waypoints = [];
+		seg().legs = [];
+		renderPath();
+		renderSegments();
+	};
 	el("save").onclick = save;
 	el("remove").onclick = remove;
 
 	document.addEventListener("keydown", function (event) {
 		if ((event.ctrlKey || event.metaKey) && event.key === "z" && state.detail) {
 			event.preventDefault();
-			seg().path.pop();
-			renderPath();
-			renderSegments();
+			removeWaypoint(seg().waypoints.length - 1);
 		}
 	});
 

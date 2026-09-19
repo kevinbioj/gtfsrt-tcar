@@ -317,3 +317,45 @@ export const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
  * polyligne.
  */
 export const MAX_DETOUR_JUNCTION_OFFSET = 0.2;
+
+/**
+ * Écart, en kilomètres, en deçà duquel on considère qu'un tracé de déviation a REJOINT l'itinéraire
+ * d'origine — et donc que la course le reprend au-delà.
+ *
+ * C'est la seule chose qui décide de la reprise : un tracé qui s'arrête loin de l'itinéraire s'y
+ * arrête pour de bon, et le trajet publié s'achève là. Rien n'est relié automatiquement. Un terminus
+ * provisoire, une ligne coupée en deux, un demi-tour se dessinent ainsi sans rien déclarer de plus —
+ * il suffit de ne pas ramener le tracé sur la ligne.
+ *
+ * Serré à dessein, et bien plus que {@link MAX_DETOUR_JUNCTION_OFFSET} qui ne fait, lui, que
+ * SIGNALER un départ éloigné : ici on décide, et se tromper rallonge le trajet publié de tout ce qui
+ * restait de la ligne. Cinquante mètres, c'est l'ordre de grandeur de l'écart entre une shape GTFS
+ * simplifiée et l'axe de la rue qu'elle suit — soit « le tracé finit sur la ligne », et rien de plus
+ * lâche.
+ */
+export const DETOUR_REJOIN_OFFSET = 0.05;
+
+/**
+ * Graphe routier tiré d'OpenStreetMap, dont l'éditeur de déviations se sert pour accrocher un tracé
+ * aux rues. Il est rangé dans `.cache`, déjà monté en volume, et se construit à la main —
+ * `pnpm build:graph` — à partir d'un extrait `.osm.pbf` qui, lui, ne vit pas dans le dépôt.
+ *
+ * Son ABSENCE est un état normal : l'éditeur retombe alors sur le seul dessin libre, et le reste du
+ * producteur l'ignore complètement.
+ */
+export const ROAD_GRAPH_PATH = ".cache/road-graph.bin";
+
+/**
+ * Écart maximal, en kilomètres, entre un point cliqué et la rue sur laquelle on l'accroche. Au-delà,
+ * on refuse plutôt que d'accrocher au hasard : cent cinquante mètres séparent déjà deux rues
+ * parallèles, et un accrochage silencieux sur la mauvaise donnerait un itinéraire absurde.
+ */
+export const ROAD_SNAP_RADIUS = 0.15;
+
+/**
+ * Nombre de nœuds que la recherche d'itinéraire s'autorise à développer avant d'abandonner. Une
+ * jambe de déviation fait quelques rues : dépasser ce plafond signifie que les deux points ne
+ * communiquent pas — réseau coupé par la Seine, impasse à sens unique — et mieux vaut le dire tout
+ * de suite que faire attendre l'éditeur.
+ */
+export const ROAD_ROUTING_MAX_EXPANSIONS = 200_000;
