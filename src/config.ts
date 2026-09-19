@@ -317,3 +317,28 @@ export const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
  * polyligne.
  */
 export const MAX_DETOUR_JUNCTION_OFFSET = 0.2;
+
+/**
+ * Graphe routier tiré d'OpenStreetMap, dont l'éditeur de déviations se sert pour accrocher un tracé
+ * aux rues. Il est rangé dans `.cache`, déjà monté en volume, et se construit à la main —
+ * `pnpm build:graph` — à partir d'un extrait `.osm.pbf` qui, lui, ne vit pas dans le dépôt.
+ *
+ * Son ABSENCE est un état normal : l'éditeur retombe alors sur le seul dessin libre, et le reste du
+ * producteur l'ignore complètement.
+ */
+export const ROAD_GRAPH_PATH = ".cache/road-graph.bin";
+
+/**
+ * Écart maximal, en kilomètres, entre un point cliqué et la rue sur laquelle on l'accroche. Au-delà,
+ * on refuse plutôt que d'accrocher au hasard : cent cinquante mètres séparent déjà deux rues
+ * parallèles, et un accrochage silencieux sur la mauvaise donnerait un itinéraire absurde.
+ */
+export const ROAD_SNAP_RADIUS = 0.15;
+
+/**
+ * Nombre de nœuds que la recherche d'itinéraire s'autorise à développer avant d'abandonner. Une
+ * jambe de déviation fait quelques rues : dépasser ce plafond signifie que les deux points ne
+ * communiquent pas — réseau coupé par la Seine, impasse à sens unique — et mieux vaut le dire tout
+ * de suite que faire attendre l'éditeur.
+ */
+export const ROAD_ROUTING_MAX_EXPANSIONS = 200_000;

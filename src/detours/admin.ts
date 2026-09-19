@@ -1,8 +1,11 @@
 import { type Context, Hono } from "hono";
 import { basicAuth } from "hono/basic-auth";
 
+import { ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SNAP_RADIUS } from "../config.js";
 import type { AlertScope, AlertScopeIndex } from "../gtfs-rt/use-service-alerts.js";
 import { normalizeStopName, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
+import type { RoadGraphHandle } from "../routing/road-graph.js";
+import { routeOnRoad } from "../routing/route-on-road.js";
 import { encodePolyline } from "../utils/encode-polyline.js";
 import { sanitizeHtml } from "../utils/sanitize-html.js";
 import { ADMIN_PAGE } from "./admin-page.js";
@@ -26,6 +29,8 @@ export type AdminDependencies = {
 	store: DetourStore;
 	gtfs: { data: StaticGtfs };
 	serviceAlerts: { alertScopes: AlertScopeIndex };
+	/** Le graphe routier, pour accrocher un tracé aux rues. Son absence désarme le mode, rien de plus. */
+	roadGraph: RoadGraphHandle;
 	/** Réassemble les entités du feed, pour qu'un enregistrement se voie sans attendre le relevé suivant. */
 	rebuild: () => void;
 };
@@ -157,6 +162,54 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		return c.json(detail(scope, deps));
 	});
 
+	/**
+	 * Une jambe de tracé, accrochée aux rues : deux points cliqués, et l'itinéraire routier qui les
+	 * joint.
+	 *
+	 * Une jambe par appel, et non le tracé entier : déplacer un point de passage ne remet en cause que
+	 * les deux jambes qui le touchent, et l'interface n'a alors qu'à redemander celles-là.
+	 */
+	admin.post("/api/route", async (c) => {
+		const graph = deps.roadGraph.graph();
+		if (graph === undefined) {
+			return c.json({ code: 503, message: "Graphe routier absent : le mode accrochage est indisponible." }, 503);
+		}
+
+		let body: unknown;
+		try {
+			body = await c.req.json();
+		} catch {
+			return c.json({ code: 400, message: "Corps de requête illisible." }, 400);
+		}
+
+		const payload = (body ?? {}) as Record<string, unknown>;
+		const from = readPoint(payload.from);
+		const to = readPoint(payload.to);
+		if (from === undefined || to === undefined) {
+			return c.json({ code: 400, message: "Deux points attendus, chacun en [latitude, longitude]." }, 400);
+		}
+
+		const route = routeOnRoad(graph, from, to, {
+			snapRadius: ROAD_SNAP_RADIUS,
+			maxExpansions: ROAD_ROUTING_MAX_EXPANSIONS,
+		});
+
+		if ("failure" in route) {
+			const message =
+				route.failure === "no-road" ? "Point trop éloigné d'une rue." : "Aucun itinéraire entre ces deux points.";
+			return c.json({ code: 422, message }, 422);
+		}
+
+		// Les points partent en paires [latitude, longitude], comme le tracé d'un tronçon : l'interface
+		// les recoud bout à bout sans rien convertir.
+		return c.json({
+			path: route.path.map((point) => [point.latitude, point.longitude]),
+			distance: Math.round(route.distance * 1000),
+			fromOffset: Math.round(route.from.offset * 1000),
+			toOffset: Math.round(route.to.offset * 1000),
+		});
+	});
+
 	admin.delete("/api/detours/:key", (c) => {
 		const scope = deps.serviceAlerts.alertScopes.get(c.req.param("key"));
 		if (scope === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
@@ -262,6 +315,7 @@ function detail(scope: AlertScope, deps: AdminDependencies) {
 					endStopId: bounds.endStopId,
 					propagatedDelay: 0,
 					stops: [],
+					waypoints: [],
 					path: [],
 				}));
 
@@ -271,6 +325,9 @@ function detail(scope: AlertScope, deps: AdminDependencies) {
 		// saisi, listes et plans de déviation compris. Il part nettoyé plutôt qu'échappé — la page
 		// l'affiche tel quel, et n'a pas à savoir d'où il vient (cf. `sanitizeHtml`).
 		descriptionHtml: sanitizeHtml(scope.descriptionText),
+		// L'éditeur ne propose l'accrochage aux rues que si le graphe est là. Le drapeau voyage avec le
+		// détail plutôt que dans un appel à lui — la carte n'existe que sur cette vue.
+		roadRouting: deps.roadGraph.available,
 		removedStopIds: [...scope.removedStopIds],
 		sequences,
 		shapes,
@@ -288,6 +345,7 @@ function detail(scope: AlertScope, deps: AdminDependencies) {
 			endStopId: segment.endStopId,
 			propagatedDelay: segment.propagatedDelay,
 			stops: segment.stops.map((stop) => ({ ...stop, ...describeStop(stop.stopId, deps) })),
+			waypoints: segment.waypoints,
 			path: segment.path,
 			publishable: isSegmentPublishable(segment),
 			matchingTrips: countMatchingTrips(segment, scope, deps),
@@ -428,12 +486,47 @@ function parseSegment(
 	// Un tracé d'un seul point ne décrit rien, et `Shape` en réclame deux au minimum.
 	if (path.length === 1) return { message: `${label} : un tracé doit compter au moins deux points.` };
 
+	// Les points de passage sont facultatifs : sans eux, le tracé EST sa propre suite de points de
+	// passage, tirés droit — c'est le dessin libre d'avant, et un PUT écrit à la main reste valable.
+	const waypoints: DetourSegment["waypoints"] = [];
+	if (payload.waypoints === undefined) {
+		waypoints.push(...path.map((point) => ({ ...point, mode: "free" as const })));
+	} else {
+		if (!Array.isArray(payload.waypoints)) return { message: `${label} : points de passage attendus, une liste.` };
+
+		for (const [index, entry] of payload.waypoints.entries()) {
+			if (typeof entry !== "object" || entry === null) {
+				return { message: `${label}, point de passage ${index + 1} : illisible.` };
+			}
+			const waypoint = entry as Record<string, unknown>;
+
+			const point = Array.isArray(waypoint.point) ? readCoordinates(waypoint.point[0], waypoint.point[1]) : undefined;
+			if (point === undefined) {
+				return { message: `${label}, point de passage ${index + 1} : coordonnées hors du réseau.` };
+			}
+			if (waypoint.mode !== "route" && waypoint.mode !== "free") {
+				return { message: `${label}, point de passage ${index + 1} : mode attendu, « route » ou « free ».` };
+			}
+
+			waypoints.push({ ...point, mode: waypoint.mode });
+		}
+	}
+
+	// Le seul lien qu'on impose entre les deux : ils vont de pair. On ne vérifie PAS que le tracé
+	// redérive des points de passage — ce serait rejouer le routage ici, et le tracé, déjà contrôlé
+	// point par point, fait foi de toute façon.
+	if (waypoints.length === 1) return { message: `${label} : un tracé doit compter au moins deux points de passage.` };
+	if ((path.length === 0) !== (waypoints.length === 0)) {
+		return { message: `${label} : tracé et points de passage doivent être tous deux vides, ou tous deux remplis.` };
+	}
+
 	return {
 		segment: {
 			startStopId: startStopId as string | null,
 			endStopId: endStopId as string | null,
 			propagatedDelay: propagatedDelay as number,
 			stops,
+			waypoints,
 			path,
 		},
 	};
@@ -481,6 +574,11 @@ async function parseProvisionalStop(
 	if (coordinates === undefined) return { message: "Coordonnées hors du réseau." };
 
 	return { name, ...coordinates };
+}
+
+/** Un point tel que l'interface l'envoie : une paire [latitude, longitude]. */
+function readPoint(raw: unknown) {
+	return Array.isArray(raw) ? readCoordinates(raw[0], raw[1]) : undefined;
 }
 
 function readCoordinates(latitude: unknown, longitude: unknown) {

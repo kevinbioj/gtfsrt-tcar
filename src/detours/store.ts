@@ -210,6 +210,33 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 			ALTER TABLE detours DROP COLUMN propagated_delay;
 		`);
 	},
+	// Un tracé cesse d'être une simple suite de points pour devenir une suite de POINTS DE PASSAGE,
+	// chacun disant le mode de la jambe qui le suit : accrochée aux rues d'OpenStreetMap, ou tirée
+	// droit comme auparavant. Le tracé lui-même — `detour_path` — ne change pas d'un iota : c'est lui
+	// qui est publié, et lui seul que la recouture des shapes regarde.
+	`
+	CREATE TABLE detour_waypoints (
+		alert_number TEXT    NOT NULL,
+		route_id     TEXT    NOT NULL,
+		direction_id INTEGER NOT NULL,
+		segment      INTEGER NOT NULL,
+		position     INTEGER NOT NULL,
+		latitude     REAL    NOT NULL,
+		longitude    REAL    NOT NULL,
+		-- Le mode de la jambe qui SUIT ce point : « route » ou « free ». Sans objet pour le dernier.
+		mode         TEXT    NOT NULL,
+		PRIMARY KEY (alert_number, route_id, direction_id, segment, position),
+		FOREIGN KEY (alert_number, route_id, direction_id, segment)
+			REFERENCES detour_segments (alert_number, route_id, direction_id, segment) ON DELETE CASCADE
+	) STRICT;
+
+	-- Un tracé dessiné à la main EST une suite de points de passage dont chaque jambe est droite : la
+	-- reprise est exacte et non approchée, et rien n'est à deviner au chargement. L'invariant « des
+	-- points de passage existent dès qu'il y a un tracé » tient ainsi dans la base elle-même.
+	INSERT INTO detour_waypoints
+	SELECT alert_number, route_id, direction_id, segment, position, latitude, longitude, 'free'
+	FROM detour_path;
+	`,
 ];
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
@@ -259,8 +286,24 @@ export type DetourSegment = {
 	/** Secondes à répercuter sur tous les horaires suivant la modification. */
 	propagatedDelay: number;
 	stops: DetourStop[];
+	/**
+	 * Les points cliqués, et pour chacun le mode de la jambe qui le suit. C'est le PLAN DE MONTAGE du
+	 * tracé, conservé pour pouvoir le reprendre ; rien en aval ne le regarde.
+	 */
+	waypoints: DetourWaypoint[];
+	/**
+	 * Le tracé publié, aplati. Il est calculé par l'interface — elle seule sait ce que le routage a
+	 * rendu — et rangé tel quel : le reconstruire ici demanderait le graphe routier, qui peut être
+	 * absent, et reconstruire le graphe déplacerait alors en silence un tracé déjà publié.
+	 */
 	path: Coordinates[];
 };
+
+/** Un point de passage, et le mode de la jambe qui le SUIT. La dernière ne suit rien. */
+export type DetourWaypoint = Coordinates & { mode: DetourLegMode };
+
+/** Accrochée aux rues d'OpenStreetMap, ou tirée droit d'un point de passage au suivant. */
+export type DetourLegMode = "route" | "free";
 
 /** Tout ce qui a été déclaré pour une déviation. */
 export type DetourRecord = {
@@ -341,6 +384,7 @@ export function useDetourStore(path: string) {
 				endStopId: row.end_stop_id,
 				propagatedDelay: row.propagated_delay,
 				stops: [],
+				waypoints: [],
 				path: [],
 			});
 		}
@@ -359,6 +403,16 @@ export function useDetourStore(path: string) {
 			records
 				.get(detourKey(row.alert_number, row.route_id, row.direction_id))
 				?.segments[row.segment]?.path.push({ latitude: row.latitude, longitude: row.longitude });
+		}
+
+		for (const row of db
+			.prepare("SELECT * FROM detour_waypoints ORDER BY alert_number, route_id, direction_id, segment, position")
+			.all() as WaypointRow[]) {
+			records.get(detourKey(row.alert_number, row.route_id, row.direction_id))?.segments[row.segment]?.waypoints.push({
+				latitude: row.latitude,
+				longitude: row.longitude,
+				mode: row.mode === "route" ? "route" : "free",
+			});
 		}
 	};
 
@@ -410,6 +464,11 @@ export function useDetourStore(path: string) {
 					`INSERT INTO detour_path (alert_number, route_id, direction_id, segment, position, latitude, longitude)
 					 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 				);
+				const insertWaypoint = db.prepare(
+					`INSERT INTO detour_waypoints
+						(alert_number, route_id, direction_id, segment, position, latitude, longitude, mode)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				);
 
 				input.segments.forEach((segment, rank) => {
 					insertSegment.run(
@@ -426,6 +485,18 @@ export function useDetourStore(path: string) {
 					});
 					segment.path.forEach((point, position) => {
 						insertPoint.run(alertNumber, routeId, directionId, rank, position, point.latitude, point.longitude);
+					});
+					segment.waypoints.forEach((waypoint, position) => {
+						insertWaypoint.run(
+							alertNumber,
+							routeId,
+							directionId,
+							rank,
+							position,
+							waypoint.latitude,
+							waypoint.longitude,
+							waypoint.mode,
+						);
 					});
 				});
 
@@ -562,6 +633,8 @@ type PathRow = {
 	latitude: number;
 	longitude: number;
 };
+
+type WaypointRow = PathRow & { mode: string };
 
 /**
  * Applique les migrations qui manquent. Chacune passe dans sa propre transaction, `user_version`
