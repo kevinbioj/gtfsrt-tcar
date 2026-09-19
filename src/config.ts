@@ -292,3 +292,28 @@ export const ALERT_CACHE_PATH = ".cache/alert-analysis.json";
  * il se verrait dans le feed pendant de longues minutes (cf. `loadState`).
  */
 export const STATE_CACHE_PATH = ".state.json";
+
+/**
+ * Base des déviations déclarées : arrêts de substitution et itinéraires de report, saisis dans
+ * l'interface d'administration. Elle est rangée dans `.cache`, déjà monté en volume — SQLite y pose
+ * aussi ses fichiers `-wal` et `-shm`, qu'un montage fichier par fichier ne couvrirait pas.
+ */
+export const DETOURS_DB_PATH = ".cache/detours.db";
+
+/**
+ * Identifiants de l'interface d'administration. Sans eux, l'interface n'est PAS montée du tout : une
+ * page ouverte vaudrait moins qu'une page absente, et un mot de passe par défaut encore moins.
+ */
+export const ADMIN_USERNAME = process.env.ADMIN_USERNAME;
+export const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
+/**
+ * Écart, en kilomètres, au-delà duquel le point de départ d'un tracé de déviation est SIGNALÉ comme
+ * éloigné de l'itinéraire qu'il quitte. Ce n'est pas un refus : le tracé est publié quoi qu'il
+ * arrive — une déviation sans tracé est bien pire qu'une déviation au raccord approximatif, et le
+ * dessinateur voit le résultat dans l'éditeur. Le journal se contente donc de le mentionner.
+ *
+ * Large à dessein : on dessine à la souris, et le point de divergence tombe rarement pile sur la
+ * polyligne.
+ */
+export const MAX_DETOUR_JUNCTION_OFFSET = 0.2;

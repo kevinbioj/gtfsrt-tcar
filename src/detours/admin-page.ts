@@ -1,0 +1,1353 @@
+/**
+ * L'interface de déclaration des déviations, d'un seul tenant.
+ *
+ * Elle est portée par une chaîne et non par un fichier `.html` : `tsc` ne copie que les `.ts` vers
+ * `dist`, et le `Dockerfile` ne prend que `src/` puis `dist/`. Un fichier à part imposerait une étape
+ * de copie au build, un chemin à résoudre au démarrage — différent entre `tsx src/` et `node dist/` —
+ * et un lot d'occasions de livrer une image sans sa page. Ici il n'y a rien à copier ni à ouvrir.
+ *
+ * Aucun backtick ni `${` ne doit apparaître dans ce qui suit : la page est un littéral brut, et l'un
+ * comme l'autre y mettraient fin. Le script s'en passe — concaténations plutôt que gabarits.
+ */
+export const ADMIN_PAGE = String.raw`<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Déviations — GTFS-RT TCAR</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+	:root {
+		--bg: #f6f7f9; --panel: #fff; --ink: #14181f; --muted: #67707d; --line: #dfe3e9;
+		--accent: #1f6feb; --danger: #d1242f; --warn: #9a6700; --ok: #1a7f37;
+	}
+	* { box-sizing: border-box; }
+	body { margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+		background: var(--bg); color: var(--ink); }
+	header { display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+		background: var(--panel); border-bottom: 1px solid var(--line); }
+	header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+	header .spacer { flex: 1; }
+	button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px;
+		background: var(--panel); color: var(--ink); cursor: pointer; }
+	button:hover { border-color: var(--muted); }
+	button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+	button.danger { color: var(--danger); }
+	button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+	button:disabled { opacity: .5; cursor: not-allowed; }
+	input, select { font: inherit; padding: 5px 8px; border: 1px solid var(--line);
+		border-radius: 6px; background: var(--panel); color: var(--ink); width: 100%; }
+	.wrap { padding: 20px; }
+	/*
+	 * Une ligne par déviation, et qui tient sur une ligne : les colonnes sont fixes et ce qui déborde
+	 * s'abrège. Le texte entier reste lisible en survol (title), et le détail est à un clic.
+	 */
+	table { width: 100%; border-collapse: collapse; background: var(--panel);
+		border: 1px solid var(--line); border-radius: 8px; overflow: hidden; table-layout: fixed; }
+	th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--line);
+		white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	th { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+		font-weight: 600; background: #fbfcfd; }
+	tbody tr { cursor: pointer; }
+	tbody tr:hover { background: #eef2f7; }
+	tbody tr:last-child td { border-bottom: none; }
+	td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+	/*
+	 * Le cartouche de la ligne, tel que le réseau le dessine : c'est par lui qu'on cherche dans la
+	 * liste, et il se reconnaît plus vite qu'un numéro. Toutes les lignes n'en ont pas — le numéro en
+	 * clair prend alors le relais (cf. adoptPictos).
+	 */
+	.line { display: inline-flex; align-items: center; vertical-align: middle; }
+	.line img { width: 22px; height: 22px; flex: none; }
+	.line .code { display: none; min-width: 28px; padding: 0 6px; border-radius: 5px;
+		background: var(--ink); color: #fff; font-weight: 600; font-size: 12px; text-align: center; }
+	.line.plain .code { display: inline-block; }
+	.toward { color: var(--muted); margin-left: 8px; }
+	.ref { font-variant-numeric: tabular-nums; color: var(--muted); margin-right: 8px; }
+	/* Les regroupements : un bandeau par ligne ou par info trafic, et ses déviations dessous. */
+	tr.group { cursor: default; }
+	tr.group td { background: #eef2f7; padding: 4px 10px; }
+	tr.group:hover td { background: #eef2f7; }
+	tr.group .bar { display: flex; align-items: center; gap: 8px; }
+	tr.group .bar .grow { flex: 1; }
+	tr.group .title { font-weight: 600; min-width: 0; overflow: hidden;
+		text-overflow: ellipsis; white-space: nowrap; }
+	.badge { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 12px;
+		border: 1px solid var(--line); color: var(--muted); }
+	.badge.ok { color: var(--ok); border-color: #b4ddc0; background: #eaf7ee; }
+	.badge.warn { color: var(--warn); border-color: #e6d39a; background: #fdf6e3; }
+	.badge.off { color: var(--muted); }
+	.detail { display: flex; height: calc(100vh - 53px); }
+	#map { flex: 1; }
+	.panel { width: 400px; overflow-y: auto; background: var(--panel);
+		border-left: 1px solid var(--line); padding: 16px; }
+	.panel h2 { font-size: 14px; margin: 20px 0 8px; text-transform: uppercase;
+		letter-spacing: .04em; color: var(--muted); }
+	.panel h2:first-child { margin-top: 0; }
+	.note { color: var(--muted); font-size: 13px; }
+	/*
+	 * Le texte de l'info trafic, tel que l'exploitant l'a écrit : listes, mises en gras, tableaux et
+	 * plans de déviation. Il arrive nettoyé du serveur (cf. sanitizeHtml) ; il reste à lui rendre des
+	 * marges qui tiennent dans un panneau de quatre cents pixels, et à défaire ce que les règles du
+	 * tableau de la liste imposent à toutes les cellules.
+	 */
+	.richtext { font-size: 13px; }
+	.richtext p, .richtext ul, .richtext ol, .richtext table { margin: 0 0 6px; }
+	.richtext ul, .richtext ol { padding-left: 18px; }
+	.richtext li { margin: 1px 0; }
+	.richtext strong { font-weight: 600; }
+	.richtext img { display: block; max-width: 100%; height: auto; margin: 8px 0;
+		border: 1px solid var(--line); border-radius: 6px; }
+	.richtext table { table-layout: auto; font-size: 12px; }
+	.richtext th, .richtext td { padding: 3px 6px; white-space: normal; overflow: visible; }
+	.richtext > :last-child { margin-bottom: 0; }
+	.alertbox { background: #fdf6e3; border: 1px solid #e6d39a; color: var(--warn);
+		padding: 8px 10px; border-radius: 6px; font-size: 13px; margin-bottom: 10px; }
+	.row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+	.stop { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+	.stop .head { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+	.stop .num { width: 22px; height: 22px; flex: none; border-radius: 50%; background: var(--accent);
+		color: #fff; font-size: 12px; display: grid; place-items: center; }
+	.stop .coords { font-size: 12px; color: var(--muted); margin-top: 4px; }
+	.field { display: flex; gap: 6px; align-items: center; }
+	.field label { flex: none; font-size: 12px; color: var(--muted); width: 74px; }
+	.actions { display: flex; gap: 8px; margin-top: 16px; }
+	.status { margin-top: 10px; font-size: 13px; }
+	.hidden { display: none; }
+	.results { max-height: 220px; overflow-y: auto; border: 1px solid var(--line);
+		border-radius: 6px; margin-top: 6px; }
+	.results div { padding: 6px 9px; cursor: pointer; border-bottom: 1px solid var(--line); }
+	.results div:last-child { border-bottom: none; }
+	.results div:hover { background: #eef2f7; }
+	.results .id { color: var(--muted); font-size: 12px; }
+	.results .empty { color: var(--muted); cursor: default; }
+	.gtfsname { font-weight: 600; flex: 1; }
+</style>
+</head>
+<body>
+<header>
+	<h1>Déviations en vigueur</h1>
+	<span class="spacer"></span>
+	<label class="note">grouper <select id="groupBy" style="width:auto">
+		<option value="line">par ligne</option>
+		<option value="alert">par info trafic</option>
+	</select></label>
+	<label class="note"><input type="checkbox" id="showUpcoming" style="width:auto"> afficher les déviations à venir</label>
+	<button id="back" class="hidden">Retour à la liste</button>
+</header>
+
+<div id="listView" class="wrap">
+	<table>
+		<colgroup id="listCols"></colgroup>
+		<thead id="listHead"></thead>
+		<tbody id="listBody"></tbody>
+	</table>
+	<p id="listEmpty" class="note hidden">Aucune déviation à afficher.</p>
+</div>
+
+<div id="detailView" class="detail hidden">
+	<div id="map"></div>
+	<aside class="panel">
+		<div id="summary"></div>
+
+		<h2>Tronçons déviés</h2>
+		<div class="row" id="segmentBar"></div>
+		<p class="note" id="segmentNote"></p>
+
+		<h2>Bornes du tronçon</h2>
+		<p class="note">Premier et dernier arrêt <strong>supprimé</strong>, bornes comprises.</p>
+		<div id="boundsWarnings"></div>
+		<div class="field" style="margin-bottom:8px"><label>Premier</label><select id="startStop"></select></div>
+		<div class="field"><label>Dernier</label><select id="endStop"></select></div>
+		<p class="note" id="referenceNote"></p>
+		<div class="field" style="margin-top:8px"><label>Délai propagé</label><input id="propagatedDelay" type="number" step="1" value="0"></div>
+		<p class="note">Secondes ajoutées aux horaires qui suivent le tronçon. 0 si le détour ne rallonge rien.</p>
+		<p class="note" id="tripCount"></p>
+
+		<h2>Arrêts de substitution</h2>
+		<p class="note" id="travelTimeNote"></p>
+		<div id="stopList"></div>
+		<p class="note" id="stopNote"></p>
+		<button id="addStop">Ajouter un arrêt</button>
+		<div id="stopSearch" class="hidden">
+			<input id="stopQuery" placeholder="Nom de l'arrêt…" autocomplete="off">
+			<div class="results" id="stopResults"></div>
+			<p class="note" id="searchHint"></p>
+		</div>
+
+		<h2>Tracé du tronçon</h2>
+		<p class="note">Cliquer pour prolonger, glisser un sommet pour le déplacer. Partir d'où la
+			course quitte son itinéraire, y revenir plus loin — ou s'arrêter là si la ligne est coupée.</p>
+		<div class="row">
+			<button id="draw">Dessiner</button>
+			<button id="undo">Annuler le dernier point</button>
+			<button id="clearPath" class="danger">Effacer</button>
+		</div>
+		<p class="note" id="pathNote"></p>
+
+		<h2>Publication</h2>
+		<div class="actions">
+			<button id="save" class="primary">Enregistrer</button>
+			<button id="remove" class="danger">Supprimer la déclaration</button>
+		</div>
+		<p class="status" id="status"></p>
+	</aside>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(function () {
+	"use strict";
+
+	var state = {
+		detail: null, rows: [], segments: [], active: 0, mode: "idle",
+		map: null, base: null, routeLayer: null, otherLayer: null, drawLayer: null, previewLine: null,
+		stopMarkers: [], vertexMarkers: [], pathLine: null, shapes: [], searchTimer: null, countTimer: null
+	};
+
+	/** Le tronçon en cours d'édition. Il y en a toujours au moins un dès qu'un détail est ouvert. */
+	function seg() { return state.segments[state.active]; }
+
+	// --- utilitaires ---
+
+	/**
+	 * La racine de l'API, déduite de l'adresse de la page plutôt qu'écrite en dur.
+	 *
+	 * Le service tourne derrière un proxy qui le publie sous un préfixe — « /gtfs-rt/tcar » — et le lui
+	 * retire avant de le lui passer. La page arrive donc à « /gtfs-rt/tcar/admin » quand le serveur, lui,
+	 * ne connaît que « /admin » : un chemin absolu « /admin/api/… » sortirait du préfixe et retomberait à
+	 * la racine du domaine, qui répond du HTML. C'est l'adresse de la page qui porte le bon préfixe, et
+	 * elle seule.
+	 *
+	 * La barre finale est ôtée pour que « /admin » et « /admin/ » donnent la même racine.
+	 */
+	var API = window.location.pathname.replace(/\/+$/, "");
+
+	/** Écart au-delà duquel le point de divergence est signalé — cf. MAX_DETOUR_JUNCTION_OFFSET. */
+	var MAX_JUNCTION_METRES = 200;
+
+	function el(id) { return document.getElementById(id); }
+
+	function decodePolyline(str) {
+		var points = [], index = 0, lat = 0, lng = 0, b, result, shift;
+		while (index < str.length) {
+			result = 0; shift = 0;
+			do { b = str.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+			lat += (result & 1) ? ~(result >> 1) : (result >> 1);
+			result = 0; shift = 0;
+			do { b = str.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+			lng += (result & 1) ? ~(result >> 1) : (result >> 1);
+			points.push([lat / 1e5, lng / 1e5]);
+		}
+		return points;
+	}
+
+	/**
+	 * Une durée saisie, en secondes. Deux formes : un nombre de secondes, ou « mm:ss ». Le signe porte
+	 * sur la durée entière — « -1:30 » vaut -90 s, et non -1 min +30 s : un arrêt peut être atteint
+	 * AVANT l'arrêt de référence, et c'est alors tout l'écart qui est négatif.
+	 */
+	function parseDuration(text) {
+		var value = String(text).trim();
+		if (/^-?\d+$/.test(value)) return parseInt(value, 10);
+
+		var match = /^(-?)(\d+):([0-5]\d)$/.exec(value);
+		if (match === null) return null;
+
+		var seconds = parseInt(match[2], 10) * 60 + parseInt(match[3], 10);
+		return match[1] === "-" ? -seconds : seconds;
+	}
+
+	function formatDuration(seconds) {
+		var sign = seconds < 0 ? "-" : "", total = Math.abs(seconds);
+		var rest = total % 60;
+		return sign + Math.floor(total / 60) + ":" + (rest < 10 ? "0" : "") + rest;
+	}
+
+	function describePeriods(periods) {
+		if (!periods || periods.length === 0) return "sans borne";
+		return periods.map(function (period) {
+			var text = (period.start || "?") + " → " + (period.end || "?");
+			if (period.dailyWindow) text += " (" + period.dailyWindow.from + "–" + period.dailyWindow.to + ")";
+			return text;
+		}).join(" ; ");
+	}
+
+	/** La période en compact, pour la liste : « 01/09 → 30/09 · 8h–17h ». Le détail la donne en entier. */
+	function describePeriodsShort(periods) {
+		if (!periods || periods.length === 0) return "sans borne";
+
+		var first = periods[0];
+		var sameDay = first.start && first.end && first.start.slice(0, 10) === first.end.slice(0, 10);
+		var text = sameDay ? shortDate(first.start) : shortDate(first.start) + " → " + shortDate(first.end);
+
+		// Les heures que portent les bornes valent tranche horaire : une perturbation d'un après-midi se
+		// lit « 19/09 · 14h–20h », et non « 19/09 → 19/09 », qui ne dit rien de plus que la date.
+		var slot = first.dailyWindow
+			? shortTime(first.dailyWindow.from) + "–" + shortTime(first.dailyWindow.to)
+			: sameDay && timeOf(first.start) && timeOf(first.end)
+				? timeOf(first.start) + "–" + timeOf(first.end)
+				: null;
+		if (slot) text += " · " + slot;
+
+		// Les plages disjointes ne tiennent pas dans une colonne : on dit combien il en reste.
+		if (periods.length > 1) text += " +" + (periods.length - 1);
+		return text;
+	}
+
+	/** L'heure qu'une borne « AAAA-MM-JJTHH:MM » porte, ou rien si elle désigne la journée entière. */
+	function timeOf(value) {
+		var match = /T(\d{2}:\d{2})$/.exec(String(value));
+		return match === null ? null : shortTime(match[1]);
+	}
+
+	/** « 2026-09-01 » ou « 2026-09-01T08:30 » donnent « 01/09 ». L'année ne distingue rien ici. */
+	function shortDate(value) {
+		if (!value) return "?";
+		var match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+		return match === null ? value : match[3] + "/" + match[2];
+	}
+
+	/** « 08:30 » donne « 8h30 », « 17:00 » donne « 17h ». */
+	function shortTime(value) {
+		var parts = String(value).split(":");
+		return parts[1] === "00" ? parseInt(parts[0], 10) + "h" : parseInt(parts[0], 10) + "h" + parts[1];
+	}
+
+	function request(url, options) {
+		return fetch(url, options).then(function (response) {
+			return response.text().then(function (text) {
+				var body = null;
+				try { body = JSON.parse(text); } catch (error) { body = null; }
+
+				// Du HTML là où l'on attend du JSON : la requête n'a pas atteint l'API mais autre chose —
+				// une page d'erreur du proxy, ou la racine du domaine si le préfixe s'est perdu. Le dire
+				// vaut mieux que de laisser remonter l'erreur d'analyse, qui ne nomme pas le problème.
+				if (body === null) {
+					throw new Error("Réponse inattendue de " + url + " (HTTP " + response.status
+						+ ") : du contenu non-JSON. L'API n'est pas joignable à cette adresse.");
+				}
+
+				if (!response.ok) throw new Error(body.message ? body.message : "Erreur " + response.status);
+				return body;
+			});
+		});
+	}
+
+	// --- liste ---
+
+	/** L'adresse des cartouches de ligne du réseau. */
+	var LINE_CARTRIDGE = "https://storage.googleapis.com/bus-tracker-assets/line-cartridges/astuce/";
+
+	/**
+	 * Les colonnes que la liste sait rendre. Chaque groupement choisit les siennes : ce qui est commun
+	 * à tout un groupe se dit une fois dans son bandeau, et n'a plus à se répéter à chaque ligne.
+	 */
+	var COLUMNS = {
+		lineAndSens: { label: "Ligne et sens", cell: function (row) {
+			return lineChip(row.line) + "<span class='toward'>" + escapeHtml(towardOf(row)) + "</span>";
+		} },
+		sens: { label: "Sens", cell: function (row) {
+			return "<span class='toward' style='margin-left:0'>" + escapeHtml(towardOf(row)) + "</span>";
+		} },
+		alert: { label: "Info trafic", cell: function (row) {
+			return "<span class='ref'>" + escapeHtml(row.alertNumber) + "</span>" + escapeHtml(row.headerText);
+		} },
+		stops: { label: "Arrêts", className: "num", cell: function (row) { return String(row.removedStopCount); } },
+		period: { label: "Période", className: "note", cell: function (row) {
+			return escapeHtml(describePeriodsShort(row.periods));
+		} },
+		state: { label: "État", cell: stateBadge },
+		declaration: { label: "Déclaration", cell: declarationBadge }
+	};
+
+	/**
+	 * Les deux façons de lire la liste. Par ligne, pour préparer une ligne entière — c'est la question
+	 * de l'exploitant. Par info trafic, pour traiter une perturbation de bout en bout — c'est celle de
+	 * l'agent qui saisit. Le choix se retient d'une visite à l'autre.
+	 */
+	var GROUPINGS = {
+		line: {
+			columns: [["sens", "24%"], ["alert", "32%"], ["stops", "7%"], ["period", "16%"], ["state", "9%"], ["declaration", "12%"]],
+			keyOf: function (row) { return row.routeId; },
+			heading: function (rows) {
+				return lineChip(rows[0].line) + "<span class='title' style='margin-left:8px'>Ligne "
+					+ escapeHtml(rows[0].line) + "</span><span class='grow'></span>"
+					+ "<span class='note'>" + countLabel(rows) + "</span>";
+			}
+		},
+		alert: {
+			// La période et l'état appartiennent à l'info trafic, pas au sens : ils montent dans le
+			// bandeau, et les lignes n'ont plus à porter six fois la même date.
+			columns: [["lineAndSens", "52%"], ["stops", "16%"], ["declaration", "32%"]],
+			keyOf: function (row) { return row.alertNumber; },
+			heading: function (rows) {
+				var row = rows[0];
+				return "<span class='ref'>" + escapeHtml(row.alertNumber) + "</span>"
+					+ "<span class='title'>" + escapeHtml(row.headerText) + "</span><span class='grow'></span>"
+					+ "<span class='note'>" + countLabel(rows) + "</span>"
+					+ "<span class='note'>" + escapeHtml(describePeriodsShort(row.periods)) + "</span>"
+					+ stateBadge(row);
+			}
+		}
+	};
+
+	/**
+	 * Ce que fait une image de cartouche absente : laisser le numéro en clair. Le réseau n'en publie pas
+	 * pour toutes ses lignes, et un cadre vide se verrait autant qu'une image manquante.
+	 *
+	 * Posé en attribut plutôt que branché après coup : l'image commence à charger dès que le navigateur
+	 * la rencontre, et un 404 déjà en cache signalerait son échec avant qu'on ait eu le temps d'écouter.
+	 * Les apostrophes sont écrites en entités pour ne pas fermer l'attribut.
+	 */
+	var PICTO_FALLBACK = "this.parentNode.className=&#39;line plain&#39;;this.parentNode.removeChild(this)";
+
+	/** Le cartouche de la ligne, le numéro en clair derrière lui si l'image ne vient pas. */
+	function lineChip(line) {
+		return "<span class='line'><img alt='' onerror='" + PICTO_FALLBACK + "' src='"
+			+ LINE_CARTRIDGE + encodeURIComponent(line) + ".svg'>"
+			+ "<span class='code'>" + escapeHtml(line) + "</span></span>";
+	}
+
+	function towardOf(row) {
+		return row.headsigns.length ? "→ " + row.headsigns.join(" / ") : "sens " + row.directionId;
+	}
+
+	function stateBadge(row) {
+		return row.active
+			? '<span class="badge ok">en vigueur</span>'
+			: '<span class="badge off">à venir</span>';
+	}
+
+	function declarationBadge(row) {
+		if (!row.declared) return '<span class="badge off">non déclarée</span>';
+		if (!row.publishable) return '<span class="badge warn">incomplète</span>';
+
+		// Ce qu'il y a de plus parlant, et rien de plus : le nombre de tronçons quand il y en a
+		// plusieurs, sinon ce que le tronçon annonce. Un tracé sans arrêt de substitution est une
+		// déclaration complète — le segment est supprimé, et l'itinéraire dit par où l'on passe.
+		var what = row.segmentCount > 1
+			? row.segmentCount + " tronçons"
+			: row.stopCount === 0 ? "tracé seul" : row.stopCount + " arrêts";
+		return '<span class="badge ok">' + what + "</span>";
+	}
+
+	function countLabel(rows) {
+		var declared = rows.filter(function (row) { return row.declared; }).length;
+		return rows.length + (rows.length > 1 ? " déviations" : " déviation")
+			+ " · " + declared + " déclarée" + (declared > 1 ? "s" : "");
+	}
+
+	function loadList() {
+		request(API + "/api/detours").then(function (rows) {
+			state.rows = rows;
+			renderList();
+		}).catch(function (error) { alert(error.message); });
+	}
+
+	/**
+	 * La liste, groupée. L'ordre des groupes est celui de leur première déviation, que le serveur rend
+	 * déjà classée — les perturbations en vigueur d'abord : une Map retient l'ordre d'insertion, il
+	 * n'y a rien à trier de plus.
+	 */
+	function renderList() {
+		var grouping = GROUPINGS[el("groupBy").value] || GROUPINGS.line;
+		var showUpcoming = el("showUpcoming").checked;
+		var visible = state.rows.filter(function (row) { return showUpcoming || row.active; });
+
+		var cols = el("listCols");
+		cols.innerHTML = grouping.columns.map(function (column) {
+			return "<col style='width:" + column[1] + "'>";
+		}).join("");
+
+		el("listHead").innerHTML = "<tr>" + grouping.columns.map(function (column) {
+			var definition = COLUMNS[column[0]];
+			return "<th" + (definition.className === "num" ? " class='num'" : "") + ">" + definition.label + "</th>";
+		}).join("") + "</tr>";
+
+		var groups = new Map();
+		visible.forEach(function (row) {
+			var key = grouping.keyOf(row);
+			var group = groups.get(key);
+			if (group === undefined) groups.set(key, [row]);
+			else group.push(row);
+		});
+
+		var body = el("listBody");
+		body.innerHTML = "";
+
+		groups.forEach(function (rows) {
+			var head = document.createElement("tr");
+			head.className = "group";
+			head.innerHTML = "<td colspan='" + grouping.columns.length + "'><div class='bar'>"
+				+ grouping.heading(rows) + "</div></td>";
+			body.appendChild(head);
+
+			rows.forEach(function (row) {
+				var tr = document.createElement("tr");
+				tr.onclick = function () { openDetail(row.key); };
+
+				// Ce que la ligne abrège se relit en entier au survol : la destination comme le texte de
+				// l'info trafic dépassent volontiers la largeur d'une colonne.
+				tr.title = row.line + " sens " + row.directionId + " " + towardOf(row) + "\n"
+					+ row.alertNumber + " — " + row.headerText + "\n" + describePeriods(row.periods);
+
+				tr.innerHTML = grouping.columns.map(function (column) {
+					var definition = COLUMNS[column[0]];
+					return "<td" + (definition.className ? " class='" + definition.className + "'" : "") + ">"
+						+ definition.cell(row) + "</td>";
+				}).join("");
+				body.appendChild(tr);
+			});
+		});
+
+		el("listEmpty").className = visible.length === 0 ? "note" : "note hidden";
+	}
+
+	function escapeHtml(text) {
+		return String(text == null ? "" : text)
+			.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+	}
+
+	// --- détail ---
+
+	/** Un arrêt tel que le serveur le rend, ramené à ce que l'éditeur manipule. */
+	function adoptStop(stop) {
+		return {
+			stopId: stop.stopId, provisional: stop.provisional, name: stop.name,
+			latitude: stop.latitude, longitude: stop.longitude, travelTime: stop.travelTime
+		};
+	}
+
+	/**
+	 * Un tronçon tel que le serveur le rend, ramené à ce que l'éditeur manipule. Le serveur en propose
+	 * toujours au moins un : à défaut de déclaration, les suites d'arrêts supprimés en dessinent autant
+	 * qu'il y a d'interruptions sur l'itinéraire.
+	 */
+	function adoptSegment(segment) {
+		return {
+			startStopId: segment.startStopId, endStopId: segment.endStopId,
+			propagatedDelay: segment.propagatedDelay,
+			stops: segment.stops.map(adoptStop),
+			path: segment.path.map(function (point) { return [point.latitude, point.longitude]; }),
+			publishable: segment.publishable,
+			matchingTrips: segment.matchingTrips
+		};
+	}
+
+	function openDetail(key) {
+		request(API + "/api/detours/" + encodeURIComponent(key)).then(function (detail) {
+			state.detail = detail;
+			state.segments = detail.segments.map(adoptSegment);
+			if (state.segments.length === 0) state.segments = [emptySegment()];
+			state.active = 0;
+
+			el("listView").className = "wrap hidden";
+			el("detailView").className = "detail";
+			el("back").className = "";
+
+			renderSummary();
+			setupMap();
+			renderSegment();
+			setStatus("");
+		}).catch(function (error) { alert(error.message); });
+	}
+
+	function emptySegment() {
+		return { startStopId: null, endStopId: null, propagatedDelay: 0, stops: [], path: [], matchingTrips: 0 };
+	}
+
+	// --- tronçons ---
+
+	/** Tout ce qui dépend du tronçon actif, d'un bloc : on ne repeint jamais l'un sans les autres. */
+	function renderSegment() {
+		renderSegments();
+		renderBounds();
+		renderStops();
+		renderPath();
+		renderTripCount();
+	}
+
+	function renderSegments() {
+		var bar = el("segmentBar");
+		bar.innerHTML = "";
+
+		state.segments.forEach(function (segment, index) {
+			var button = document.createElement("button");
+			var what = segment.stops.length > 0 ? segment.stops.length + " arrêts"
+				: segment.path.length >= 2 ? "tracé seul" : "vide";
+			button.textContent = "Tronçon " + (index + 1) + " · " + what;
+			button.className = index === state.active ? "active" : "";
+			button.onclick = function () { selectSegment(index); };
+			bar.appendChild(button);
+		});
+
+		var add = document.createElement("button");
+		add.textContent = "Ajouter un tronçon";
+		add.onclick = function () {
+			state.segments.push(emptySegment());
+			selectSegment(state.segments.length - 1);
+		};
+		bar.appendChild(add);
+
+		if (state.segments.length > 1) {
+			var remove = document.createElement("button");
+			remove.className = "danger";
+			remove.textContent = "Supprimer ce tronçon";
+			remove.onclick = function () {
+				state.segments.splice(state.active, 1);
+				selectSegment(Math.min(state.active, state.segments.length - 1));
+			};
+			bar.appendChild(remove);
+		}
+
+		// À un seul tronçon il n'y a rien à dire : la barre le montre déjà.
+		el("segmentNote").textContent = state.segments.length === 1
+			? ""
+			: state.segments.length + " tronçons, publiés ensemble sur chaque course.";
+	}
+
+	function selectSegment(index) {
+		state.active = index;
+		setMode("idle");
+		renderSegment();
+	}
+
+	function backToList() {
+		el("detailView").className = "detail hidden";
+		el("listView").className = "wrap";
+		el("back").className = "hidden";
+		state.detail = null;
+		loadList();
+	}
+
+	/**
+	 * Le nombre de courses que les bornes retenues modifieraient. À zéro, rien ne sortira dans le feed
+	 * — pas même les arrêts de substitution : c'est le signe que les bornes ne figurent sur l'horaire
+	 * théorique d'aucune course de la ligne.
+	 */
+	function renderTripCount() {
+		var count = seg().matchingTrips;
+		var note = el("tripCount");
+		note.textContent = count === 0
+			? "Aucune course ne dessert ces bornes : ce tronçon ne sera pas publié."
+			: count + " courses concernées d'ici la fin du service.";
+		note.style.color = count === 0 ? "var(--danger)" : "var(--muted)";
+	}
+
+	/**
+	 * Recompte les courses auprès du serveur après un changement de borne. Le compte du chargement ne
+	 * vaut que pour les bornes d'alors, et c'est lui qui dit si le tronçon sortira du feed.
+	 */
+	function refreshTripCount() {
+		var segment = seg();
+		if (segment.startStopId === null || segment.endStopId === null) {
+			segment.matchingTrips = 0;
+			renderTripCount();
+			return;
+		}
+
+		clearTimeout(state.countTimer);
+		state.countTimer = setTimeout(function () {
+			var url = API + "/api/detours/" + encodeURIComponent(state.detail.key) + "/trip-count"
+				+ "?start=" + encodeURIComponent(segment.startStopId) + "&end=" + encodeURIComponent(segment.endStopId);
+			request(url).then(function (answer) {
+				segment.matchingTrips = answer.matchingTrips;
+				if (seg() === segment) renderTripCount();
+			}).catch(function (error) { setStatus(error.message, "error"); });
+		}, 150);
+	}
+
+	function renderSummary() {
+		var detail = state.detail;
+		el("summary").innerHTML =
+			"<h2 style='display:flex;align-items:center;gap:8px'>" + lineChip(detail.line)
+				+ "<span>" + escapeHtml(detail.line) + " — sens " + detail.directionId + "</span></h2>" +
+			"<p><strong>" + escapeHtml(detail.headerText) + "</strong></p>" +
+			"<div class='richtext'>" + detail.descriptionHtml + "</div>" +
+			"<p class='note'>Info trafic " + detail.alertNumber + " · " + escapeHtml(describePeriods(detail.periods)) + "</p>";
+	}
+
+	/** Tous les arrêts de la ligne/sens, dédoublonnés, dans l'ordre du premier itinéraire qui les voit. */
+	function routeStops() {
+		var seen = {}, stops = [];
+		state.detail.sequences.forEach(function (sequence) {
+			sequence.forEach(function (stop) {
+				if (seen[stop.stopId]) return;
+				seen[stop.stopId] = true;
+				stops.push(stop);
+			});
+		});
+		return stops;
+	}
+
+	/**
+	 * L'arrêt d'où se comptent les temps de parcours : celui qui précède la borne amont sur le premier
+	 * itinéraire qui la dessert. Rien lorsque la borne ouvre l'itinéraire — la référence est alors
+	 * cette borne même, et les temps peuvent être négatifs.
+	 */
+	function referenceOf(startStopId) {
+		var found = null;
+		state.detail.sequences.forEach(function (sequence) {
+			if (found !== null) return;
+			for (var index = 0; index < sequence.length; index += 1) {
+				if (sequence[index].stopId !== startStopId) continue;
+				found = index === 0 ? null : sequence[index - 1];
+				return;
+			}
+		});
+		return found;
+	}
+
+	function renderBounds() {
+		var segment = seg();
+		var stops = routeStops();
+
+		[["startStop", "startStopId"], ["endStop", "endStopId"]].forEach(function (pair) {
+			var select = el(pair[0]);
+			select.innerHTML = "";
+
+			// Un tronçon qu'on vient d'ajouter n'a pas de bornes : sans cette entrée vide, le premier arrêt
+			// de la ligne s'imposerait en silence.
+			var empty = document.createElement("option");
+			empty.value = "";
+			empty.textContent = "— choisir —";
+			select.appendChild(empty);
+
+			stops.forEach(function (stop) {
+				var option = document.createElement("option");
+				option.value = stop.stopId;
+				option.textContent = (stop.removed ? "✗ " : "") + stop.name;
+				select.appendChild(option);
+			});
+
+			select.value = segment[pair[1]] || "";
+			select.onchange = function (event) {
+				segment[pair[1]] = event.target.value || null;
+				renderBounds();
+				renderStops();
+				refreshTripCount();
+			};
+		});
+
+		el("propagatedDelay").value = segment.propagatedDelay;
+		el("propagatedDelay").onchange = function (event) {
+			segment.propagatedDelay = parseInt(event.target.value, 10) || 0;
+		};
+
+		var candidates = state.detail.boundsCandidates;
+		var itineraries = {};
+		candidates.forEach(function (candidate) { itineraries[candidate.itinerary] = true; });
+
+		var warnings = [];
+		if (candidates.length === 0) warnings.push("Aucun itinéraire ne dessert les arrêts supprimés : bornes à choisir à la main.");
+		if (Object.keys(itineraries).length > 1) warnings.push("Plusieurs branches : les bornes pré-remplies sont celles de la mieux couverte.");
+
+		el("boundsWarnings").innerHTML = warnings.map(function (text) {
+			return '<div class="alertbox">' + escapeHtml(text) + "</div>";
+		}).join("");
+
+		el("referenceNote").innerHTML = referenceNote(segment);
+	}
+
+	/**
+	 * D'où partent les temps de parcours de ce tronçon, nommément. C'est la question que se pose celui
+	 * qui saisit un temps, et la réponse change à chaque fois que la borne amont change.
+	 */
+	function referenceNote(segment) {
+		if (segment.startStopId === null) return "Choisir la borne amont pour connaître l'arrêt de référence.";
+
+		var reference = referenceOf(segment.startStopId);
+		if (!reference) return "Temps comptés depuis <strong>le premier arrêt de la course</strong> : ils peuvent être négatifs.";
+
+		var note = "Temps comptés depuis l'arrivée à <strong>" + escapeHtml(reference.name) + "</strong>.";
+
+		// Un tronçon dont la référence est supprimée par un autre lui sera fusionné à la publication, et
+		// ses temps recomptés depuis la référence de celui-là — le consommateur n'a plus d'arrêt où
+		// rattacher les siens. Autant le dire ici : les temps saisis ne sont pas ceux qui sortiront.
+		var upstream = mergedInto(segment);
+		if (upstream === null) return note;
+
+		var root = referenceOf(state.segments[upstream].startStopId);
+		return note + " Il suit le tronçon " + (upstream + 1) + " : à la publication les deux n'en feront qu'un, "
+			+ "et ces temps seront recomptés depuis <strong>" + escapeHtml(root ? root.name : "le premier arrêt de la course")
+			+ "</strong>.";
+	}
+
+	/**
+	 * Le rang du tronçon qui supprime l'arrêt de référence de celui-ci, de proche en proche, ou null
+	 * s'il n'y en a pas. C'est la même règle que le serveur applique course par course, en plus simple :
+	 * ici on ne dispose que des itinéraires de la ligne, pas de l'horaire de chaque course.
+	 */
+	function mergedInto(segment) {
+		var found = null;
+		var current = segment;
+
+		for (var guard = 0; guard < state.segments.length; guard += 1) {
+			if (current.startStopId === null) return found;
+			var reference = referenceOf(current.startStopId);
+			if (!reference) return found;
+
+			var index = -1;
+			state.segments.forEach(function (other, rank) {
+				if (other !== current && other.endStopId === reference.stopId) index = rank;
+			});
+			if (index === -1) return found;
+
+			found = index;
+			current = state.segments[index];
+		}
+
+		return found;
+	}
+
+	// --- carte ---
+
+	function setupMap() {
+		if (state.map === null) {
+			state.map = L.map("map");
+			L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+				maxZoom: 19, attribution: "© OpenStreetMap"
+			}).addTo(state.map);
+			state.base = L.layerGroup().addTo(state.map);
+			state.routeLayer = L.layerGroup().addTo(state.map);
+			// Les autres tronçons passent sous celui qu'on édite : ils se voient, ils ne gênent pas.
+			state.otherLayer = L.layerGroup().addTo(state.map);
+			state.drawLayer = L.layerGroup().addTo(state.map);
+			state.map.on("click", onMapClick);
+		}
+
+		state.base.clearLayers();
+		state.routeLayer.clearLayers();
+		state.shapes = [];
+
+		var bounds = [];
+
+		// Une ligne a plusieurs itinéraires par sens — variantes, services partiels — et le tracé devra
+		// se recoudre dans CHACUN de ceux que desservent les courses visées. Ils sont donc tous gardés,
+		// pas seulement le premier : c'est contre eux que la prévisualisation se juge.
+		state.detail.shapes.forEach(function (shape) {
+			var points = decodePolyline(shape.encodedPolyline);
+			state.shapes.push({ shapeId: shape.shapeId, points: points });
+			L.polyline(points, { color: "#8b949e", weight: 4, opacity: .7 }).addTo(state.base);
+			bounds = bounds.concat(points);
+		});
+
+		routeStops().forEach(function (stop) {
+			if (stop.latitude === null || stop.longitude === null) return;
+			var marker = L.circleMarker([stop.latitude, stop.longitude], {
+				radius: stop.removed ? 6 : 4,
+				color: stop.removed ? "#d1242f" : "#57606a",
+				fillColor: stop.removed ? "#d1242f" : "#fff",
+				fillOpacity: 1, weight: 2
+			}).bindTooltip(stop.name).addTo(state.routeLayer);
+
+			// En mode « arrêt existant », les arrêts de la ligne se réemploient d'un clic. Le clic ne doit
+			// pas remonter à la carte, qui y verrait la pose d'un point.
+			marker.on("click", function (event) {
+				if (state.mode !== "search") return;
+				L.DomEvent.stopPropagation(event);
+				addStop({ stopId: stop.stopId, provisional: false, name: stop.name,
+					latitude: stop.latitude, longitude: stop.longitude });
+			});
+			bounds.push([stop.latitude, stop.longitude]);
+		});
+
+		if (bounds.length > 0) state.map.fitBounds(L.latLngBounds(bounds).pad(.05));
+		else state.map.setView([49.443, 1.099], 12);
+
+		// La carte est révélée après coup : Leaflet a mesuré un conteneur encore caché.
+		setTimeout(function () { state.map.invalidateSize(); }, 0);
+	}
+
+	function setMode(mode) {
+		state.mode = mode;
+		var searching = mode === "search" || mode === "place";
+		el("addStop").className = searching ? "active" : "";
+		el("draw").className = mode === "draw" ? "active" : "";
+		el("draw").textContent = mode === "draw" ? "Terminer le tracé" : "Dessiner";
+		el("stopSearch").className = searching ? "" : "hidden";
+		// Seuls la pose d'un arrêt et le tracé se prennent sur la carte ; la recherche, au clavier.
+		state.map.getContainer().style.cursor = mode === "place" || mode === "draw" ? "crosshair" : "";
+		if (mode === "search") el("stopQuery").focus();
+		if (mode === "place") setStatus("Cliquer sa position sur la carte.");
+	}
+
+	function onMapClick(event) {
+		if (state.mode === "place") {
+			placeProvisionalStop(event.latlng);
+		} else if (state.mode === "draw") {
+			seg().path.push([event.latlng.lat, event.latlng.lng]);
+			renderPath();
+			renderSegments();
+		}
+	}
+
+	/** Une minute après le dernier arrêt posé : une valeur de départ plausible, à corriger. */
+	function nextTravelTime() {
+		var stops = seg().stops;
+		if (stops.length === 0) return 60;
+		return stops[stops.length - 1].travelTime + 60;
+	}
+
+	// --- recherche d'arrêts ---
+
+	/**
+	 * Désigne un arrêt, du GTFS ou de la base provisoire. La déviation ne retient que son identifiant
+	 * et le temps pour l'atteindre : ce qu'il est se lit ailleurs, et suit ses propres modifications.
+	 */
+	function addStop(stop) {
+		// Tous tronçons confondus : ils se suivent sur la même course, et deux mentions du même arrêt y
+		// feraient arrêter le véhicule deux fois.
+		var already = state.segments.some(function (segment) {
+			return segment.stops.some(function (existing) { return existing.stopId === stop.stopId; });
+		});
+		if (already) { setStatus("Cet arrêt figure déjà dans la déclaration.", "error"); return; }
+
+		seg().stops.push({
+			stopId: stop.stopId, provisional: stop.provisional, name: stop.name,
+			latitude: stop.latitude, longitude: stop.longitude, travelTime: nextTravelTime()
+		});
+		setStatus("");
+		setMode("idle");
+		renderStops();
+		renderSegments();
+	}
+
+	function searchStops() {
+		var query = el("stopQuery").value.trim();
+		var results = el("stopResults");
+		var hint = el("searchHint");
+
+		if (query.length < 2) {
+			results.innerHTML = "";
+			hint.textContent = "Saisir au moins deux caractères.";
+			return;
+		}
+
+		request(API + "/api/stops?q=" + encodeURIComponent(query)).then(function (stops) {
+			results.innerHTML = "";
+
+			stops.forEach(function (stop) {
+				var row = document.createElement("div");
+				var tag = stop.provisional ? '<span class="badge warn">provisoire</span> ' : "";
+				row.innerHTML = tag + escapeHtml(stop.name) + ' <span class="id">' + escapeHtml(stop.stopId) + "</span>";
+				row.onclick = function () {
+					addStop(stop);
+					state.map.panTo([stop.latitude, stop.longitude]);
+				};
+				results.appendChild(row);
+			});
+
+			// Aucun arrêt existant ne convient : le nom saisi devient celui d'un nouvel arrêt provisoire,
+			// qu'il ne reste qu'à poser. C'est la seule façon d'en créer un, et elle part de la recherche —
+			// on ne crée un arrêt qu'après avoir constaté qu'il n'existe pas.
+			var row = document.createElement("div");
+			row.innerHTML = "Créer « <strong>" + escapeHtml(query) + "</strong> » — cliquer sa position sur la carte";
+			row.onclick = function () { setMode("place"); };
+			results.appendChild(row);
+
+			hint.textContent = stops.length === 0 ? "Aucun arrêt de ce nom." : "";
+		}).catch(function (error) { setStatus(error.message, "error"); });
+	}
+
+	/** Crée l'arrêt provisoire en cours de saisie à l'endroit cliqué, puis l'ajoute à la déviation. */
+	function placeProvisionalStop(latlng) {
+		var name = el("stopQuery").value.trim();
+		if (name.length === 0) { setStatus("Saisir d'abord le nom de l'arrêt.", "error"); return; }
+
+		request(API + "/api/provisional-stops", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name: name, latitude: latlng.lat, longitude: latlng.lng })
+		}).then(function (stop) {
+			el("stopQuery").value = "";
+			el("stopResults").innerHTML = "";
+			addStop({ stopId: stop.stopId, provisional: true, name: stop.name,
+				latitude: stop.latitude, longitude: stop.longitude });
+		}).catch(function (error) { setStatus(error.message, "error"); });
+	}
+
+	/** Renomme ou déplace un arrêt provisoire dans la base — le changement vaut pour toutes les déviations. */
+	function saveProvisionalStop(stop) {
+		request(API + "/api/provisional-stops/" + encodeURIComponent(stop.stopId), {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name: stop.name, latitude: stop.latitude, longitude: stop.longitude })
+		}).then(function () {
+			setStatus("Arrêt mis à jour, pour toutes les déviations qui le désignent.", "ok");
+		}).catch(function (error) { setStatus(error.message, "error"); });
+	}
+
+	// --- arrêts de substitution ---
+
+	function renderStops() {
+		var list = el("stopList");
+		list.innerHTML = "";
+
+		var reference = seg().startStopId === null ? null : referenceOf(seg().startStopId);
+		var from = "Secondes depuis l'arrivée à " + (reference ? reference.name : "l'arrêt de départ de la course");
+		el("travelTimeNote").innerHTML = referenceNote(seg()) + " En <code>mm:ss</code> ou en secondes, croissants.";
+
+		seg().stops.forEach(function (stop, index) {
+			var box = document.createElement("div");
+			box.className = "stop";
+
+			// Un arrêt du GTFS ne se renomme pas : son libellé est celui du GTFS. Un arrêt provisoire, si —
+			// mais il vit dans sa propre base, et le renommer vaut pour toutes les déviations qui le
+			// désignent. D'où l'enregistrement à part, qui ne passe pas par la déviation.
+			var nameField = stop.provisional
+				? '<input class="name" placeholder="Nom de l\'arrêt" value="' + escapeHtml(stop.name) + '">'
+				: '<span class="gtfsname">' + escapeHtml(stop.name) + "</span>";
+
+			var origin = '<div class="coords"><span class="badge ' + (stop.provisional ? "warn" : "ok") + '">'
+				+ (stop.provisional ? "PROVISOIRE" : "GTFS") + "</span> " + escapeHtml(stop.stopId) + "</div>";
+
+			box.innerHTML =
+				'<div class="head"><span class="num">' + (index + 1) + "</span>" + nameField + "</div>" + origin +
+				'<div class="field"><label>Depuis</label><input class="time" title="' + escapeHtml(from)
+					+ '" value="' + formatDuration(stop.travelTime) + '"></div>' +
+				'<div class="coords">' + stop.latitude.toFixed(5) + ", " + stop.longitude.toFixed(5) + "</div>" +
+				'<div class="row" style="margin:8px 0 0"><button class="up">↑</button><button class="down">↓</button>' +
+				'<span style="flex:1"></span><button class="del danger">Retirer</button></div>';
+
+			var nameInput = box.querySelector(".name");
+			if (nameInput) {
+				nameInput.oninput = function (event) { stop.name = event.target.value; };
+				nameInput.onchange = function () { saveProvisionalStop(stop); };
+			}
+			box.querySelector(".time").onchange = function (event) {
+				var seconds = parseDuration(event.target.value);
+				if (seconds === null) { event.target.value = formatDuration(stop.travelTime); return; }
+				stop.travelTime = seconds;
+				event.target.value = formatDuration(seconds);
+			};
+			box.querySelector(".up").onclick = function () { move(index, -1); };
+			box.querySelector(".down").onclick = function () { move(index, 1); };
+			box.querySelector(".del").onclick = function () {
+				seg().stops.splice(index, 1);
+				renderStops();
+				renderSegments();
+			};
+
+			list.appendChild(box);
+		});
+
+		var segment = seg();
+		var negatives = segment.stops.some(function (stop) { return stop.travelTime < 0; });
+		var note = el("stopNote");
+
+		if (negatives && reference !== null) {
+			// La spécification ne sanctionne les temps négatifs que lorsque la modification commence au
+			// premier arrêt de la course — la référence est alors cet arrêt même. Ailleurs, ils restent
+			// publiés : c'est l'exploitant qui sait par où passe son bus. Mais il faut le lui dire.
+			note.textContent = "Temps négatifs alors que la course passe d'abord par " + reference.name
+				+ " : publiés tels quels, mais un consommateur strict peut les écarter.";
+			note.style.color = "var(--warn)";
+		} else if (segment.stops.length === 0) {
+			note.textContent = "Aucun report : le tronçon est simplement supprimé, et le tracé dit par où passe le véhicule.";
+			note.style.color = "var(--muted)";
+		} else {
+			note.textContent = "";
+		}
+
+		drawStopMarkers();
+	}
+
+	function move(index, step) {
+		var stops = seg().stops;
+		var target = index + step;
+		if (target < 0 || target >= stops.length) return;
+		var moved = stops.splice(index, 1)[0];
+		stops.splice(target, 0, moved);
+		renderStops();
+	}
+
+	function drawStopMarkers() {
+		state.stopMarkers.forEach(function (marker) { state.drawLayer.removeLayer(marker); });
+		state.stopMarkers = [];
+
+		seg().stops.forEach(function (stop, index) {
+			var label = String(index + 1) + ". " + (stop.name || "sans nom");
+
+			// Un arrêt du GTFS ne se déplace pas : sa position est celle du quai. Un arrêt provisoire, si,
+			// et le déplacement va droit dans sa base — il vaut pour toutes les déviations.
+			if (!stop.provisional) {
+				var pin = L.circleMarker([stop.latitude, stop.longitude], {
+					radius: 8, color: "#1a7f37", fillColor: "#1a7f37", fillOpacity: .85, weight: 2
+				}).bindTooltip(label + " (GTFS)").addTo(state.drawLayer);
+				state.stopMarkers.push(pin);
+				return;
+			}
+
+			var marker = L.marker([stop.latitude, stop.longitude], { draggable: true })
+				.bindTooltip(label)
+				.addTo(state.drawLayer);
+			marker.on("dragend", function () {
+				var position = marker.getLatLng();
+				stop.latitude = position.lat;
+				stop.longitude = position.lng;
+				saveProvisionalStop(stop);
+				renderStops();
+			});
+			state.stopMarkers.push(marker);
+		});
+	}
+
+	// --- tracé ---
+
+	function renderPath() {
+		if (state.pathLine) state.drawLayer.removeLayer(state.pathLine);
+		state.vertexMarkers.forEach(function (marker) { state.drawLayer.removeLayer(marker); });
+		state.vertexMarkers = [];
+		if (state.previewLine) { state.base.removeLayer(state.previewLine); state.previewLine = null; }
+
+		drawOtherSegments();
+
+		var path = seg().path;
+		if (path.length > 0) {
+			state.pathLine = L.polyline(path, { color: "#fb8500", weight: 5 }).addTo(state.drawLayer);
+
+			path.forEach(function (point, index) {
+				var marker = L.circleMarker(point, { radius: 4, color: "#fb8500", fillColor: "#fff", fillOpacity: 1, weight: 2 })
+					.addTo(state.drawLayer);
+				marker.on("mousedown", function () { startDragVertex(index, marker); });
+				state.vertexMarkers.push(marker);
+			});
+		} else {
+			state.pathLine = null;
+		}
+
+		// La prévisualisation vaut pour la course entière, et non pour le seul tronçon actif : c'est un
+		// unique trajet qui sera publié, cousu de tous les tracés déclarés.
+		var preview = drawPreview();
+		var note = el("pathNote");
+
+		if (preview === null) {
+			note.textContent = path.length === 0 ? "Aucun tracé." : path.length + " points, rien à prévisualiser.";
+			note.style.color = "var(--muted)";
+			return;
+		}
+
+		var text = (path.length === 0 ? "Aucun tracé ici. En bleu" : path.length + " points. En bleu")
+			+ ", le trajet publié — ";
+		text += preview.rejoined
+			? "il revient sur l'itinéraire."
+			: "il s'achève au dernier tracé, en terminus provisoire.";
+		if (preview.unreachable > 0) text += " " + preview.unreachable + " tracé(s) hors d'atteinte.";
+		if (preview.offset > MAX_JUNCTION_METRES) {
+			text += " Départ à " + Math.round(preview.offset) + " m de la ligne grise : la coupe se fera là.";
+		}
+
+		note.textContent = text;
+		note.style.color = preview.offset > MAX_JUNCTION_METRES || preview.unreachable > 0 ? "var(--warn)" : "var(--muted)";
+	}
+
+	/**
+	 * Les autres tronçons, en retrait : leur tracé en orange pâle et leurs arrêts en petits cercles
+	 * gris. Ils ne s'éditent pas d'ici — un clic les active, et tout revient au premier plan.
+	 */
+	function drawOtherSegments() {
+		state.otherLayer.clearLayers();
+
+		state.segments.forEach(function (segment, index) {
+			if (index === state.active) return;
+
+			if (segment.path.length >= 2) {
+				var line = L.polyline(segment.path, { color: "#fb8500", weight: 3, opacity: .35 }).addTo(state.otherLayer);
+				line.bindTooltip("Tronçon " + (index + 1));
+				line.on("click", function (event) {
+					L.DomEvent.stopPropagation(event);
+					selectSegment(index);
+				});
+			}
+
+			segment.stops.forEach(function (stop) {
+				if (stop.latitude === null || stop.longitude === null) return;
+				L.circleMarker([stop.latitude, stop.longitude], {
+					radius: 5, color: "#8b949e", fillColor: "#8b949e", fillOpacity: .5, weight: 1
+				}).bindTooltip("Tronçon " + (index + 1) + " — " + (stop.name || "sans nom")).addTo(state.otherLayer);
+			});
+		});
+	}
+
+	/** Déplacement d'un sommet : Leaflet ne rend pas les cercles déplaçables, on suit la souris. */
+	function startDragVertex(index, marker) {
+		var path = seg().path;
+		state.map.dragging.disable();
+		function onMove(event) {
+			path[index] = [event.latlng.lat, event.latlng.lng];
+			marker.setLatLng(event.latlng);
+			if (state.pathLine) state.pathLine.setLatLngs(path);
+		}
+		function onUp() {
+			state.map.off("mousemove", onMove);
+			state.map.off("mouseup", onUp);
+			state.map.dragging.enable();
+			renderPath();
+		}
+		state.map.on("mousemove", onMove);
+		state.map.on("mouseup", onUp);
+	}
+
+	/**
+	 * Le trajet tel qu'il sera publié : l'itinéraire d'origine jusqu'au premier point de divergence, le
+	 * dessin, l'itinéraire jusqu'à la divergence suivante, et ainsi de suite. Un tracé qui ne revient
+	 * pas termine la course : c'est un terminus provisoire, et le trajet s'arrête là — les tracés qui
+	 * suivaient ne sont alors pas atteints.
+	 *
+	 * TOUS les tronçons y entrent, dans l'ordre où la course les rencontre et non dans celui où ils ont
+	 * été saisis : c'est un seul trajet qui sera publié pour la course.
+	 *
+	 * Le premier itinéraire du sens sert de référence pour l'affichage ; le serveur, lui, recoud dans
+	 * chacun de ceux qu'empruntent les courses visées. La prévisualisation se contente des sommets —
+	 * le serveur projette sur les segments — mais elle suffit à juger des raccords.
+	 *
+	 * Renvoie l'écart maximal aux points de divergence, en mètres, et de quoi rédiger la note ; ou null
+	 * s'il n'y avait rien à prévisualiser.
+	 */
+	function drawPreview() {
+		var shape = state.shapes[0];
+		if (!shape || shape.points.length < 2) return null;
+
+		var drawn = [];
+		state.segments.forEach(function (segment) {
+			if (segment.path.length < 2) return;
+			var from = nearestIndex(shape.points, segment.path[0]);
+			var to = nearestIndex(shape.points, segment.path[segment.path.length - 1]);
+			drawn.push({ path: segment.path, from: from.index, to: to.index, offset: from.offset });
+		});
+		if (drawn.length === 0) return null;
+		drawn.sort(function (a, b) { return a.from - b.from; });
+
+		var preview = [], cursor = -1, open = true, unreachable = 0, offset = 0;
+		drawn.forEach(function (item) {
+			// Un tracé qui diverge avant le point où le précédent a rejoint l'itinéraire ferait remonter la
+			// course : on le laisse de côté, comme le serveur.
+			if (!open || item.from < cursor) { unreachable += 1; return; }
+			preview = preview.concat(shape.points.slice(Math.max(cursor, 0), item.from)).concat(item.path);
+			offset = Math.max(offset, item.offset);
+			if (item.to > item.from) cursor = item.to + 1;
+			else open = false;
+		});
+		if (open) preview = preview.concat(shape.points.slice(cursor));
+
+		state.previewLine = L.polyline(preview, { color: "#1f6feb", weight: 3, opacity: .9, dashArray: "6 4" })
+			.addTo(state.base);
+
+		return { offset: offset, rejoined: open, unreachable: unreachable };
+	}
+
+	/** Le sommet le plus proche d'un point, et son écart approché en mètres. */
+	function nearestIndex(points, point) {
+		var best = 0, bestDistance = Infinity;
+		points.forEach(function (candidate, index) {
+			var dx = candidate[0] - point[0], dy = (candidate[1] - point[1]) * .66;
+			var distance = dx * dx + dy * dy;
+			if (distance < bestDistance) { bestDistance = distance; best = index; }
+		});
+		return { index: best, offset: Math.sqrt(bestDistance) * 111000 };
+	}
+
+	// --- enregistrement ---
+
+	function setStatus(text, kind) {
+		var status = el("status");
+		status.textContent = text;
+		status.style.color = kind === "error" ? "var(--danger)" : kind === "ok" ? "var(--ok)" : "var(--muted)";
+	}
+
+	function save() {
+		var payload = {
+			segments: state.segments.map(function (segment) {
+				return {
+					startStopId: segment.startStopId,
+					endStopId: segment.endStopId,
+					propagatedDelay: segment.propagatedDelay,
+					stops: segment.stops.map(function (stop) {
+						return { stopId: stop.stopId, travelTime: stop.travelTime };
+					}),
+					path: segment.path
+				};
+			})
+		};
+
+		setStatus("Enregistrement…");
+		request(API + "/api/detours/" + encodeURIComponent(state.detail.key), {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(payload)
+		}).then(function (detail) {
+			state.detail = detail;
+			state.segments = detail.segments.map(adoptSegment);
+			state.active = Math.min(state.active, state.segments.length - 1);
+			renderSegment();
+
+			// Le compte rendu porte sur le premier tronçon qui coince : c'est celui-là qu'il faut reprendre,
+			// et le nommer évite de les passer tous en revue.
+			var blocking = -1;
+			state.segments.forEach(function (segment, index) {
+				if (blocking === -1 && (!segment.publishable || segment.matchingTrips === 0)) blocking = index;
+			});
+
+			var message;
+			if (blocking === -1) {
+				message = "Enregistré et publié.";
+			} else {
+				var segment = state.segments[blocking];
+				var why = segment.startStopId === null || segment.endStopId === null
+					? "bornes manquantes."
+					: segment.matchingTrips === 0 ? "aucune course ne dessert ses bornes." : "ni arrêt ni tracé.";
+				message = "Enregistré. Tronçon " + (blocking + 1) + " : " + why;
+			}
+			setStatus(message, blocking === -1 ? "ok" : "error");
+		}).catch(function (error) { setStatus(error.message, "error"); });
+	}
+
+	function remove() {
+		if (!confirm("Effacer cette déclaration ?")) return;
+		request(API + "/api/detours/" + encodeURIComponent(state.detail.key), { method: "DELETE" })
+			.then(backToList)
+			.catch(function (error) { setStatus(error.message, "error"); });
+	}
+
+	// --- branchements ---
+
+	// Le groupement ne tient qu'à l'affichage : rien à redemander au serveur. Il se retient d'une visite
+	// à l'autre — c'est une façon de travailler, pas un réglage qu'on repose chaque matin.
+	el("groupBy").value = window.localStorage.getItem("detours.groupBy") === "alert" ? "alert" : "line";
+	el("groupBy").onchange = function (event) {
+		window.localStorage.setItem("detours.groupBy", event.target.value);
+		renderList();
+	};
+	el("showUpcoming").onchange = renderList;
+	el("back").onclick = backToList;
+	el("addStop").onclick = function () {
+		setMode(state.mode === "search" || state.mode === "place" ? "idle" : "search");
+	};
+	el("stopQuery").oninput = function () {
+		if (state.mode === "place") setMode("search");
+		// Un caractère de plus ne relance pas la recherche : on attend que la frappe se calme.
+		clearTimeout(state.searchTimer);
+		state.searchTimer = setTimeout(searchStops, 200);
+	};
+	el("draw").onclick = function () { setMode(state.mode === "draw" ? "idle" : "draw"); };
+	el("undo").onclick = function () { seg().path.pop(); renderPath(); renderSegments(); };
+	el("clearPath").onclick = function () { seg().path = []; renderPath(); renderSegments(); };
+	el("save").onclick = save;
+	el("remove").onclick = remove;
+
+	document.addEventListener("keydown", function (event) {
+		if ((event.ctrlKey || event.metaKey) && event.key === "z" && state.detail) {
+			event.preventDefault();
+			seg().path.pop();
+			renderPath();
+			renderSegments();
+		}
+	});
+
+	loadList();
+})();
+</script>
+</body>
+</html>`;

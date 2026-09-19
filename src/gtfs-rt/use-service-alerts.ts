@@ -1,5 +1,6 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
 import {
+	type AlertAnalysis,
 	type AlertInput,
 	type AlertPeriod,
 	type AlertRouteContext,
@@ -10,6 +11,7 @@ import {
 	type RemovedStop,
 } from "../ai/analyze-alert.js";
 import { SERVED_STOPS } from "../config.js";
+import { detourKey } from "../detours/store.js";
 import {
 	normalizeStopName,
 	type OrderedStop,
@@ -32,11 +34,42 @@ export type SkipBucket = { directionId: number | null; stopIds: Set<string> };
 /** routeId → buckets d'arrêts à sauter (SKIPPED), par sens. */
 export type SkipIndex = Map<string, SkipBucket[]>;
 
+/**
+ * Le périmètre d'une perturbation, à la maille où se déclare une déviation : une info trafic, une
+ * ligne, un sens. C'est la même maille que le {@link SkipIndex}, et elle est construite dans la même
+ * passe — à ceci près qu'elle retient aussi les perturbations À VENIR, que le `SkipIndex` écarte.
+ * L'interface en a besoin : un tracé de déviation se prépare avant le début des travaux, pas le
+ * matin même.
+ *
+ * Un bucket « les deux sens » y donne deux scopes, un par sens : une déviation se déclare sens par
+ * sens — le tracé et les arrêts provisoires n'y sont jamais les mêmes.
+ */
+export type AlertScope = {
+	/** Clé stable `<numéro d'info trafic>:<routeId>:<directionId>`. */
+	key: string;
+	/** L'identifiant d'entité du flux amont, tel quel : c'est lui que porte `serviceAlertId`. */
+	alertId: string;
+	/** Le numéro d'info trafic (cf. {@link alertNumber}), qui sert de clé aux déclarations. */
+	alertNumber: string;
+	routeId: string;
+	directionId: number;
+	headerText: string;
+	descriptionText: string;
+	periods: AlertPeriod[];
+	/** Vrai lorsque l'une des périodes couvre l'instant du relevé. */
+	active: boolean;
+	/** Les quais supprimés pour ce sens, une fois retranchés ceux que {@link SERVED_STOPS} rétablit. */
+	removedStopIds: Set<string>;
+};
+
+/** Les perturbations connues, par {@link AlertScope.key}. */
+export type AlertScopeIndex = Map<string, AlertScope>;
+
 /** Numéro d'info trafic → routeId → quais que cette alerte ne doit PAS faire sauter. */
 type ServedStopIndex = Map<string, Map<string, Set<string>>>;
 
 type AlertsState = { headerTimestamp: string | null };
-type PollResult = { skipIndex: SkipIndex; headerTimestamp: string | null };
+type PollResult = { skipIndex: SkipIndex; alertScopes: AlertScopeIndex; headerTimestamp: string | null };
 
 let currentInterval: NodeJS.Timeout | undefined;
 
@@ -44,6 +77,8 @@ export function useServiceAlerts(url: string, pollInterval: number, gtfs: { data
 	const state: AlertsState = { headerTimestamp: null };
 	const resource = {
 		skipIndex: new Map<string, SkipBucket[]>(),
+		/** Les perturbations connues, en vigueur ou à venir (cf. {@link AlertScope}). */
+		alertScopes: new Map<string, AlertScope>() as AlertScopeIndex,
 		importedAt: Temporal.Now.instant(),
 	};
 	let running = false;
@@ -57,6 +92,7 @@ export function useServiceAlerts(url: string, pollInterval: number, gtfs: { data
 			const next = await pollAlerts(url, gtfs.data, state);
 			if (!next) return; // flux inchangé, erreur, ou GTFS indisponible → on garde l'index courant
 			resource.skipIndex = next.skipIndex;
+			resource.alertScopes = next.alertScopes;
 			resource.importedAt = Temporal.Now.instant();
 			state.headerTimestamp = next.headerTimestamp;
 		} finally {
@@ -220,6 +256,7 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		}
 
 		const skipIndex: SkipIndex = new Map();
+		const alertScopes: AlertScopeIndex = new Map();
 		const feedAlertIds = new Set<string>();
 		// Résolu à chaque poll : le GTFS statique se recharge sous nos pieds, et avec lui les quais.
 		const servedStops = resolveServedStops(gtfs);
@@ -248,12 +285,19 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		// 2. Analyse groupée (un seul appel IA pour toutes les alertes nouvelles/modifiées).
 		const analyses = await analyzeAlerts(inputs);
 
-		// 3. Construction de l'index de suppressions.
+		// 3. Construction de l'index de suppressions, et du périmètre des déviations qui va avec.
+		//
+		// Les deux se tirent des mêmes quais, d'où la passe commune. La période, en revanche, ne les
+		// départage pas de la même façon : le feed ne doit annoncer que ce qui est en vigueur, quand
+		// l'interface doit aussi montrer ce qui vient — un tracé de déviation se prépare à l'avance. La
+		// résolution des noms en quais tourne donc pour toutes les alertes, et seul le versement dans
+		// le `skipIndex` est conditionné.
 		let removedCount = 0;
 		for (const input of inputs) {
 			const analysis = analyses.get(input.id);
-			if (!analysis || analysis.removedStops.length === 0 || !isActive(analysis.periods, now)) continue;
+			if (!analysis || analysis.removedStops.length === 0) continue;
 
+			const active = isActive(analysis.periods, now);
 			const routeIds = routesById.get(input.id) ?? new Set();
 			const served = servedStops.get(alertNumber(input.id));
 			for (const removedStop of analysis.removedStops) {
@@ -261,7 +305,19 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 					if (!routeIds.has(route.routeId)) continue;
 					const servedIds = served?.get(route.routeId) ?? EMPTY_SERVED;
 					const { routeId, directionId } = route;
-					removedCount += applyRemovedStop(skipIndex, gtfs, removedStop, routeId, directionId, servedIds);
+					const contributions = resolveRemovedStop(gtfs, removedStop, routeId, directionId, servedIds);
+
+					for (const [bucketDirection, stopIds] of contributions) {
+						if (active) {
+							mergeSkip(skipIndex, routeId, bucketDirection, stopIds);
+							removedCount += 1;
+						}
+
+						// Un bucket « les deux sens » se dédouble : la maille d'une déviation est le sens.
+						for (const scopeDirection of bucketDirection === null ? [0, 1] : [bucketDirection]) {
+							mergeScope(alertScopes, input, analysis, routeId, scopeDirection, stopIds, active);
+						}
+					}
 				}
 			}
 		}
@@ -270,8 +326,10 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		pruneCache(feedAlertIds);
 		flushCache();
 
-		console.log(`✓ ${skipIndex.size} routes with skipped stops (${removedCount} entries).`);
-		return { skipIndex, headerTimestamp };
+		console.log(
+			`✓ ${skipIndex.size} routes with skipped stops (${removedCount} entries, ${alertScopes.size} detour scopes).`,
+		);
+		return { skipIndex, alertScopes, headerTimestamp };
 	} catch (cause) {
 		console.error("✘ Failed to load service alerts!", cause);
 		return null;
@@ -406,20 +464,34 @@ function buildRouteContext(routeIds: Set<string>, gtfs: StaticGtfs): AlertRouteC
 }
 
 /**
- * Ajoute à l'index les arrêts à sauter pour un arrêt supprimé (ou une plage « de X à Y »)
- * sur une ligne/sens. Renvoie le nombre de contributions (pour les logs). Hors périmètre → 0.
+ * Les quais à sauter pour un arrêt supprimé (ou une plage « de X à Y ») sur une ligne/sens, rangés
+ * par bucket de sens — `null` valant « les deux ». Rien à sauter, ou hors périmètre → aucune entrée.
+ *
+ * Le versement dans l'index est laissé à l'appelant : les mêmes quais alimentent aussi le périmètre
+ * des déviations, qui ne retient pas les mêmes alertes (cf. la passe commune de `pollAlerts`).
  *
  * `served` porte les quais que l'alerte en cours ne doit pas faire sauter (cf. {@link SERVED_STOPS}) :
  * ils sont retranchés de chaque contribution.
  */
-function applyRemovedStop(
-	skipIndex: SkipIndex,
+function resolveRemovedStop(
 	gtfs: StaticGtfs,
 	removedStop: RemovedStop,
 	routeId: string,
 	directionId: number | null,
 	served: ReadonlySet<string>,
-): number {
+): Map<number | null, Set<string>> {
+	const contributions = new Map<number | null, Set<string>>();
+
+	/** Verse les quais retenus dans le bucket du sens, ceux que `served` rétablit en moins. */
+	const contribute = (bucketDirection: number | null, stopIds: Set<string>) => {
+		const kept = keepUnlessServed(stopIds, served);
+		if (kept.size === 0) return;
+
+		const existing = contributions.get(bucketDirection);
+		if (existing === undefined) contributions.set(bucketDirection, kept);
+		else for (const stopId of kept) existing.add(stopId);
+	};
+
 	const startName = normalizeStopName(removedStop.stopName);
 	const directions = directionId === null ? [0, 1] : [directionId];
 
@@ -428,19 +500,17 @@ function applyRemovedStop(
 		// Match global, exact puis tolérant (chemin rapide).
 		const resolved = resolveStopIds(gtfs, startName);
 		if (resolved !== undefined) {
-			return mergeSkipUnlessServed(skipIndex, routeId, directionId, resolved, served);
+			contribute(directionId, resolved);
+			return contributions;
 		}
 		// Sinon, match flou dans le contexte de la ligne (ex. « Piscine » → « Piscine de Bihorel »).
-		let count = 0;
 		for (const dir of directions) {
 			const stops = (gtfs.routeStopSequences.get(routeId)?.get(dir) ?? []).flat();
 			const canonical = stops[findStopIndex(stops, startName)]?.name;
 			const stopIds = canonical ? gtfs.stopNameIndex.get(canonical) : undefined;
-			if (stopIds && stopIds.size > 0) {
-				count += mergeSkipUnlessServed(skipIndex, routeId, dir, stopIds, served);
-			}
+			if (stopIds && stopIds.size > 0) contribute(dir, stopIds);
 		}
-		return count;
+		return contributions;
 	}
 
 	// Plage : on détermine les arrêts entre les deux extrémités le long de l'itinéraire, puis on
@@ -474,9 +544,9 @@ function applyRemovedStop(
 		// Sans itinéraire, on ne sait pas départager les bornes : ne rien annoncer vaut mieux que
 		// supprimer un arrêt qui reste desservi. De même si la coupure ne laisse aucun arrêt entre deux
 		// terminus provisoires voisins — le tronçon perdu ne contient alors aucun arrêt.
-		if (!sliced) return 0;
+		if (!sliced) return contributions;
 		removeProvisionalTermini(rangeNames, gtfs, routeId, [startName, endName]);
-		if (rangeNames.size === 0) return 0;
+		if (rangeNames.size === 0) return contributions;
 	}
 
 	// Repli : aucune extrémité sur un itinéraire connu → on ne supprime que les extrémités citées.
@@ -486,14 +556,11 @@ function applyRemovedStop(
 	for (const name of names) {
 		for (const id of resolveStopIds(gtfs, name) ?? []) stopIds.add(id);
 	}
-	if (stopIds.size === 0) return 0;
+	if (stopIds.size === 0) return contributions;
 
-	let count = 0;
-	for (const dir of directions) {
-		count += mergeSkipUnlessServed(skipIndex, routeId, dir, stopIds, served);
-	}
+	for (const dir of directions) contribute(dir, stopIds);
 
-	return count;
+	return contributions;
 }
 
 /**
@@ -535,37 +602,67 @@ function resolveServedStops(gtfs: StaticGtfs): ServedStopIndex {
  * (« 00000000-0000-0000-0000-000000022467 » → « 22467 »). Les numéros déclarés dans
  * {@link SERVED_STOPS} passent par la même moulinette, qu'ils soient écrits nus ou en entier.
  */
-function alertNumber(alertId: string): string {
+export function alertNumber(alertId: string): string {
 	const tail = alertId.split("-").at(-1) ?? alertId;
 	return tail.replace(/^0+(?=\d)/, "");
 }
 
 /**
- * Verse dans l'index les quais à sauter, moins ceux que `served` déclare desservis. Renvoie 1 si le
- * sens a été alimenté, 0 s'il ne restait plus rien à supprimer.
+ * Les quais à sauter, moins ceux que `served` déclare desservis.
  *
  * Le retranchement ne regarde pas le sens : un quai n'est desservi que dans un sens, celui-là même
  * que l'exception vise. Un quai que les deux sens empruntent est de toute façon desservi dans les
  * deux — l'exception dit qu'on s'y arrête, pas qu'on s'y arrête dans un sens seulement.
  */
-function mergeSkipUnlessServed(
-	skipIndex: SkipIndex,
+function keepUnlessServed(stopIds: Set<string>, served: ReadonlySet<string>): Set<string> {
+	if (served.size === 0) return new Set(stopIds);
+
+	const kept = new Set<string>();
+	for (const stopId of stopIds) {
+		if (!served.has(stopId)) kept.add(stopId);
+	}
+	return kept;
+}
+
+/**
+ * Verse les quais supprimés dans le périmètre de la déviation correspondante, en la créant au
+ * besoin. Une même info trafic cite souvent le même sens plusieurs fois — une plage, puis un arrêt
+ * isolé — et tout se réunit sous la même clé.
+ *
+ * `active` ne se recalcule pas d'une contribution à l'autre : il vaut pour l'alerte entière.
+ */
+function mergeScope(
+	scopes: AlertScopeIndex,
+	input: AlertInput,
+	analysis: AlertAnalysis,
 	routeId: string,
-	directionId: number | null,
+	directionId: number,
 	stopIds: Set<string>,
-	served: ReadonlySet<string>,
-): number {
-	let kept = stopIds;
-	if (served.size > 0) {
-		kept = new Set<string>();
-		for (const stopId of stopIds) {
-			if (!served.has(stopId)) kept.add(stopId);
-		}
+	active: boolean,
+) {
+	const number = alertNumber(input.id);
+	// La même clé que celle des déclarations, et empruntée à elles : c'est le seul lien entre les deux
+	// modules, et le réécrire ici serait la meilleure façon de le laisser diverger un jour.
+	const key = detourKey(number, routeId, directionId);
+
+	let scope = scopes.get(key);
+	if (scope === undefined) {
+		scope = {
+			key,
+			alertId: input.id,
+			alertNumber: number,
+			routeId,
+			directionId,
+			headerText: input.headerText,
+			descriptionText: input.descriptionText,
+			periods: analysis.periods,
+			active,
+			removedStopIds: new Set(),
+		};
+		scopes.set(key, scope);
 	}
 
-	if (kept.size === 0) return 0;
-	mergeSkip(skipIndex, routeId, directionId, kept);
-	return 1;
+	for (const stopId of stopIds) scope.removedStopIds.add(stopId);
 }
 
 /**

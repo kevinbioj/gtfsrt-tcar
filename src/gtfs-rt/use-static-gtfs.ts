@@ -12,11 +12,19 @@ export type RouteDirection = { directionId: number; headsigns: string[] };
 export type OrderedStop = { stopId: string; name: string };
 
 /**
- * Un arrêt dans l'horaire théorique d'un trip : sa position (stop_sequence), son quai, et son
- * abscisse curviligne sur la shape de la course, en kilomètres. Celle-ci vaut `NaN` lorsqu'on n'a
- * pas su la déterminer — le GTFS ne la déclare pas et l'arrêt n'a pas de coordonnées.
+ * Un arrêt dans l'horaire théorique d'un trip : sa position (stop_sequence), son quai, son abscisse
+ * curviligne sur la shape de la course, en kilomètres, et son heure d'arrivée.
+ *
+ * L'abscisse vaut `NaN` lorsqu'on n'a pas su la déterminer — le GTFS ne la déclare pas et l'arrêt n'a
+ * pas de coordonnées. L'arrivée vaut `NaN` lorsque `stop_times.txt` ne la donne pas ; elle se compte
+ * en secondes depuis le minuit de la journée de service, comme {@link StaticGtfs.tripDepartures}, et
+ * dépasse donc 86 400 pour une course qui déborde sur le lendemain.
+ *
+ * L'arrivée sert à rapporter deux tronçons déviés l'un à l'autre lorsqu'ils se suivent sur une même
+ * course : c'est le seul endroit du GTFS qui dise le temps qui sépare deux de ses arrêts (cf.
+ * `rebaseOffset`).
  */
-export type TripStop = { stopSequence: number; stopId: string; distance: number };
+export type TripStop = { stopSequence: number; stopId: string; distance: number; arrival: number };
 
 /**
  * Ce que le GTFS statique dit d'une course : sa ligne, son sens, sa destination affichée, son tracé,
@@ -877,6 +885,7 @@ function buildSequences(
 			stopSequence,
 			stopId,
 			distance: distCol === -1 ? Number.NaN : Number.parseFloat(row[distCol] ?? ""),
+			arrival,
 		});
 	}
 

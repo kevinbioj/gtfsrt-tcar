@@ -9,8 +9,9 @@ export function handleRequest(
 	output: "protobuf" | "json",
 	tripUpdates: Map<string, GtfsRealtime.transit_realtime.ITripUpdate> | null,
 	vehiclePositions: Map<string, GtfsRealtime.transit_realtime.IVehiclePosition> | null,
+	detourEntities: readonly GtfsRealtime.transit_realtime.IFeedEntity[] | null = null,
 ) {
-	const feed = createFeed(tripUpdates, vehiclePositions);
+	const feed = createFeed(tripUpdates, vehiclePositions, detourEntities);
 
 	if (output === "json") {
 		c.header("Content-Type", "application/json");

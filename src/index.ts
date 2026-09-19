@@ -4,8 +4,11 @@ import { Hono } from "hono";
 import { rateLimiter } from "hono-rate-limiter";
 import { loadCache } from "./ai/analyze-alert.js";
 import {
+	ADMIN_PASSWORD,
+	ADMIN_USERNAME,
 	ALERT_CACHE_PATH,
 	ALERTS_POLL_INTERVAL,
+	DETOURS_DB_PATH,
 	GTFS_CHECK_INTERVAL,
 	POLL_INTERVAL,
 	PORT,
@@ -22,6 +25,9 @@ import {
 	VERIFICATION_FEED_URL,
 	VERIFICATION_STALENESS,
 } from "./config.js";
+import { adminRoutes } from "./detours/admin.js";
+import { buildDetourEntities } from "./detours/build-entities.js";
+import { useDetourStore } from "./detours/store.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
 import { resolveServiceRun, scheduledTripUpdates, serviceDays, tripRun } from "./gtfs-rt/scheduled-trips.js";
 import { type Movement, useMovementTracker } from "./gtfs-rt/use-movement-tracker.js";
@@ -74,26 +80,55 @@ const staticGtfs = await useStaticGtfs(STATIC_GTFS_URL, GTFS_CHECK_INTERVAL);
 // lui-même, sans avoir à s'y réabonner.
 const vehicleLocator = useVehicleLocator(staticGtfs, restored?.locations);
 const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs);
+const detourStore = useDetourStore(DETOURS_DB_PATH);
 
 const hono = new Hono();
-hono.use(
-	rateLimiter({
-		windowMs: 5_000,
-		limit: 5,
-		keyGenerator: (c) => `${c.req.header("CF-Connecting-IP")}_${c.req.method}_${c.req.path}`,
-		handler: (c) => c.json({ code: 429, message: "Too many requests, please try again later." }, 429),
-	}),
-);
+
+const limiter = rateLimiter({
+	windowMs: 5_000,
+	limit: 5,
+	keyGenerator: (c) => `${c.req.header("CF-Connecting-IP")}_${c.req.method}_${c.req.path}`,
+	handler: (c) => c.json({ code: 429, message: "Too many requests, please try again later." }, 429),
+});
+
+// Le limiteur ne couvre que les endpoints publics. L'interface d'administration est protégée par son
+// authentification, et son usage normal — la page, deux appels d'API, un enregistrement — dépasserait
+// d'emblée un quota taillé pour des consommateurs de feed. Sa clé est de surcroît l'en-tête que pose
+// Cloudflare : en accès direct, tous les clients la partageraient.
+hono.use(async (c, next) => (c.req.path.startsWith("/admin") ? next() : limiter(c, next)));
+
+if (ADMIN_USERNAME && ADMIN_PASSWORD) {
+	hono.route(
+		"/admin",
+		adminRoutes({
+			username: ADMIN_USERNAME,
+			password: ADMIN_PASSWORD,
+			store: detourStore,
+			gtfs: staticGtfs,
+			serviceAlerts,
+			rebuild: () => rebuildDetourEntities(),
+		}),
+	);
+	console.log("➔ Detour administration mounted on /admin.");
+} else {
+	console.warn("✘ ADMIN_USERNAME/ADMIN_PASSWORD missing — detour administration not mounted.");
+}
 
 /** Les véhicules à émettre à cet instant : le registre écarte lui-même les relevés périmés. */
 const publishedPositions = () => registry.publishable(Math.floor(Date.now() / 1000));
 
 hono.get("/vehicle-positions", (c) => handleRequest(c, "protobuf", null, publishedPositions()));
 hono.get("/vehicle-positions.json", (c) => handleRequest(c, "json", null, publishedPositions()));
-hono.get("/trip-updates", (c) => handleRequest(c, "protobuf", store.tripUpdates, null));
-hono.get("/trip-updates.json", (c) => handleRequest(c, "json", store.tripUpdates, null));
+hono.get("/trip-updates", (c) => handleRequest(c, "protobuf", store.tripUpdates, null, store.detourEntities));
+hono.get("/trip-updates.json", (c) => handleRequest(c, "json", store.tripUpdates, null, store.detourEntities));
 hono.get("/", (c) =>
-	handleRequest(c, c.req.query("format") === "json" ? "json" : "protobuf", store.tripUpdates, publishedPositions()),
+	handleRequest(
+		c,
+		c.req.query("format") === "json" ? "json" : "protobuf",
+		store.tripUpdates,
+		publishedPositions(),
+		store.detourEntities,
+	),
 );
 
 serve({ fetch: hono.fetch, port: PORT });
@@ -517,8 +552,32 @@ async function pollTripUpdates() {
 		console.log(
 			`✓ ${store.tripUpdates.size} trip updates (${realtimeTrips} realtime, ${scheduleOnly} source without realtime, ${scheduled.size} rebuilt from schedule, ${store.tripDepartures.size} departures announced, ${unresolvedTrips} unresolved trips).`,
 		);
+
+		rebuildDetourEntities();
 	} catch (cause) {
 		console.error("✘ Trip updates poll error:", cause);
+	}
+}
+
+/**
+ * Réassemble les entités des déviations déclarées. Appelée à chaque relevé — les journées de service
+ * tournent, les courses finissent de circuler — et juste après un enregistrement depuis l'interface,
+ * pour que ce qu'on vient de saisir soit dans le feed suivant et non vingt secondes plus tard.
+ *
+ * Elle ne touche à rien d'autre que `store.detourEntities` : une déclaration incomplète ou une shape
+ * qui ne se recoud pas se traduit par des entités en moins, jamais par un feed en échec.
+ */
+function rebuildDetourEntities() {
+	try {
+		store.detourEntities = buildDetourEntities(
+			staticGtfs.data,
+			serviceAlerts.alertScopes,
+			detourStore.records,
+			detourStore.provisionalStops,
+			Math.floor(Date.now() / 1000),
+		);
+	} catch (cause) {
+		console.error("✘ Failed to build detour entities:", cause);
 	}
 }
 
