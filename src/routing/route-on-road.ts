@@ -1,5 +1,6 @@
 import { type Coordinates, haversine } from "../utils/geometry.js";
 import { edgePointCount, nodeCoordinates, type RoadGraph, readEdgePoint } from "./road-graph.js";
+import { smoothPath } from "./smooth-path.js";
 import { type RoadSnap, snapToRoad } from "./snap-to-road.js";
 
 export type RoadRoute = {
@@ -22,6 +23,8 @@ export type RoutingOptions = {
 	snapRadius: number;
 	/** Nombre de carrefours que la recherche s'autorise à développer avant d'abandonner. */
 	maxExpansions: number;
+	/** Écart toléré entre le tracé rendu et la courbe qui en arrondit les angles, en kilomètres. */
+	smoothingTolerance: number;
 };
 
 /**
@@ -39,6 +42,10 @@ export type RoutingOptions = {
  * Le coût est la seule distance, sans préférence pour les grands axes : un autobus dévié emprunte
  * volontiers une rue secondaire, et c'est encore au dessinateur de trancher, en posant un point de
  * passage.
+ *
+ * La géométrie rendue passe enfin par {@link smoothPath}, qui en arrondit les angles. La LONGUEUR,
+ * elle, reste celle des rues telles qu'OpenStreetMap les décrit : c'est la distance qu'on parcourt
+ * sur la chaussée, et non celle de la courbe qu'on dessine par-dessus.
  */
 export function routeOnRoad(
 	graph: RoadGraph,
@@ -51,12 +58,17 @@ export function routeOnRoad(
 	if (start === undefined || end === undefined) return { failure: "no-road" };
 
 	const direct = alongOneEdge(graph, start, end);
-	if (direct !== undefined) return direct;
+	if (direct !== undefined) return rounded(direct, options.smoothingTolerance);
 
 	const arcs = search(graph, start, end, options.maxExpansions);
 	if (arcs === undefined) return { failure: "unreachable" };
 
-	return assemble(graph, start, end, arcs);
+	return rounded(assemble(graph, start, end, arcs), options.smoothingTolerance);
+}
+
+/** Le même itinéraire, ses angles arrondis. */
+function rounded(route: RoadRoute, tolerance: number): RoadRoute {
+	return { ...route, path: smoothPath(route.path, tolerance) };
 }
 
 /** Les deux points sur la même arête : la rue elle-même fait l'itinéraire, dans un sens ou l'autre. */

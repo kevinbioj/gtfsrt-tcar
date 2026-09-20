@@ -359,3 +359,19 @@ export const ROAD_SNAP_RADIUS = 0.15;
  * de suite que faire attendre l'éditeur.
  */
 export const ROAD_ROUTING_MAX_EXPANSIONS = 200_000;
+
+/**
+ * Écart maximal, en kilomètres, entre un tracé accroché aux rues et la courbe qui l'arrondit.
+ *
+ * OpenStreetMap décrit un giratoire d'une quinzaine de mètres de rayon par une dizaine de nœuds : la
+ * donnée est fine, mais un petit cercle échantillonné reste un polygone, et le tracé publié tourne
+ * d'une trentaine de degrés à chaque sommet. On interpole donc entre les nœuds — sans en déplacer
+ * aucun — jusqu'à ce que la courbe ne s'écarte plus de la corde de plus de cette valeur. Une ligne
+ * droite ne reçoit aucun point supplémentaire ; seuls les virages s'alourdissent.
+ *
+ * Dix centimètres, mesurés sur les 293 giratoires de l'agglomération : c'est le meilleur compromis
+ * que permette l'« encoded polyline » du GTFS-RT, qui arrondit les coordonnées à ~1 m. Plus serré,
+ * les points ajoutés retombent sur les mêmes mailles et la courbe ressort en marches d'escalier —
+ * on aurait troqué des angles francs contre un tremblement, pour une shape deux fois plus lourde.
+ */
+export const ROAD_SMOOTHING_TOLERANCE = 0.0001;

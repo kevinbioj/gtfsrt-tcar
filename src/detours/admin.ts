@@ -1,7 +1,7 @@
 import { type Context, Hono } from "hono";
 import { basicAuth } from "hono/basic-auth";
 
-import { ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SNAP_RADIUS } from "../config.js";
+import { ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SMOOTHING_TOLERANCE, ROAD_SNAP_RADIUS } from "../config.js";
 import { type AlertScope, type AlertScopeIndex, type AnalyzedAlert, isActive } from "../gtfs-rt/use-service-alerts.js";
 import { normalizeStopName, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
 import type { RoadGraph, RoadGraphHandle } from "../routing/road-graph.js";
@@ -312,6 +312,7 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		const route = routeOnRoad(graph, from, to, {
 			snapRadius: ROAD_SNAP_RADIUS,
 			maxExpansions: ROAD_ROUTING_MAX_EXPANSIONS,
+			smoothingTolerance: ROAD_SMOOTHING_TOLERANCE,
 		});
 
 		if ("failure" in route) {
