@@ -81,8 +81,15 @@ const staticGtfs = await useStaticGtfs(STATIC_GTFS_URL, GTFS_CHECK_INTERVAL);
 // Le locator lit `staticGtfs.data` à chaque appel : il suit donc les rechargements du GTFS de
 // lui-même, sans avoir à s'y réabonner.
 const vehicleLocator = useVehicleLocator(staticGtfs, restored?.locations);
-const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs);
 const detourStore = useDetourStore(DETOURS_DB_PATH);
+// Les périmètres saisis à la main sont relus à chaque indexation, jamais retenus : une saisie vaut
+// dès `serviceAlerts.reindex()`, sans attendre le relevé suivant ni rappeler l'IA.
+const serviceAlerts = useServiceAlerts(
+	SERVICE_ALERTS_URL,
+	ALERTS_POLL_INTERVAL,
+	staticGtfs,
+	() => detourStore.scopeOverrides,
+);
 // Sa présence est constatée ici, ses octets ne seront lus qu'au premier accrochage.
 const roadGraph = useRoadGraph(ROAD_GRAPH_PATH);
 
@@ -112,6 +119,7 @@ if (ADMIN_USERNAME && ADMIN_PASSWORD) {
 			serviceAlerts,
 			roadGraph,
 			rebuild: () => rebuildDetourEntities(),
+			reindexAlerts: () => serviceAlerts.reindex(),
 		}),
 	);
 	console.log("➔ Detour administration mounted on /admin.");

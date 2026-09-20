@@ -8,6 +8,7 @@ import type { AlertScopeIndex } from "../gtfs-rt/use-service-alerts.js";
 import type { StaticGtfs, TripStop } from "../gtfs-rt/use-static-gtfs.js";
 import { encodePolyline } from "../utils/encode-polyline.js";
 import type { Coordinates } from "../utils/geometry.js";
+import { removesStops } from "./bounds.js";
 import { spliceShape } from "./splice-shape.js";
 import { type DetourRecord, detourKey, type ProvisionalStop, provisionalStopUid } from "./store.js";
 
@@ -25,6 +26,11 @@ const CANDIDATE_DAYS = [-1, 0] as const;
 type Candidate = {
 	/** De quoi le nommer au journal et dans les identifiants publiés : « 22467#0 ». */
 	label: string;
+	/**
+	 * Sa plage supprime-t-elle des arrêts ? Sinon le véhicule passe ailleurs entre deux arrêts qu'il
+	 * dessert toujours : le tronçon ne publie pas de `Modification`, seulement son tracé.
+	 */
+	removes: boolean;
 	alertId: string;
 	routeId: string;
 	directionId: number;
@@ -38,6 +44,18 @@ type Candidate = {
 
 /** Un tronçon rapporté à une course : ses bornes y ont un rang, et c'est lui qui les ordonne. */
 type Applicable = { candidate: Candidate; startIndex: number; endIndex: number };
+
+/**
+ * Les courses d'une journée qui reçoivent exactement la même chose : les mêmes modifications, les
+ * mêmes déroutements, et le même itinéraire d'origine. Elles sortent en une seule entité.
+ */
+type Group = {
+	modifications: Modification[];
+	/** Les tronçons sans suppression : ils ne donnent qu'un tracé, à coudre avec les autres. */
+	reroutes: Applicable[];
+	shapeId: string;
+	tripIds: string[];
+};
 
 /**
  * Une `Modification` telle qu'elle sera publiée, une fois les chevauchements repliés. Elle vient d'un
@@ -70,6 +88,12 @@ type Modification = {
  * modifications. On assemble ce qui s'applique à chaque course, puis on réunit les courses qui
  * reçoivent exactement la même chose.
  *
+ * Un tronçon qui ne supprime aucun arrêt, lui, ne produit AUCUNE `Modification` : il n'a rien à
+ * remplacer, et des sélecteurs qui désigneraient des arrêts encore desservis mentiraient. Ce qu'il
+ * change — le chemin — passe tout entier par le `shape_id` de la course, et l'entité sort avec une
+ * liste `modifications` vide. C'est la seule façon d'annoncer une déviation qui ne touche pas à la
+ * desserte, et c'est le cas d'une ligne déviée dans un sens où elle ne perd pas d'arrêt.
+ *
  * Une entité est émise PAR JOURNÉE DE SERVICE, et non une seule portant plusieurs `service_dates`.
  * Sans cela, les courses de toutes les journées se retrouveraient réunies sous chaque date : une
  * course que son service ne fait rouler que le dimanche serait déclarée modifiée le samedi.
@@ -91,7 +115,7 @@ export function buildDetourEntities(
 	 */
 	const problems = new Set<string>();
 
-	const candidates = collectCandidates(scopes, records, provisional, problems);
+	const candidates = collectCandidates(gtfs, scopes, records, provisional, problems);
 	if (candidates.size === 0) {
 		report(records.size, 0, stops, shapes, modifications, problems);
 		return [];
@@ -106,7 +130,7 @@ export function buildDetourEntities(
 
 	for (const day of serviceDays(gtfs, CANDIDATE_DAYS)) {
 		/** Les courses du jour qui reçoivent exactement les mêmes modifications et le même itinéraire. */
-		const groups = new Map<string, { modifications: Modification[]; shapeId: string; tripIds: string[] }>();
+		const groups = new Map<string, Group>();
 
 		for (const serviceId of day.services) {
 			for (const tripId of gtfs.serviceTrips.get(serviceId) ?? []) {
@@ -127,24 +151,43 @@ export function buildDetourEntities(
 				const matched = matchOnTrip(applicable, schedule);
 				if (matched.length === 0) continue;
 
-				const resolved = mergeOverlaps(matched, schedule, problems);
-				for (const modification of resolved) for (const part of modification.parts) applied.add(part);
+				// Les deux natures de tronçon se séparent ici, et ne se revoient qu'au tracé. Un tronçon
+				// qui ne supprime rien n'a pas de `Modification` à replier avec les autres : il n'en
+				// produit aucune, et ce qu'il dessine se coud dans la shape comme le reste.
+				const resolved = mergeOverlaps(
+					matched.filter((entry) => entry.candidate.removes),
+					schedule,
+					problems,
+				);
+				const reroutes = matched.filter((entry) => !entry.candidate.removes);
 
-				const signature = `${meta.shapeId}|${resolved.map(signatureOf).join(";")}`;
+				for (const modification of resolved) for (const part of modification.parts) applied.add(part);
+				for (const entry of reroutes) applied.add(entry.candidate.label);
+
+				const signature =
+					`${meta.shapeId}|${resolved.map(signatureOf).join(";")}` +
+					`|${reroutes.map((entry) => entry.candidate.label).join(";")}`;
 				const group = groups.get(signature);
 				if (group === undefined)
-					groups.set(signature, { modifications: resolved, shapeId: meta.shapeId, tripIds: [tripId] });
+					groups.set(signature, { modifications: resolved, reroutes, shapeId: meta.shapeId, tripIds: [tripId] });
 				else group.tripIds.push(tripId);
 			}
 		}
 
 		for (const [signature, group] of groups) {
-			const parts = group.modifications.map((modification) => modification.parts.join("+")).join("-");
+			const parts = [
+				...group.modifications.map((modification) => modification.parts.join("+")),
+				...group.reroutes.map((entry) => entry.candidate.label),
+			].join("-");
 			// Les mêmes tronçons ne donnent pas forcément la même chose sur deux branches : des horaires
 			// différents les replient différemment. L'empreinte de la signature tranche, et reste la même
 			// d'un relevé à l'autre tant que la déclaration ne bouge pas.
 			const fingerprint = createHash("sha1").update(signature).digest("hex").slice(0, 8);
 			const shapeId = resolveShapeId(gtfs, shapes, splicedShapes, problems, parts, fingerprint, group);
+
+			// Une entité qui ne porterait ni modification ni tracé ne dirait rien : c'est le cas d'un
+			// tronçon sans suppression dont la shape n'a pas pu être recousue, et le journal l'a dit.
+			if (group.modifications.length === 0 && shapeId === null) continue;
 
 			modifications.push({
 				id: `TM:TCAR:${parts}:${day.date}:${fingerprint}`,
@@ -253,6 +296,7 @@ export function countSelectableTrips(
  * juge ici, une fois pour toutes : au-delà, on ne raisonne plus que sur des courses.
  */
 function collectCandidates(
+	gtfs: StaticGtfs,
 	scopes: AlertScopeIndex,
 	records: ReadonlyMap<string, DetourRecord>,
 	provisional: ReadonlyMap<string, ProvisionalStop>,
@@ -274,8 +318,19 @@ function collectCandidates(
 		record.segments.forEach((segment, rank) => {
 			const label = `${record.alertNumber}#${rank}`;
 			const { startStopId, endStopId } = segment;
+			// Les bornes sont requises quelle que soit la nature du tronçon : publiées ou non, ce sont
+			// elles qui désignent les courses concernées.
 			if (startStopId === null || endStopId === null) {
-				problems.add(`${label} — bornes de la modification manquantes.`);
+				problems.add(`${label} — bornes du tronçon manquantes.`);
+				return;
+			}
+
+			// La nature du tronçon se lit d'ici : une plage sans arrêt supprimé ne supprime rien, et n'a
+			// que son tracé à annoncer.
+			const removes = removesStops(gtfs, record.routeId, record.directionId, scope.removedStopIds, segment);
+
+			if (!removes && segment.path.length < 2) {
+				problems.add(`${label} — aucun arrêt supprimé dans sa plage, et pas de tracé : rien à annoncer.`);
 				return;
 			}
 
@@ -284,9 +339,19 @@ function collectCandidates(
 			// admet d'être vide — la spec la veut « de longueur inférieure, égale ou supérieure » aux
 			// arrêts remplacés. Il faut seulement qu'il annonce QUELQUE CHOSE : sans arrêt ni tracé, il ne
 			// dit rien que les `SKIPPED` des trip updates ne disent déjà.
-			if (segment.stops.length === 0 && segment.path.length < 2) {
+			if (removes && segment.stops.length === 0 && segment.path.length < 2) {
 				problems.add(`${label} — ni arrêt de substitution ni tracé : rien à annoncer.`);
 				return;
+			}
+
+			// Le périmètre a pu changer après coup : des arrêts de substitution saisis quand la plage
+			// supprimait encore n'ont plus rien à remplacer. Ils sont laissés de côté, et le journal le
+			// dit — les publier reviendrait à ajouter des arrêts à une course qui n'en perd aucun.
+			if (!removes && (segment.stops.length > 0 || segment.propagatedDelay !== 0)) {
+				problems.add(
+					`${label} — aucun arrêt supprimé dans sa plage : ses arrêts de substitution et son délai ` +
+						"propagé sont ignorés, seul le tracé est publié.",
+				);
 			}
 
 			// Un arrêt provisoire disparu de la base ne se rattrape pas : publier la modification laisserait
@@ -305,13 +370,14 @@ function collectCandidates(
 			const list = candidates.get(routeDirection);
 			const candidate: Candidate = {
 				label,
+				removes,
 				alertId: scope.alertId,
 				routeId: record.routeId,
 				directionId: record.directionId,
 				startStopId,
 				endStopId,
-				propagatedDelay: segment.propagatedDelay,
-				stops: segment.stops.map((stop) => ({ stopId: stop.stopId, travelTime: stop.travelTime })),
+				propagatedDelay: removes ? segment.propagatedDelay : 0,
+				stops: removes ? segment.stops.map((stop) => ({ stopId: stop.stopId, travelTime: stop.travelTime })) : [],
 				path: segment.path,
 				updatedAt: record.updatedAt,
 			};
@@ -490,7 +556,7 @@ function resolveShapeId(
 	problems: Set<string>,
 	parts: string,
 	fingerprint: string,
-	group: { modifications: Modification[]; shapeId: string },
+	group: Group,
 ): string | null {
 	const memo = `${group.shapeId}|${fingerprint}`;
 	const known = spliced.get(memo);
@@ -507,9 +573,12 @@ function buildShape(
 	problems: Set<string>,
 	parts: string,
 	fingerprint: string,
-	group: { modifications: Modification[]; shapeId: string },
+	group: Group,
 ): string | null {
-	const paths = group.modifications.flatMap((modification) => modification.paths);
+	const paths = [
+		...group.modifications.flatMap((modification) => modification.paths),
+		...group.reroutes.map((entry) => entry.candidate.path),
+	];
 	if (paths.length === 0) return null;
 
 	const original = gtfs.shapes.get(group.shapeId);

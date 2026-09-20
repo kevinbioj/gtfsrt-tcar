@@ -70,6 +70,44 @@ export function deduceBounds(
 }
 
 /**
+ * Ce tronçon supprime-t-il des arrêts ?
+ *
+ * Il le fait dès que sa plage — bornes comprises — porte un arrêt que l'info trafic supprime dans ce
+ * sens. Sinon il n'en supprime aucun : le véhicule passe ailleurs entre deux arrêts qu'il dessert
+ * toujours, et il n'y a pas de `Modification` à écrire — des sélecteurs qui désigneraient des arrêts
+ * encore desservis mentiraient. C'est alors le seul tracé qui est publié.
+ *
+ * Rien ne se déclare donc de plus : la nature d'un tronçon se lit du périmètre et des bornes, qui
+ * sont déjà saisis. Ne cocher aucun arrêt supprimé, c'est dire que la desserte ne change pas.
+ *
+ * Les bornes sont éprouvées d'abord pour elles-mêmes : une borne supprimée suffit, quand bien même
+ * aucun itinéraire de la ligne ne porterait les deux — une branche que le GTFS a renumérotée.
+ */
+export function removesStops(
+	gtfs: StaticGtfs,
+	routeId: string,
+	directionId: number,
+	removedStopIds: ReadonlySet<string>,
+	segment: { startStopId: string | null; endStopId: string | null },
+): boolean {
+	const { startStopId, endStopId } = segment;
+	if (startStopId === null || endStopId === null || removedStopIds.size === 0) return false;
+	if (removedStopIds.has(startStopId) || removedStopIds.has(endStopId)) return true;
+
+	for (const sequence of gtfs.routeStopSequences.get(routeId)?.get(directionId) ?? []) {
+		const start = sequence.findIndex((stop) => stop.stopId === startStopId);
+		const end = sequence.findIndex((stop) => stop.stopId === endStopId);
+		if (start === -1 || end === -1 || start > end) continue;
+
+		for (let index = start; index <= end; index += 1) {
+			if (removedStopIds.has((sequence[index] as OrderedStop).stopId)) return true;
+		}
+	}
+
+	return false;
+}
+
+/**
  * Les deux tronçons d'une déclaration dont les plages se recoupent sur l'un des itinéraires de la
  * ligne, ou `undefined` s'il n'y en a aucun.
  *

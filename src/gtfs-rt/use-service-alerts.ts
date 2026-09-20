@@ -1,6 +1,5 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
 import {
-	type AlertAnalysis,
 	type AlertInput,
 	type AlertPeriod,
 	type AlertRouteContext,
@@ -65,21 +64,77 @@ export type AlertScope = {
 /** Les perturbations connues, par {@link AlertScope.key}. */
 export type AlertScopeIndex = Map<string, AlertScope>;
 
+/**
+ * Une info trafic analysée, réduite à ce qui sert à bâtir les index.
+ *
+ * Elle est retenue telle quelle d'un relevé à l'autre, et c'est ce qui permet de reconstruire
+ * `skipIndex` et `alertScopes` à tout moment — quand les périodes basculent, ou quand un périmètre
+ * est saisi à la main — sans refaire tourner l'IA ni attendre le relevé suivant.
+ */
+export type AnalyzedAlert = {
+	/** L'identifiant d'entité du flux amont : c'est lui que porte `serviceAlertId`. */
+	alertId: string;
+	alertNumber: string;
+	headerText: string;
+	descriptionText: string;
+	periods: AlertPeriod[];
+	/** Les lignes du réseau que l'info trafic cite, dans l'ordre où elle les cite. */
+	routeIds: string[];
+	/** Les quais supprimés que l'analyse donne, par ligne et par sens — `null` pour les deux sens. */
+	contributions: AlertContribution[];
+};
+
+/** Des quais supprimés sur une ligne, dans un sens ou dans les deux. */
+export type AlertContribution = { routeId: string; directionId: number | null; stopIds: Set<string> };
+
+/**
+ * Les périmètres saisis à la main, par {@link detourKey}. C'est la forme minimale de
+ * `ScopeOverride` dont l'indexation a besoin — de quoi ne pas faire dépendre ce module de la base
+ * des déviations.
+ */
+export type ScopeOverrideIndex = ReadonlyMap<
+	string,
+	{ alertNumber: string; routeId: string; directionId: number; removedStopIds: string[] }
+>;
+
 /** Numéro d'info trafic → routeId → quais que cette alerte ne doit PAS faire sauter. */
 type ServedStopIndex = Map<string, Map<string, Set<string>>>;
 
 type AlertsState = { headerTimestamp: string | null };
-type PollResult = { skipIndex: SkipIndex; alertScopes: AlertScopeIndex; headerTimestamp: string | null };
+type PollResult = { alerts: AnalyzedAlert[]; headerTimestamp: string | null };
 
 let currentInterval: NodeJS.Timeout | undefined;
 
-export function useServiceAlerts(url: string, pollInterval: number, gtfs: { data: StaticGtfs }) {
+/**
+ * Les infos trafic, analysées puis indexées.
+ *
+ * `overrides` rend les périmètres saisis à la main, et il est relu à CHAQUE indexation plutôt que
+ * retenu : une saisie doit valoir tout de suite, et `reindex` est là pour ça — l'indexation ne
+ * touche pas au réseau, elle se rejoue en quelques millisecondes.
+ */
+export function useServiceAlerts(
+	url: string,
+	pollInterval: number,
+	gtfs: { data: StaticGtfs },
+	overrides: () => ScopeOverrideIndex,
+) {
 	const state: AlertsState = { headerTimestamp: null };
 	const resource = {
 		skipIndex: new Map<string, SkipBucket[]>(),
 		/** Les perturbations connues, en vigueur ou à venir (cf. {@link AlertScope}). */
 		alertScopes: new Map<string, AlertScope>() as AlertScopeIndex,
+		/** Les infos trafic analysées, périmètre saisi à la main non compris (cf. {@link AnalyzedAlert}). */
+		alerts: [] as AnalyzedAlert[],
 		importedAt: Temporal.Now.instant(),
+		/**
+		 * Rebâtit les index depuis la dernière analyse. À appeler dès qu'un périmètre est saisi ou
+		 * retiré : le relevé suivant ferait tout autant, mais vingt minutes plus tard.
+		 */
+		reindex() {
+			const indexed = indexAlerts(resource.alerts, overrides(), Temporal.Now.instant());
+			resource.skipIndex = indexed.skipIndex;
+			resource.alertScopes = indexed.alertScopes;
+		},
 	};
 	let running = false;
 
@@ -91,8 +146,8 @@ export function useServiceAlerts(url: string, pollInterval: number, gtfs: { data
 		try {
 			const next = await pollAlerts(url, gtfs.data, state);
 			if (!next) return; // flux inchangé, erreur, ou GTFS indisponible → on garde l'index courant
-			resource.skipIndex = next.skipIndex;
-			resource.alertScopes = next.alertScopes;
+			resource.alerts = next.alerts;
+			resource.reindex();
 			resource.importedAt = Temporal.Now.instant();
 			state.headerTimestamp = next.headerTimestamp;
 		} finally {
@@ -244,19 +299,15 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		const buffer = Buffer.from(await response.arrayBuffer());
 		const feed = GtfsRealtime.transit_realtime.FeedMessage.decode(buffer);
 		const headerTimestamp = feed.header?.timestamp != null ? String(feed.header.timestamp) : null;
-		// Les activePeriod du GTFS-RT ne sont pas fiables : on s'appuie sur les dates extraites du texte par l'IA.
-		const now = Temporal.Now.instant();
 		const today = Temporal.Now.plainDateISO(TIME_ZONE).toString();
 
-		// L'index est TOUJOURS reconstruit, même à flux inchangé : les périodes extraites par l'IA portent
-		// des heures (travaux de nuit), et leurs bornes doivent être re-jaugées à chaque poll. Aucun réappel
-		// IA n'en découle : à texte inchangé, `analyzeAlerts` sert entièrement le cache.
+		// L'analyse est TOUJOURS rejouée, même à flux inchangé : les périodes qu'elle porte ont des heures
+		// (travaux de nuit), et l'indexation qui suit doit les re-jauger. Aucun réappel IA n'en découle :
+		// à texte inchangé, `analyzeAlerts` sert entièrement le cache.
 		if (headerTimestamp !== null && headerTimestamp === previous.headerTimestamp) {
 			console.log(`✓ Service alerts unchanged (feed ${headerTimestamp}) — re-evaluating periods.`);
 		}
 
-		const skipIndex: SkipIndex = new Map();
-		const alertScopes: AlertScopeIndex = new Map();
 		const feedAlertIds = new Set<string>();
 		// Résolu à chaque poll : le GTFS statique se recharge sous nos pieds, et avec lui les quais.
 		const servedStops = resolveServedStops(gtfs);
@@ -285,51 +336,54 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		// 2. Analyse groupée (un seul appel IA pour toutes les alertes nouvelles/modifiées).
 		const analyses = await analyzeAlerts(inputs);
 
-		// 3. Construction de l'index de suppressions, et du périmètre des déviations qui va avec.
+		// 3. Résolution des noms d'arrêt en quais, ligne par ligne et sens par sens.
 		//
-		// Les deux se tirent des mêmes quais, d'où la passe commune. La période, en revanche, ne les
-		// départage pas de la même façon : le feed ne doit annoncer que ce qui est en vigueur, quand
-		// l'interface doit aussi montrer ce qui vient — un tracé de déviation se prépare à l'avance. La
-		// résolution des noms en quais tourne donc pour toutes les alertes, et seul le versement dans
-		// le `skipIndex` est conditionné.
-		let removedCount = 0;
+		// Elle tourne pour TOUTES les alertes, en vigueur ou non : c'est l'indexation qui départage —
+		// le feed ne doit annoncer que ce qui est en vigueur, quand l'interface doit aussi montrer ce
+		// qui vient, un tracé de déviation se préparant à l'avance.
+		const alerts: AnalyzedAlert[] = [];
 		for (const input of inputs) {
 			const analysis = analyses.get(input.id);
-			if (!analysis || analysis.removedStops.length === 0) continue;
+			if (!analysis) continue;
 
-			const active = isActive(analysis.periods, now);
 			const routeIds = routesById.get(input.id) ?? new Set();
 			const served = servedStops.get(alertNumber(input.id));
+			const contributions: AlertContribution[] = [];
+
 			for (const removedStop of analysis.removedStops) {
 				for (const route of removedStop.routes) {
 					if (!routeIds.has(route.routeId)) continue;
 					const servedIds = served?.get(route.routeId) ?? EMPTY_SERVED;
 					const { routeId, directionId } = route;
-					const contributions = resolveRemovedStop(gtfs, removedStop, routeId, directionId, servedIds);
 
-					for (const [bucketDirection, stopIds] of contributions) {
-						if (active) {
-							mergeSkip(skipIndex, routeId, bucketDirection, stopIds);
-							removedCount += 1;
-						}
-
-						// Un bucket « les deux sens » se dédouble : la maille d'une déviation est le sens.
-						for (const scopeDirection of bucketDirection === null ? [0, 1] : [bucketDirection]) {
-							mergeScope(alertScopes, input, analysis, routeId, scopeDirection, stopIds, active);
-						}
+					for (const [bucketDirection, stopIds] of resolveRemovedStop(
+						gtfs,
+						removedStop,
+						routeId,
+						directionId,
+						servedIds,
+					)) {
+						contributions.push({ routeId, directionId: bucketDirection, stopIds });
 					}
 				}
 			}
+
+			alerts.push({
+				alertId: input.id,
+				alertNumber: alertNumber(input.id),
+				headerText: input.headerText,
+				descriptionText: input.descriptionText,
+				periods: analysis.periods,
+				routeIds: [...routeIds],
+				contributions,
+			});
 		}
 
 		// Persiste le cache IA (alertes disparues purgées) pour éviter tout réappel au redémarrage.
 		pruneCache(feedAlertIds);
 		flushCache();
 
-		console.log(
-			`✓ ${skipIndex.size} routes with skipped stops (${removedCount} entries, ${alertScopes.size} detour scopes).`,
-		);
-		return { skipIndex, alertScopes, headerTimestamp };
+		return { alerts, headerTimestamp };
 	} catch (cause) {
 		console.error("✘ Failed to load service alerts!", cause);
 		return null;
@@ -337,10 +391,78 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 }
 
 /**
+ * Les deux index que tout le reste consomme : les quais à sauter dans les trip updates, et le
+ * périmètre des déviations déclarables.
+ *
+ * Purement synchrone, et rejouable autant de fois qu'on veut : elle ne fait que relire la dernière
+ * analyse. C'est ce qui permet de re-jauger les périodes à chaque relevé et de prendre en compte un
+ * périmètre saisi à la main sans attendre — ni rappeler l'IA.
+ *
+ * Un périmètre saisi REMPLACE l'analyse pour son couple ligne/sens : ses arrêts sont les arrêts
+ * supprimés, fût-ce aucun. La règle vaut dans les deux sens du terme — l'analyse est écartée là où
+ * elle voyait quelque chose, et la saisie crée le périmètre là où elle ne voyait rien.
+ */
+export function indexAlerts(
+	alerts: readonly AnalyzedAlert[],
+	overrides: ScopeOverrideIndex,
+	now: Temporal.Instant,
+): { skipIndex: SkipIndex; alertScopes: AlertScopeIndex } {
+	const skipIndex: SkipIndex = new Map();
+	const alertScopes: AlertScopeIndex = new Map();
+	let removedCount = 0;
+
+	for (const alert of alerts) {
+		const active = isActive(alert.periods, now);
+
+		for (const { routeId, directionId, stopIds } of alert.contributions) {
+			// Un bucket « les deux sens » se dédouble : la maille d'une déviation est le sens, et un seul
+			// des deux peut avoir été repris à la main — l'autre garde alors ce que l'analyse en dit.
+			const directions = directionId === null ? [0, 1] : [directionId];
+			const free = directions.filter((direction) => !overrides.has(detourKey(alert.alertNumber, routeId, direction)));
+			if (free.length === 0) continue;
+
+			if (active) {
+				mergeSkip(skipIndex, routeId, free.length === directions.length ? directionId : (free[0] as number), stopIds);
+				removedCount += 1;
+			}
+
+			for (const direction of free) mergeScope(alertScopes, alert, routeId, direction, stopIds, active);
+		}
+	}
+
+	// Les périmètres saisis viennent en dernier, sur un terrain que la boucle ci-dessus leur a laissé
+	// libre : ils n'ont donc rien à écraser, seulement à poser.
+	const byNumber = new Map<string, AnalyzedAlert>();
+	for (const alert of alerts) if (!byNumber.has(alert.alertNumber)) byNumber.set(alert.alertNumber, alert);
+
+	for (const override of overrides.values()) {
+		const alert = byNumber.get(override.alertNumber);
+		// L'info trafic n'est plus au flux : il n'y a plus de perturbation à porter. La saisie reste en
+		// base — les travaux reprennent, et le numéro avec eux.
+		if (alert === undefined) continue;
+
+		const active = isActive(alert.periods, now);
+		const stopIds = new Set(override.removedStopIds);
+		mergeScope(alertScopes, alert, override.routeId, override.directionId, stopIds, active);
+
+		if (active && stopIds.size > 0) {
+			mergeSkip(skipIndex, override.routeId, override.directionId, stopIds);
+			removedCount += 1;
+		}
+	}
+
+	console.log(
+		`✓ ${skipIndex.size} routes with skipped stops (${removedCount} entries, ${alertScopes.size} detour scopes, ${overrides.size} hand-written).`,
+	);
+
+	return { skipIndex, alertScopes };
+}
+
+/**
  * Une alerte peut porter plusieurs plages de dates disjointes (« du 17 au 21 et les 24 et 25 août ») :
  * elle est active dès que l'une d'elles l'est. Aucune période = aucune borne connue, donc toujours active.
  */
-function isActive(periods: AlertPeriod[], now: Temporal.Instant): boolean {
+export function isActive(periods: AlertPeriod[], now: Temporal.Instant): boolean {
 	return periods.length === 0 || periods.some((period) => isPeriodActive(period, now));
 }
 
@@ -633,29 +755,27 @@ function keepUnlessServed(stopIds: Set<string>, served: ReadonlySet<string>): Se
  */
 function mergeScope(
 	scopes: AlertScopeIndex,
-	input: AlertInput,
-	analysis: AlertAnalysis,
+	alert: AnalyzedAlert,
 	routeId: string,
 	directionId: number,
-	stopIds: Set<string>,
+	stopIds: ReadonlySet<string>,
 	active: boolean,
 ) {
-	const number = alertNumber(input.id);
 	// La même clé que celle des déclarations, et empruntée à elles : c'est le seul lien entre les deux
 	// modules, et le réécrire ici serait la meilleure façon de le laisser diverger un jour.
-	const key = detourKey(number, routeId, directionId);
+	const key = detourKey(alert.alertNumber, routeId, directionId);
 
 	let scope = scopes.get(key);
 	if (scope === undefined) {
 		scope = {
 			key,
-			alertId: input.id,
-			alertNumber: number,
+			alertId: alert.alertId,
+			alertNumber: alert.alertNumber,
 			routeId,
 			directionId,
-			headerText: input.headerText,
-			descriptionText: input.descriptionText,
-			periods: analysis.periods,
+			headerText: alert.headerText,
+			descriptionText: alert.descriptionText,
+			periods: alert.periods,
 			active,
 			removedStopIds: new Set(),
 		};

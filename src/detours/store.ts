@@ -237,6 +237,44 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 	SELECT alert_number, route_id, direction_id, segment, position, latitude, longitude, 'free'
 	FROM detour_path;
 	`,
+	// Le périmètre d'une info trafic — quelles lignes, quels sens, quels arrêts supprimés — cesse
+	// d'être le dernier mot de l'analyse IA. Elle ne voit que ce que le texte dit, et le texte ne dit
+	// pas tout : une ligne déviée dans les deux sens n'y perd parfois d'arrêts que dans un seul, et le
+	// sens muet n'existait alors nulle part — ni comme déviation à déclarer, ni comme tracé à publier.
+	//
+	// Une surcharge REMPLACE l'analyse pour ce couple ligne/sens, elle ne la corrige pas : ce qui est
+	// saisi ici fait foi, y compris une liste d'arrêts vide — « cette ligne est bien concernée dans ce
+	// sens, mais elle n'y perd aucun arrêt ». C'est la seule règle à retenir, et elle vaut pour les
+	// suppressions publiées comme pour le périmètre offert à la déclaration.
+	`
+	CREATE TABLE scope_overrides (
+		alert_number TEXT    NOT NULL,
+		route_id     TEXT    NOT NULL,
+		direction_id INTEGER NOT NULL,
+		updated_at   INTEGER NOT NULL,
+		PRIMARY KEY (alert_number, route_id, direction_id)
+	) STRICT;
+
+	CREATE TABLE scope_override_stops (
+		alert_number TEXT    NOT NULL,
+		route_id     TEXT    NOT NULL,
+		direction_id INTEGER NOT NULL,
+		stop_id      TEXT    NOT NULL,
+		PRIMARY KEY (alert_number, route_id, direction_id, stop_id),
+		FOREIGN KEY (alert_number, route_id, direction_id)
+			REFERENCES scope_overrides (alert_number, route_id, direction_id) ON DELETE CASCADE
+	) STRICT;
+	`,
+	// Un tronçon a porté un instant la nature de ce qu'il fait — supprimer des arrêts, ou seulement
+	// changer le chemin entre eux. Elle n'avait rien à faire là : elle se LIT du périmètre et des
+	// bornes, déjà saisis (cf. `removesStops`). Une plage sans aucun arrêt supprimé ne supprime rien,
+	// et c'est tout ce qu'il y a à savoir — un réglage de plus n'aurait pu que les contredire.
+	`
+	ALTER TABLE detour_segments ADD COLUMN kind TEXT NOT NULL DEFAULT 'removal';
+	`,
+	`
+	ALTER TABLE detour_segments DROP COLUMN kind;
+	`,
 ];
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
@@ -279,9 +317,12 @@ export type DetourStop = {
  * un seul détour.
  */
 export type DetourSegment = {
-	/** Premier arrêt supprimé — `start_stop_selector`. `null` tant qu'il n'est pas arrêté. */
+	/**
+	 * Premier arrêt de la plage, borne comprise. Publié comme `start_stop_selector` lorsque la plage
+	 * supprime des arrêts ; sinon il ne sert qu'à désigner les courses (cf. `removesStops`).
+	 */
 	startStopId: string | null;
-	/** Dernier arrêt supprimé — `end_stop_selector`, borne incluse. */
+	/** Dernier arrêt de la plage, borne incluse — `end_stop_selector`. */
 	endStopId: string | null;
 	/** Secondes à répercuter sur tous les horaires suivant la modification. */
 	propagatedDelay: number;
@@ -314,6 +355,22 @@ export type DetourRecord = {
 	updatedAt: number;
 	/** Les tronçons déviés, dans l'ordre où la course les rencontre. */
 	segments: DetourSegment[];
+};
+
+/**
+ * Le périmètre d'une info trafic sur une ligne et un sens, tel qu'il a été SAISI À LA MAIN.
+ *
+ * Il remplace en bloc ce que l'analyse IA donne pour ce couple : ses arrêts sont les arrêts
+ * supprimés, point final. Une liste vide dit « concernée, mais sans suppression » — c'est ce qui
+ * ouvre la déclaration d'une déviation dont la desserte ne change pas.
+ */
+export type ScopeOverride = {
+	alertNumber: string;
+	routeId: string;
+	directionId: number;
+	/** Les quais supprimés, dans l'ordre où ils ont été saisis. */
+	removedStopIds: string[];
+	updatedAt: number;
 };
 
 /** Ce qu'une déclaration porte de modifiable : le reste — identité, horodatage — est calculé. */
@@ -354,10 +411,12 @@ export function useDetourStore(path: string) {
 
 	const records = new Map<string, DetourRecord>();
 	const provisional = new Map<string, ProvisionalStop>();
+	const overrides = new Map<string, ScopeOverride>();
 
 	const reload = () => {
 		records.clear();
 		provisional.clear();
+		overrides.clear();
 
 		for (const row of db.prepare("SELECT * FROM provisional_stops ORDER BY stop_uid").all() as ProvisionalRow[]) {
 			const stopId = provisionalStopId(row.stop_uid);
@@ -414,6 +473,22 @@ export function useDetourStore(path: string) {
 				mode: row.mode === "route" ? "route" : "free",
 			});
 		}
+
+		for (const row of db.prepare("SELECT * FROM scope_overrides").all() as OverrideRow[]) {
+			overrides.set(detourKey(row.alert_number, row.route_id, row.direction_id), {
+				alertNumber: row.alert_number,
+				routeId: row.route_id,
+				directionId: row.direction_id,
+				removedStopIds: [],
+				updatedAt: row.updated_at,
+			});
+		}
+
+		for (const row of db
+			.prepare("SELECT * FROM scope_override_stops ORDER BY alert_number, route_id, direction_id, stop_id")
+			.all() as OverrideStopRow[]) {
+			overrides.get(detourKey(row.alert_number, row.route_id, row.direction_id))?.removedStopIds.push(row.stop_id);
+		}
 	};
 
 	reload();
@@ -425,6 +500,65 @@ export function useDetourStore(path: string) {
 
 		/** La base des arrêts provisoires, par identifiant publié. */
 		provisionalStops: provisional as ReadonlyMap<string, ProvisionalStop>,
+
+		/** Les périmètres saisis à la main, par {@link detourKey}. */
+		scopeOverrides: overrides as ReadonlyMap<string, ScopeOverride>,
+
+		/**
+		 * Saisit — ou ressaisit — le périmètre d'une info trafic sur une ligne et un sens. La liste
+		 * d'arrêts remplace celle de l'analyse : elle peut être vide, et c'est même le cas qui motive
+		 * tout ceci — une ligne déviée sans qu'aucun arrêt n'y soit supprimé.
+		 */
+		saveScopeOverride(
+			alertNumber: string,
+			routeId: string,
+			directionId: number,
+			stopIds: readonly string[],
+			nowSeconds: number,
+		): ScopeOverride {
+			db.exec("BEGIN");
+			try {
+				db.prepare(
+					`INSERT INTO scope_overrides (alert_number, route_id, direction_id, updated_at)
+					 VALUES (?, ?, ?, ?)
+					 ON CONFLICT (alert_number, route_id, direction_id) DO UPDATE SET
+						 updated_at = excluded.updated_at`,
+				).run(alertNumber, routeId, directionId, nowSeconds);
+
+				db.prepare("DELETE FROM scope_override_stops WHERE alert_number = ? AND route_id = ? AND direction_id = ?").run(
+					alertNumber,
+					routeId,
+					directionId,
+				);
+
+				const insert = db.prepare(
+					`INSERT INTO scope_override_stops (alert_number, route_id, direction_id, stop_id)
+					 VALUES (?, ?, ?, ?)`,
+				);
+				for (const stopId of new Set(stopIds)) insert.run(alertNumber, routeId, directionId, stopId);
+
+				db.exec("COMMIT");
+			} catch (cause) {
+				db.exec("ROLLBACK");
+				throw cause;
+			}
+
+			reload();
+			return overrides.get(detourKey(alertNumber, routeId, directionId)) as ScopeOverride;
+		},
+
+		/**
+		 * Rend la main à l'analyse IA pour ce couple. La déclaration de déviation, elle, reste : elle ne
+		 * tient pas au périmètre, et l'effacer ferait perdre un tracé pour une reprise de saisie.
+		 */
+		removeScopeOverride(alertNumber: string, routeId: string, directionId: number): boolean {
+			const { changes } = db
+				.prepare("DELETE FROM scope_overrides WHERE alert_number = ? AND route_id = ? AND direction_id = ?")
+				.run(alertNumber, routeId, directionId);
+
+			reload();
+			return changes > 0;
+		},
 
 		/**
 		 * Enregistre une déclaration, d'un bloc : la boucle de publication ne peut jamais lire une
@@ -596,6 +730,10 @@ type SegmentRow = {
 	end_stop_id: string | null;
 	propagated_delay: number;
 };
+
+type OverrideRow = { alert_number: string; route_id: string; direction_id: number; updated_at: number };
+
+type OverrideStopRow = { alert_number: string; route_id: string; direction_id: number; stop_id: string };
 
 type ProvisionalRow = { stop_uid: number; name: string; latitude: number; longitude: number; created_at: number };
 

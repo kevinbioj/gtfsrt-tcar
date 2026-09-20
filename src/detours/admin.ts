@@ -2,14 +2,14 @@ import { type Context, Hono } from "hono";
 import { basicAuth } from "hono/basic-auth";
 
 import { ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SNAP_RADIUS } from "../config.js";
-import type { AlertScope, AlertScopeIndex } from "../gtfs-rt/use-service-alerts.js";
+import { type AlertScope, type AlertScopeIndex, type AnalyzedAlert, isActive } from "../gtfs-rt/use-service-alerts.js";
 import { normalizeStopName, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
 import type { RoadGraph, RoadGraphHandle } from "../routing/road-graph.js";
 import { routeOnRoad } from "../routing/route-on-road.js";
 import { encodePolyline } from "../utils/encode-polyline.js";
 import { sanitizeHtml } from "../utils/sanitize-html.js";
 import { ADMIN_PAGE } from "./admin-page.js";
-import { deduceBounds, overlappingSegments } from "./bounds.js";
+import { deduceBounds, overlappingSegments, removesStops } from "./bounds.js";
 import { countSelectableTrips } from "./build-entities.js";
 import { type DetourInput, type DetourSegment, type DetourStore, detourKey } from "./store.js";
 
@@ -28,11 +28,17 @@ export type AdminDependencies = {
 	password: string;
 	store: DetourStore;
 	gtfs: { data: StaticGtfs };
-	serviceAlerts: { alertScopes: AlertScopeIndex };
+	serviceAlerts: {
+		alertScopes: AlertScopeIndex;
+		/** Les infos trafic analysées : c'est là qu'on trouve une ligne que l'analyse n'a pas retenue. */
+		alerts: AnalyzedAlert[];
+	};
 	/** Le graphe routier, pour accrocher un tracé aux rues. Son absence désarme le mode, rien de plus. */
 	roadGraph: RoadGraphHandle;
 	/** Réassemble les entités du feed, pour qu'un enregistrement se voie sans attendre le relevé suivant. */
 	rebuild: () => void;
+	/** Rebâtit le périmètre des perturbations après une saisie — à appeler AVANT {@link rebuild}. */
+	reindexAlerts: () => void;
 };
 
 /**
@@ -119,6 +125,111 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		}
 
 		return c.json({ code: 200, message: "Arrêt provisoire supprimé." });
+	});
+
+	/**
+	 * Les infos trafic analysées, avec les lignes qu'elles citent et, pour chaque sens, ce que l'on en
+	 * sait déjà : un périmètre tiré de l'analyse, un périmètre saisi, ou rien du tout.
+	 *
+	 * C'est de là que part une saisie : le sens qui n'apparaît nulle part dans la liste des déviations
+	 * est précisément celui qu'il faut pouvoir déclarer concerné.
+	 */
+	admin.get("/api/alerts", (c) => {
+		const gtfs = deps.gtfs.data;
+		const now = Temporal.Now.instant();
+
+		const alerts = deps.serviceAlerts.alerts.map((alert) => ({
+			alertNumber: alert.alertNumber,
+			headerText: alert.headerText,
+			periods: alert.periods,
+			active: isActive(alert.periods, now),
+			routes: alert.routeIds.map((routeId) => ({
+				routeId,
+				line: routeId.split(":").at(-1),
+				directions: (gtfs.routeDirections.get(routeId) ?? []).map((direction) => {
+					const key = detourKey(alert.alertNumber, routeId, direction.directionId);
+					const scope = deps.serviceAlerts.alertScopes.get(key);
+					return {
+						key,
+						directionId: direction.directionId,
+						headsigns: direction.headsigns,
+						scoped: scope !== undefined,
+						manual: deps.store.scopeOverrides.has(key),
+						removedStopCount: scope?.removedStopIds.size ?? 0,
+						declared: deps.store.records.has(key),
+					};
+				}),
+			})),
+		}));
+
+		return c.json(alerts);
+	});
+
+	/**
+	 * Saisit le périmètre d'une info trafic sur une ligne et un sens : la liste des arrêts supprimés,
+	 * éventuellement vide. Elle REMPLACE ce que l'analyse en dit — c'est la seule règle, et elle vaut
+	 * aussi bien pour corriger une suppression de trop que pour déclarer concerné un sens que
+	 * l'analyse n'a pas vu.
+	 *
+	 * Le périmètre étant ce qui ouvre la déclaration, il faut le réindexer avant de republier : le
+	 * feed suivant doit voir le nouveau périmètre et la déclaration qui s'y rattache d'un seul coup.
+	 */
+	admin.put("/api/scopes/:key", async (c) => {
+		const target = parseKey(c.req.param("key"), deps);
+		if ("message" in target) return c.json({ code: 400, message: target.message }, 400);
+
+		let body: unknown;
+		try {
+			body = await c.req.json();
+		} catch {
+			return c.json({ code: 400, message: "Corps de requête illisible." }, 400);
+		}
+
+		const payload = (body ?? {}) as Record<string, unknown>;
+		if (!Array.isArray(payload.removedStopIds)) {
+			return c.json({ code: 400, message: "Liste d'arrêts supprimés attendue." }, 400);
+		}
+
+		const stopIds: string[] = [];
+		for (const stopId of payload.removedStopIds) {
+			if (typeof stopId !== "string" || !deps.gtfs.data.stopNames.has(stopId)) {
+				return c.json({ code: 400, message: `Arrêt « ${String(stopId)} » inconnu du GTFS.` }, 400);
+			}
+			stopIds.push(stopId);
+		}
+
+		deps.store.saveScopeOverride(
+			target.alertNumber,
+			target.routeId,
+			target.directionId,
+			stopIds,
+			Math.floor(Date.now() / 1000),
+		);
+		deps.reindexAlerts();
+		deps.rebuild();
+
+		const scope = deps.serviceAlerts.alertScopes.get(target.key);
+		// L'info trafic n'est plus au flux : la saisie est en base, mais rien ne la porte — il n'y a
+		// pas de détail à rendre.
+		if (scope === undefined) {
+			return c.json({ code: 409, message: "Aucune info trafic ne porte ce numéro dans le flux courant." }, 409);
+		}
+
+		return c.json(detail(scope, deps));
+	});
+
+	/** Rend la main à l'analyse pour ce couple ligne/sens. La déclaration de déviation, elle, reste. */
+	admin.delete("/api/scopes/:key", (c) => {
+		const target = parseKey(c.req.param("key"), deps);
+		if ("message" in target) return c.json({ code: 400, message: target.message }, 400);
+
+		if (!deps.store.removeScopeOverride(target.alertNumber, target.routeId, target.directionId)) {
+			return c.json({ code: 404, message: "Aucun périmètre saisi pour cette ligne et ce sens." }, 404);
+		}
+
+		deps.reindexAlerts();
+		deps.rebuild();
+		return c.json({ code: 200, message: "Périmètre rendu à l'analyse." });
 	});
 
 	admin.get("/api/detours/:key", (c) => {
@@ -234,6 +345,37 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 
 // ---
 
+/**
+ * Relit une clé `<numéro>:<routeId>:<sens>` : le numéro d'abord, le sens en dernier, la ligne au
+ * milieu — un identifiant de ligne porte lui-même des deux-points (« TCAR:07 »), et c'est le seul
+ * découpage qui ne s'y perde pas.
+ */
+function parseKey(
+	key: string,
+	deps: AdminDependencies,
+): { key: string; alertNumber: string; routeId: string; directionId: number } | { message: string } {
+	const parts = key.split(":");
+	if (parts.length < 3) return { message: "Clé attendue : « numéro:ligne:sens »." };
+
+	const alertNumber = parts[0] as string;
+	const directionId = Number(parts.at(-1));
+	const routeId = parts.slice(1, -1).join(":");
+
+	if (directionId !== 0 && directionId !== 1) return { message: "Sens attendu : 0 ou 1." };
+
+	const directions = deps.gtfs.data.routeDirections.get(routeId);
+	if (directions === undefined) return { message: `Ligne « ${routeId} » inconnue du GTFS.` };
+	if (!directions.some((direction) => direction.directionId === directionId)) {
+		return { message: `La ligne ${routeId} n'a pas de sens ${directionId}.` };
+	}
+
+	if (!deps.serviceAlerts.alerts.some((alert) => alert.alertNumber === alertNumber)) {
+		return { message: `Aucune info trafic ${alertNumber} au flux courant.` };
+	}
+
+	return { key: detourKey(alertNumber, routeId, directionId), alertNumber, routeId, directionId };
+}
+
 /** En vigueur d'abord, puis par ligne et par sens : l'ordre dans lequel on veut les traiter. */
 function compareScopes(a: AlertScope, b: AlertScope): number {
 	if (a.active !== b.active) return a.active ? -1 : 1;
@@ -260,23 +402,31 @@ function summarize(scope: AlertScope, deps: AdminDependencies) {
 		periods: scope.periods,
 		active: scope.active,
 		removedStopCount: scope.removedStopIds.size,
+		manualScope: deps.store.scopeOverrides.has(scope.key),
 		declared: record !== undefined,
 		segmentCount: segments.length,
-		publishableSegments: segments.filter(isSegmentPublishable).length,
+		publishableSegments: segments.filter((segment) => isSegmentPublishable(segment, scope, deps)).length,
 		stopCount: segments.reduce((total, segment) => total + segment.stops.length, 0),
 		pathPointCount: segments.reduce((total, segment) => total + segment.path.length, 0),
 		updatedAt: record?.updatedAt ?? null,
-		publishable: segments.some(isSegmentPublishable),
+		publishable: segments.some((segment) => isSegmentPublishable(segment, scope, deps)),
 	};
 }
 
 /**
- * Un tronçon n'entre dans le feed qu'avec ses deux bornes, et de quoi dire quelque chose : des arrêts
- * de substitution, un tracé, ou les deux. Le tracé seul suffit — le segment est alors supprimé sans
- * report, et c'est l'itinéraire qui porte toute l'information.
+ * Un tronçon n'entre dans le feed qu'avec ses deux bornes — ce sont elles qui désignent les courses —
+ * et de quoi dire quelque chose.
+ *
+ * Quand sa plage supprime des arrêts, ce quelque chose est des arrêts de substitution, un tracé, ou
+ * les deux : le tracé seul suffit, le segment est alors supprimé sans report, et l'itinéraire porte
+ * toute l'information. Quand elle n'en supprime aucun, c'est le tracé et rien d'autre — il n'y a
+ * rien à remplacer (cf. `removesStops`).
  */
-function isSegmentPublishable(segment: DetourSegment): boolean {
+function isSegmentPublishable(segment: DetourSegment, scope: AlertScope, deps: AdminDependencies): boolean {
 	if (segment.startStopId === null || segment.endStopId === null) return false;
+	if (!removesStops(deps.gtfs.data, scope.routeId, scope.directionId, scope.removedStopIds, segment)) {
+		return segment.path.length >= 2;
+	}
 	return segment.stops.length > 0 || segment.path.length >= 2;
 }
 
@@ -316,9 +466,12 @@ function detail(scope: AlertScope, deps: AdminDependencies) {
 	// d'emblée un tronçon chacune — c'est très exactement ce qu'il y a à dessiner.
 	const boundsCandidates = deduceBounds(gtfs, scope.routeId, scope.directionId, scope.removedStopIds);
 	const proposed = boundsCandidates.filter((bounds) => bounds.itinerary === boundsCandidates[0]?.itinerary);
-	const segments =
-		record !== undefined && record.segments.length > 0
-			? record.segments
+	// Rien de supprimé, donc rien à borner : il ne reste qu'à choisir entre quels arrêts la course
+	// passe ailleurs, et c'est un tronçon vierge qu'on propose. C'est très exactement le cas d'une
+	// ligne déviée dans un sens où elle ne perd aucun arrêt.
+	const fallback: DetourSegment[] =
+		scope.removedStopIds.size === 0
+			? [{ startStopId: null, endStopId: null, propagatedDelay: 0, stops: [], waypoints: [], path: [] }]
 			: proposed.map((bounds) => ({
 					startStopId: bounds.startStopId,
 					endStopId: bounds.endStopId,
@@ -327,6 +480,8 @@ function detail(scope: AlertScope, deps: AdminDependencies) {
 					waypoints: [],
 					path: [],
 				}));
+
+	const segments = record !== undefined && record.segments.length > 0 ? record.segments : fallback;
 
 	return {
 		...summarize(scope, deps),
@@ -338,6 +493,9 @@ function detail(scope: AlertScope, deps: AdminDependencies) {
 		// détail plutôt que dans un appel à lui — la carte n'existe que sur cette vue.
 		roadRouting: deps.roadGraph.available,
 		removedStopIds: [...scope.removedStopIds],
+		// Le périmètre vient-il de l'analyse, ou a-t-il été saisi ? L'interface le dit, et propose de
+		// rendre la main à l'analyse — c'est la seule façon de revenir en arrière.
+		manualScope: deps.store.scopeOverrides.has(scope.key),
 		sequences,
 		shapes,
 		boundsCandidates,
@@ -356,7 +514,7 @@ function detail(scope: AlertScope, deps: AdminDependencies) {
 			stops: segment.stops.map((stop) => ({ ...stop, ...describeStop(stop.stopId, deps) })),
 			waypoints: segment.waypoints,
 			path: segment.path,
-			publishable: isSegmentPublishable(segment),
+			publishable: isSegmentPublishable(segment, scope, deps),
 			matchingTrips: countMatchingTrips(segment, scope, deps),
 		})),
 	};
@@ -445,7 +603,9 @@ function parseSegment(
 	if (!Number.isInteger(propagatedDelay)) {
 		return { message: `${label} : le délai propagé doit être un entier de secondes.` };
 	}
-
+	// Rien n'est refusé ici à un tronçon dont la plage ne supprime aucun arrêt : le périmètre peut
+	// changer APRÈS l'enregistrement, et cet état-là est de toute façon à traverser. Ses arrêts de
+	// substitution sont alors laissés de côté à la publication, qui le dit (cf. `collectCandidates`).
 	if (!Array.isArray(payload.stops)) return { message: `${label} : liste d'arrêts de substitution attendue.` };
 	const stops: DetourSegment["stops"] = [];
 	let previousTravelTime = Number.NEGATIVE_INFINITY;
