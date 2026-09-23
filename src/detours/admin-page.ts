@@ -28,9 +28,15 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		background: var(--panel); border-bottom: 1px solid var(--line); }
 	header h1 { font-size: 16px; margin: 0; font-weight: 600; }
 	header .spacer { flex: 1; }
-	button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px;
+	button, a.button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px;
 		background: var(--panel); color: var(--ink); cursor: pointer; }
-	button:hover { border-color: var(--muted); }
+	button:hover, a.button:hover { border-color: var(--muted); }
+	/*
+	 * Ce qui mène ailleurs est un lien, même habillé en bouton : Ctrl+clic ou clic du milieu l'ouvrent
+	 * dans un autre onglet, et l'adresse se copie. Un bouton, lui, ne fait qu'agir.
+	 */
+	a.button { display: inline-block; text-decoration: none; }
+	a.button.hidden { display: none; }
 	button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 	button.danger { color: var(--danger); }
 	button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -51,6 +57,12 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	tbody tr { cursor: pointer; }
 	tbody tr:hover { background: #eef2f7; }
 	tbody tr:last-child td { border-bottom: none; }
+	/*
+	 * Chaque cellule est un lien vers la déviation, étendu à toute la cellule : la ligne entière se
+	 * clique, et s'ouvre aussi bien dans un autre onglet. L'abréviation passe de la cellule au lien.
+	 */
+	td > a.cell { display: block; margin: -5px -10px; padding: 5px 10px; color: inherit;
+		text-decoration: none; overflow: hidden; text-overflow: ellipsis; }
 	td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 	/*
 	 * Le cartouche de la ligne, tel que le réseau le dessine : c'est par lui qu'on cherche dans la
@@ -163,7 +175,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 * Le bouton d'une ligne de sens tient dans la hauteur du cartouche : la liste se parcourt à
 	 * l'œil, et un bouton pleine taille en ferait une suite de pavés.
 	 */
-	.scopes .dir button { padding: 2px 9px; font-size: 12px; line-height: 18px; }
+	.scopes .dir button, .scopes .dir a.button { padding: 2px 9px; font-size: 12px; line-height: 18px; }
 	/* Deux classes, parce que .hidden est déclarée plus haut et ne l'emporterait pas sur ce display. */
 	.tools { display: flex; align-items: center; gap: 12px; }
 	.tools.hidden { display: none; }
@@ -182,9 +194,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			<option value="alert">par info trafic</option>
 		</select></label>
 		<label class="note"><input type="checkbox" id="showUpcoming" style="width:auto"> afficher les déviations à venir</label>
-		<button id="openScopes">Ajouter une ligne concernée</button>
+		<a id="openScopes" class="button" href="#/scopes">Ajouter une ligne concernée</a>
 	</span>
-	<button id="back" class="hidden">Retour à la liste</button>
+	<a id="back" class="button hidden" href="#/">Retour à la liste</a>
 </header>
 
 <div id="listView" class="wrap">
@@ -439,13 +451,14 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		el("scopeView").className = name === "scopes" ? "wrap" : "wrap hidden";
 		el("detailView").className = name === "detail" ? "detail" : "detail hidden";
 		el("listTools").className = name === "list" ? "tools" : "tools hidden";
-		el("back").className = name === "list" ? "hidden" : "";
+		el("back").className = name === "list" ? "button hidden" : "button";
 		el("title").textContent = name === "scopes" ? "Ajouter une ligne concernée"
 			: name === "detail" ? "Déviation" : "Déviations en vigueur";
 	}
 
 	/**
-	 * La vue courante vit dans l'adresse : « #/ », « #/scopes », « #/detour/<clé> ». Le retour du
+	 * La vue courante vit dans l'adresse : « #/ », « #/scopes », « #/detour/<clé> », et
+	 * « #/declare/<clé> », qui déclare le sens concerné avant d'ouvrir sa déviation. Le retour du
 	 * navigateur revient alors à l'écran précédent, et non au site d'où l'on venait — c'est le geste
 	 * qu'on fait sans y penser, et il ne doit pas faire perdre la page.
 	 */
@@ -460,6 +473,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 		if (route.indexOf("detour/") === 0) {
 			openDetail(decodeURIComponent(route.slice("detour/".length)));
+			return;
+		}
+		if (route.indexOf("declare/") === 0) {
+			declareDirection(decodeURIComponent(route.slice("declare/".length)));
 			return;
 		}
 		if (route === "scopes") {
@@ -623,17 +640,17 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 			rows.forEach(function (row) {
 				var tr = document.createElement("tr");
-				tr.onclick = function () { go("detour/" + encodeURIComponent(row.key)); };
+				var href = "#/detour/" + encodeURIComponent(row.key);
 
 				// Ce que la ligne abrège se relit en entier au survol : la destination comme le texte de
 				// l'info trafic dépassent volontiers la largeur d'une colonne.
-				tr.title = row.line + " sens " + row.directionId + " " + towardOf(row) + "\n"
+				tr.title = row.line + " " + towardOf(row) + "\n"
 					+ row.alertNumber + " — " + row.headerText + "\n" + describePeriods(row.periods);
 
 				tr.innerHTML = grouping.columns.map(function (column) {
 					var definition = COLUMNS[column[0]];
 					return "<td" + (definition.className ? " class='" + definition.className + "'" : "") + ">"
-						+ definition.cell(row) + "</td>";
+						+ "<a class='cell' href='" + href + "'>" + definition.cell(row) + "</a></td>";
 				}).join("");
 				body.appendChild(tr);
 			});
@@ -707,14 +724,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			+ "</span></span>" + what
 			+ (direction.declared ? ' <span class="badge ok">déclarée</span>' : "");
 
-		var action = document.createElement("button");
-		if (direction.scoped) {
-			action.textContent = "Ouvrir";
-			action.onclick = function () { go("detour/" + encodeURIComponent(direction.key)); };
-		} else {
-			action.textContent = "Déclarer concernée";
-			action.onclick = function () { declareDirection(direction); };
-		}
+		var action = document.createElement("a");
+		action.className = "button";
+		action.href = "#/" + (direction.scoped ? "detour/" : "declare/") + encodeURIComponent(direction.key);
+		action.textContent = direction.scoped ? "Ouvrir" : "Déclarer concernée";
 		row.appendChild(action);
 
 		return row;
@@ -723,14 +736,29 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	/**
 	 * Déclare un sens concerné : un périmètre saisi, sans aucun arrêt supprimé. La déviation devient
 	 * déclarable sur-le-champ — c'est là qu'on lui donne son tracé.
+	 *
+	 * C'est une adresse, pour s'ouvrir dans un autre onglet comme n'importe quel lien — et une adresse
+	 * se rouvre : onglet rechargé, lien recopié. Un sens déjà concerné n'est donc pas redéclaré, ce qui
+	 * viderait le périmètre qu'on lui a saisi depuis ; on ouvre simplement sa déviation.
+	 *
+	 * L'adresse de la déclaration est REMPLACÉE par celle de la déviation : le retour du navigateur
+	 * ramène à la liste des infos trafic, et non à une déclaration qu'il rejouerait.
 	 */
-	function declareDirection(direction) {
-		request(API + "/api/scopes/" + encodeURIComponent(direction.key), {
-			method: "PUT",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ removedStopIds: [] })
-		}).then(function () { go("detour/" + encodeURIComponent(direction.key)); })
-			.catch(function (error) { alert(error.message); });
+	function declareDirection(key) {
+		var detour = "#/detour/" + encodeURIComponent(key);
+
+		request(API + "/api/detours/" + encodeURIComponent(key)).then(function () {
+			window.location.replace(detour);
+		}, function () {
+			return request(API + "/api/scopes/" + encodeURIComponent(key), {
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ removedStopIds: [] })
+			}).then(function () { window.location.replace(detour); });
+		}).catch(function (error) {
+			alert(error.message);
+			window.location.replace("#/scopes");
+		});
 	}
 
 	// --- détail ---
@@ -1112,7 +1140,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var detail = state.detail;
 		el("summary").innerHTML =
 			"<h2 style='display:flex;align-items:center;gap:8px'>" + lineChip(detail.line)
-				+ "<span>" + escapeHtml(detail.line) + " — sens " + detail.directionId + "</span></h2>" +
+				+ "<span>" + escapeHtml(detail.line + " " + towardOf(detail)) + "</span></h2>" +
 			"<p><strong>" + escapeHtml(detail.headerText) + "</strong></p>" +
 			"<div class='richtext'>" + detail.descriptionHtml + "</div>" +
 			"<p class='note'>Info trafic " + detail.alertNumber + " · " + escapeHtml(describePeriods(detail.periods)) + "</p>";
@@ -2045,8 +2073,6 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		renderList();
 	};
 	el("showUpcoming").onchange = renderList;
-	el("openScopes").onclick = function () { go("scopes"); };
-	el("back").onclick = backToList;
 	el("addStop").onclick = function () {
 		setMode(state.mode === "search" || state.mode === "place" ? "idle" : "search");
 	};
