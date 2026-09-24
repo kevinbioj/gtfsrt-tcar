@@ -845,22 +845,43 @@ export function useDetourStore(path: string) {
 		},
 
 		/**
-		 * Retire un arrêt provisoire de la base. Refusé tant qu'une déviation le désigne : le supprimer
-		 * laisserait dans le feed des `replacement_stops` pointant vers un arrêt que rien ne définit.
+		 * Retire un arrêt provisoire de la base, et de toutes les déviations qui le désignent : le garder
+		 * dans l'une d'elles laisserait dans le feed des `replacement_stops` pointant vers un arrêt que
+		 * rien ne définit. Les temps de parcours des arrêts restants n'ont pas à être repris — une suite
+		 * strictement croissante le reste une fois un terme ôté.
+		 *
+		 * Les déclarations touchées sont réhorodatées : c'est leur `last_modified_time`, et elles viennent
+		 * de changer. Renvoie leur nombre, ou `undefined` pour un arrêt inconnu.
 		 */
-		deleteProvisionalStop(stopId: string): boolean {
+		deleteProvisionalStop(stopId: string, nowSeconds: number): number | undefined {
 			const uid = provisionalStopUid(stopId);
-			if (uid === undefined) return false;
+			if (uid === undefined || !provisional.has(stopId)) return undefined;
 
-			for (const record of records.values()) {
-				for (const segment of record.segments) {
-					if (segment.stops.some((stop) => stop.stopId === stopId)) return false;
+			const designating = [...records.values()].filter((record) =>
+				record.segments.some((segment) => segment.stops.some((stop) => stop.stopId === stopId)),
+			);
+
+			db.exec("BEGIN");
+			try {
+				const touch = db.prepare(
+					"UPDATE detours SET updated_at = ? WHERE alert_number = ? AND route_id = ? AND direction_id = ?",
+				);
+				for (const record of designating) {
+					touch.run(nowSeconds, record.alertNumber, record.routeId, record.directionId);
 				}
+
+				// Les rangs des arrêts restants gardent un trou là où il était : ils ne servent qu'à ordonner,
+				// et le prochain enregistrement de la déviation les réécrit de toute façon.
+				db.prepare("DELETE FROM detour_stops WHERE stop_id = ?").run(stopId);
+				db.prepare("DELETE FROM provisional_stops WHERE stop_uid = ?").run(uid);
+				db.exec("COMMIT");
+			} catch (cause) {
+				db.exec("ROLLBACK");
+				throw cause;
 			}
 
-			db.prepare("DELETE FROM provisional_stops WHERE stop_uid = ?").run(uid);
 			reload();
-			return true;
+			return designating.length;
 		},
 	};
 }

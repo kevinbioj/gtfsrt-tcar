@@ -112,6 +112,33 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 
 	// La base des arrêts provisoires. Un arrêt y vit indépendamment des déviations qui le désignent :
 	// le même point de report sert souvent aux deux sens, et parfois à deux infos trafic successives.
+	/**
+	 * La base des arrêts provisoires, chacun avec les déviations qui le désignent. C'est ce qu'il faut
+	 * voir avant d'en renommer ou d'en déplacer un : le changement vaudra pour toutes, et un arrêt que
+	 * rien ne désigne plus est le seul qu'on puisse retirer.
+	 */
+	admin.get("/api/provisional-stops", (c) => {
+		const usages = new Map<string, ReturnType<typeof describeUsage>[]>();
+
+		for (const record of deps.store.records.values()) {
+			const designated = new Set(record.segments.flatMap((segment) => segment.stops.map((stop) => stop.stopId)));
+			for (const stopId of designated) {
+				if (!deps.store.provisionalStops.has(stopId)) continue;
+				const list = usages.get(stopId);
+				const usage = describeUsage(record.alertNumber, record.routeId, record.directionId, deps);
+				if (list === undefined) usages.set(stopId, [usage]);
+				else list.push(usage);
+			}
+		}
+
+		const stops = [...deps.store.provisionalStops.values()].map((stop) => ({
+			...stop,
+			usages: usages.get(stop.stopId) ?? [],
+		}));
+
+		return c.json(stops.sort((a, b) => a.name.localeCompare(b.name, "fr")));
+	});
+
 	admin.post("/api/provisional-stops", async (c) => {
 		const parsed = await parseProvisionalStop(c);
 		if ("message" in parsed) return c.json({ code: 400, message: parsed.message }, 400);
@@ -135,12 +162,14 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		return c.json(deps.store.provisionalStops.get(stopId));
 	});
 
+	/** Retire un arrêt provisoire, et le retire au passage de toutes les déviations qui le désignent. */
 	admin.delete("/api/provisional-stops/:stopId", (c) => {
-		if (!deps.store.deleteProvisionalStop(c.req.param("stopId"))) {
-			return c.json({ code: 409, message: "Arrêt inconnu, ou encore désigné par une déviation." }, 409);
-		}
+		const withdrawn = deps.store.deleteProvisionalStop(c.req.param("stopId"), Math.floor(Date.now() / 1000));
+		if (withdrawn === undefined) return c.json({ code: 404, message: "Arrêt provisoire inconnu." }, 404);
 
-		return c.json({ code: 200, message: "Arrêt provisoire supprimé." });
+		// Des déviations publiées viennent de perdre un arrêt de substitution : le feed doit suivre.
+		if (withdrawn > 0) deps.rebuild();
+		return c.json({ code: 200, message: "Arrêt provisoire supprimé.", withdrawn });
 	});
 
 	/**
@@ -873,6 +902,29 @@ function parseSegment(
 			waypoints,
 			path,
 		},
+	};
+}
+
+/**
+ * Une déviation qui désigne un arrêt provisoire, telle que la liste des arrêts la cite. Sa
+ * perturbation peut avoir quitté le flux : la déclaration reste en base, mais n'a plus de détail à
+ * ouvrir — `open` le dit.
+ */
+function describeUsage(alertNumber: string, routeId: string, directionId: number, deps: AdminDependencies) {
+	const key = detourKey(alertNumber, routeId, directionId);
+	const scope = deps.serviceAlerts.alertScopes.get(key);
+
+	return {
+		key,
+		alertNumber,
+		standalone: scope?.standalone ?? false,
+		line: routeId.split(":").at(-1) ?? routeId,
+		directionId,
+		headsigns:
+			deps.gtfs.data.routeDirections.get(routeId)?.find((direction) => direction.directionId === directionId)
+				?.headsigns ?? [],
+		headerText: scope?.headerText ?? null,
+		open: scope !== undefined,
 	};
 }
 

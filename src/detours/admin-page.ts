@@ -185,6 +185,19 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	/* Les champs d'un formulaire s'empilent : une ligne chacun, un peu d'air entre eux. */
 	.form .field { margin-bottom: 8px; }
 	.form { max-width: 560px; }
+	/*
+	 * La base des arrêts provisoires : la carte d'un côté, le tableau de l'autre, comme le détail d'une
+	 * déviation. Le panneau s'élargit — un nom, les déviations qui s'en servent, une action.
+	 */
+	#stopsMap { flex: 1; }
+	.panel.wide { width: 560px; }
+	.panel table { table-layout: auto; }
+	.panel table td { white-space: normal; vertical-align: top; }
+	.panel table tbody tr { cursor: default; }
+	.usage { display: flex; align-items: center; gap: 4px; margin: 2px 0; font-size: 12px; color: inherit;
+		text-decoration: none; }
+	a.usage:hover { text-decoration: underline; }
+	.usage .toward { margin-left: 2px; }
 </style>
 </head>
 <body>
@@ -199,6 +212,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		<label class="note"><input type="checkbox" id="showUpcoming" style="width:auto"> afficher aussi les déviations à venir ou terminées</label>
 		<a id="openScopes" class="button" href="#/scopes">Ajouter une ligne concernée</a>
 		<a id="openNew" class="button" href="#/new">Nouvelle modification</a>
+		<a id="openStops" class="button" href="#/stops">Arrêts provisoires</a>
 	</span>
 	<a id="back" class="button hidden" href="#/">Retour à la liste</a>
 </header>
@@ -230,6 +244,25 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		<div class="actions"><button id="create" class="primary">Créer</button></div>
 		<p class="status" id="newStatus"></p>
 	</div>
+</div>
+
+<div id="stopsView" class="detail hidden">
+	<div id="stopsMap"></div>
+	<aside class="panel wide">
+		<p class="note">Un arrêt provisoire sert à toutes les déviations qui le désignent : le renommer ou
+			le déplacer ici vaut pour chacune d'elles. Glisser un marqueur pour le déplacer. Le supprimer
+			le retire aussi de toutes les déviations qui le désignent.</p>
+		<div class="row">
+			<input id="newStopName" placeholder="Nom du nouvel arrêt" autocomplete="off">
+			<button id="placeNewStop" style="flex:none">Poser sur la carte</button>
+		</div>
+		<table>
+			<thead><tr><th>Arrêt</th><th>Désigné par</th><th style="width:90px"></th></tr></thead>
+			<tbody id="stopsBody"></tbody>
+		</table>
+		<p id="stopsEmpty" class="note hidden">Aucun arrêt provisoire.</p>
+		<p class="status" id="stopsStatus"></p>
+	</aside>
 </div>
 
 <div id="detailView" class="detail hidden">
@@ -318,6 +351,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	var state = {
 		detail: null, rows: [], alerts: [], routes: [], segments: [], active: 0, mode: "idle",
+		// La base des arrêts provisoires : sa carte, ses marqueurs par identifiant, et la pose en cours.
+		stopsMap: null, stopsLayer: null, provisionalStops: [], stopMarkersById: {}, placingStop: false,
+		// La mise en lumière d'un arrêt survolé : un seul à la fois, sur l'une ou l'autre carte.
+		highlight: null,
 		// Le périmètre en cours de saisie : la liste des arrêts cochés, ou null tant qu'on le lit.
 		scopeSelection: null,
 		map: null, base: null, routeLayer: null, otherLayer: null, drawLayer: null, previewLine: null,
@@ -467,19 +504,23 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 * qui sert à ça.
 	 */
 	function showView(name) {
+		clearHighlight();
 		el("listView").className = name === "list" ? "wrap" : "wrap hidden";
 		el("scopeView").className = name === "scopes" ? "wrap" : "wrap hidden";
 		el("newView").className = name === "new" ? "wrap" : "wrap hidden";
 		el("detailView").className = name === "detail" ? "detail" : "detail hidden";
+		el("stopsView").className = name === "stops" ? "detail" : "detail hidden";
 		el("listTools").className = name === "list" ? "tools" : "tools hidden";
 		el("back").className = name === "list" ? "button hidden" : "button";
 		el("title").textContent = name === "scopes" ? "Ajouter une ligne concernée"
 			: name === "new" ? "Nouvelle modification"
+			: name === "stops" ? "Arrêts provisoires"
 			: name === "detail" ? "Déviation" : "Déviations en vigueur";
 	}
 
 	/**
-	 * La vue courante vit dans l'adresse : « #/ », « #/scopes », « #/new », « #/detour/<clé> », et
+	 * La vue courante vit dans l'adresse : « #/ », « #/scopes », « #/new », « #/stops »,
+	 * « #/detour/<clé> », et
 	 * « #/declare/<clé> », qui déclare le sens concerné avant d'ouvrir sa déviation. Le retour du
 	 * navigateur revient alors à l'écran précédent, et non au site d'où l'on venait — c'est le geste
 	 * qu'on fait sans y penser, et il ne doit pas faire perdre la page.
@@ -507,6 +548,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		}
 		if (route === "new") {
 			openNew();
+			return;
+		}
+		if (route === "stops") {
+			openStops();
 			return;
 		}
 
@@ -801,6 +846,198 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			alert(error.message);
 			window.location.replace("#/scopes");
 		});
+	}
+
+	// --- arrêts provisoires ---
+
+	/**
+	 * La base des arrêts provisoires, à part de toute déviation : c'est là qu'on en crée un d'avance,
+	 * qu'on corrige un nom ou une position pour toutes les déviations qui le désignent, et qu'on retire
+	 * ceux que plus rien ne désigne.
+	 */
+	function openStops() {
+		request(API + "/api/provisional-stops").then(function (stops) {
+			state.detail = null;
+			state.provisionalStops = stops;
+			showView("stops");
+
+			if (state.stopsMap === null) {
+				state.stopsMap = createMap("stopsMap");
+				state.stopsLayer = L.layerGroup().addTo(state.stopsMap);
+				state.stopsMap.on("click", onStopsMapClick);
+			}
+
+			setPlacing(false);
+			renderStopsTable();
+			drawProvisionalStops(true);
+			setStopsStatus("");
+			// Même raison que pour la carte du détail : Leaflet a mesuré un conteneur encore caché.
+			setTimeout(function () { state.stopsMap.invalidateSize(); }, 0);
+		}).catch(function (error) { alert(error.message); go(""); });
+	}
+
+	/** Relit la base après une écriture : un autre onglet a pu y toucher, et les usages avec. */
+	function reloadStops(message) {
+		return request(API + "/api/provisional-stops").then(function (stops) {
+			state.provisionalStops = stops;
+			renderStopsTable();
+			drawProvisionalStops(false);
+			if (message) setStopsStatus(message, "ok");
+		});
+	}
+
+	function setStopsStatus(text, kind) {
+		var status = el("stopsStatus");
+		status.textContent = text;
+		status.style.color = kind === "error" ? "var(--danger)" : kind === "ok" ? "var(--ok)" : "var(--muted)";
+	}
+
+	/** Les déviations qui désignent l'arrêt, chacune ouvrable quand sa perturbation est encore au flux. */
+	function describeUsages(stop) {
+		if (stop.usages.length === 0) return "<span class='note'>aucune</span>";
+
+		return stop.usages.map(function (usage) {
+			var what = lineChip(usage.line) + "<span class='toward'>" + escapeHtml(towardOf(usage)) + "</span>";
+			var title = (usage.standalone ? "Sans info trafic" : "Info trafic " + usage.alertNumber)
+				+ (usage.headerText ? " — " + usage.headerText : "");
+			// Les attributs entre guillemets doubles : ce sont eux qu'échappe escapeHtml, et les intitulés
+			// français regorgent d'apostrophes.
+			return usage.open
+				? '<a class="usage" title="' + escapeHtml(title) + '" href="#/detour/' + encodeURIComponent(usage.key) + '">' + what + "</a>"
+				: '<span class="usage" title="' + escapeHtml(title + " (plus au flux)") + '">' + what + "</span>";
+		}).join("");
+	}
+
+	function renderStopsTable() {
+		var body = el("stopsBody");
+		body.innerHTML = "";
+
+		state.provisionalStops.forEach(function (stop) {
+			var tr = document.createElement("tr");
+			tr.innerHTML =
+				'<td><input class="name" value="' + escapeHtml(stop.name) + '">'
+					+ "<div class='note' style='font-size:12px'>" + escapeHtml(stop.stopId) + "</div></td>" +
+				"<td>" + describeUsages(stop) + "</td>" +
+				"<td><button class='del danger'>Supprimer</button></td>";
+
+			var input = tr.querySelector(".name");
+			input.onchange = function () {
+				var name = input.value.trim();
+				if (name.length === 0) { input.value = stop.name; return; }
+				updateProvisional(stop, { name: name, latitude: stop.latitude, longitude: stop.longitude });
+			};
+
+			var remove = tr.querySelector(".del");
+			remove.onclick = function () { deleteProvisional(stop); };
+
+			// Survoler une ligne montre l'arrêt ; la cliquer y centre la carte.
+			tr.onmouseenter = function () { highlightStop(state.stopsMap, stop); };
+			tr.onmouseleave = clearHighlight;
+			tr.onclick = function (event) {
+				if (event.target.tagName === "INPUT" || event.target.tagName === "BUTTON") return;
+				state.stopsMap.setView([stop.latitude, stop.longitude], Math.max(state.stopsMap.getZoom(), 17));
+			};
+
+			body.appendChild(tr);
+		});
+
+		el("stopsEmpty").className = state.provisionalStops.length === 0 ? "note" : "note hidden";
+	}
+
+	/**
+	 * Un marqueur par arrêt, à glisser pour le déplacer. Le déplacement s'enregistre au lâcher : il
+	 * vaut pour toutes les déviations qui désignent l'arrêt, et le tableau dit lesquelles.
+	 */
+	function drawProvisionalStops(fit) {
+		state.stopsLayer.clearLayers();
+		state.stopMarkersById = {};
+
+		var bounds = [];
+		state.provisionalStops.forEach(function (stop) {
+			var marker = L.marker([stop.latitude, stop.longitude], { draggable: true })
+				.bindTooltip(stop.name)
+				.addTo(state.stopsLayer);
+
+			marker.on("dragend", function () {
+				var position = marker.getLatLng();
+				updateProvisional(stop, { name: stop.name, latitude: position.lat, longitude: position.lng });
+			});
+
+			state.stopMarkersById[stop.stopId] = marker;
+			bounds.push([stop.latitude, stop.longitude]);
+		});
+
+		if (!fit) return;
+		if (bounds.length > 0) state.stopsMap.fitBounds(L.latLngBounds(bounds).pad(.2), { maxZoom: 16 });
+		else state.stopsMap.setView([49.443, 1.099], 12);
+	}
+
+	function updateProvisional(stop, change) {
+		request(API + "/api/provisional-stops/" + encodeURIComponent(stop.stopId), {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(change)
+		}).then(function () {
+			var count = stop.usages.length;
+			return reloadStops(count === 0
+				? "Arrêt mis à jour."
+				: "Arrêt mis à jour, pour " + count + (count > 1 ? " déviations." : " déviation."));
+		}).catch(function (error) {
+			setStopsStatus(error.message, "error");
+			// Le marqueur ou le champ ont déjà bougé : on les ramène à ce que la base retient.
+			reloadStops();
+		});
+	}
+
+	/**
+	 * Supprime l'arrêt, et le retire de toutes les déviations qui le désignent. La confirmation les
+	 * nomme : c'est le moment de voir qu'on s'apprête à toucher à une déviation publiée.
+	 */
+	function deleteProvisional(stop) {
+		var question = "Supprimer l'arrêt provisoire « " + stop.name + " » ?";
+		if (stop.usages.length > 0) {
+			question += "\n\nIl sera retiré de " + stop.usages.length
+				+ (stop.usages.length > 1 ? " déviations qui le désignent :\n" : " déviation qui le désigne :\n")
+				+ stop.usages.map(function (usage) {
+					return "· " + usage.line + " " + towardOf(usage)
+						+ (usage.standalone ? " (sans info trafic)" : " (info trafic " + usage.alertNumber + ")");
+				}).join("\n");
+		}
+		if (!confirm(question)) return;
+
+		clearHighlight();
+		request(API + "/api/provisional-stops/" + encodeURIComponent(stop.stopId), { method: "DELETE" })
+			.then(function (answer) {
+				return reloadStops(answer.withdrawn > 0
+					? "Arrêt supprimé, et retiré de " + answer.withdrawn
+						+ (answer.withdrawn > 1 ? " déviations." : " déviation.")
+					: "Arrêt supprimé.");
+			})
+			.catch(function (error) { setStopsStatus(error.message, "error"); });
+	}
+
+	/** La pose d'un nouvel arrêt : le nom d'abord, puis un clic sur la carte pour sa position. */
+	function setPlacing(placing) {
+		state.placingStop = placing;
+		el("placeNewStop").className = placing ? "active" : "";
+		el("placeNewStop").textContent = placing ? "Annuler la pose" : "Poser sur la carte";
+		if (state.stopsMap) state.stopsMap.getContainer().style.cursor = placing ? "crosshair" : "";
+		if (placing) setStopsStatus("Cliquer sa position sur la carte.");
+	}
+
+	function onStopsMapClick(event) {
+		if (!state.placingStop) return;
+
+		var name = el("newStopName").value.trim();
+		request(API + "/api/provisional-stops", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name: name, latitude: event.latlng.lat, longitude: event.latlng.lng })
+		}).then(function () {
+			el("newStopName").value = "";
+			setPlacing(false);
+			return reloadStops("Arrêt « " + name + " » créé.");
+		}).catch(function (error) { setStopsStatus(error.message, "error"); });
 	}
 
 	// --- modification sans info trafic ---
@@ -1518,12 +1755,42 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	// --- carte ---
 
+	/** Une carte du réseau, fond OpenStreetMap. Il y en a deux : celle du détail, celle des arrêts. */
+	function createMap(id) {
+		var map = L.map(id);
+		L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+			maxZoom: 19, attribution: "© OpenStreetMap"
+		}).addTo(map);
+		return map;
+	}
+
+	/**
+	 * Met un arrêt en lumière : un large anneau autour de lui, et son nom. La carte ne se déplace que
+	 * s'il est hors de vue — et alors juste assez pour l'y faire entrer : un survol ne doit pas faire
+	 * perdre ce qu'on regardait.
+	 */
+	function highlightStop(map, stop) {
+		clearHighlight();
+		if (stop.latitude === null || stop.longitude === null) return;
+
+		var at = L.latLng(stop.latitude, stop.longitude);
+		var marker = L.circleMarker(at, {
+			radius: 16, color: "#1f6feb", weight: 3, fillColor: "#1f6feb", fillOpacity: .2, interactive: false
+		}).bindTooltip(stop.name, { permanent: true, direction: "top", offset: [0, -14] }).addTo(map);
+
+		state.highlight = { map: map, marker: marker };
+		map.panInside(at, { padding: [40, 40] });
+	}
+
+	function clearHighlight() {
+		if (state.highlight === null) return;
+		state.highlight.map.removeLayer(state.highlight.marker);
+		state.highlight = null;
+	}
+
 	function setupMap() {
 		if (state.map === null) {
-			state.map = L.map("map");
-			L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-				maxZoom: 19, attribution: "© OpenStreetMap"
-			}).addTo(state.map);
+			state.map = createMap("map");
 			state.base = L.layerGroup().addTo(state.map);
 			state.routeLayer = L.layerGroup().addTo(state.map);
 			// Les autres tronçons passent sous celui qu'on édite : ils se voient, ils ne gênent pas.
@@ -1577,6 +1844,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	function setMode(mode) {
 		state.mode = mode;
+		clearHighlight();
 		var searching = mode === "search" || mode === "place";
 		el("addStop").className = searching ? "active" : "";
 		el("draw").className = mode === "draw" ? "grow active" : "grow";
@@ -1628,6 +1896,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	}
 
 	function searchStops() {
+		// Les résultats vont être refaits : celui qu'on survolait n'existera plus pour signaler qu'on le quitte.
+		clearHighlight();
 		var query = el("stopQuery").value.trim();
 		var results = el("stopResults");
 		var hint = el("searchHint");
@@ -1645,7 +1915,12 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				var row = document.createElement("div");
 				var tag = stop.provisional ? '<span class="badge warn">provisoire</span> ' : "";
 				row.innerHTML = tag + escapeHtml(stop.name) + ' <span class="id">' + escapeHtml(stop.stopId) + "</span>";
+				// Plusieurs arrêts portent souvent le même nom — deux quais, deux communes : c'est la carte
+				// qui les départage, et le survol les y montre avant qu'on choisisse.
+				row.onmouseenter = function () { highlightStop(state.map, stop); };
+				row.onmouseleave = clearHighlight;
 				row.onclick = function () {
+					clearHighlight();
 					addStop(stop);
 					state.map.panTo([stop.latitude, stop.longitude]);
 				};
@@ -2323,6 +2598,15 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	el("toggleDisabled").onclick = toggleDisabled;
 	el("remove").onclick = remove;
 	el("create").onclick = createModification;
+	el("placeNewStop").onclick = function () {
+		if (state.placingStop) { setPlacing(false); setStopsStatus(""); return; }
+		if (el("newStopName").value.trim().length === 0) {
+			setStopsStatus("Saisir d'abord le nom de l'arrêt.", "error");
+			el("newStopName").focus();
+			return;
+		}
+		setPlacing(true);
+	};
 
 	document.addEventListener("keydown", function (event) {
 		if ((event.ctrlKey || event.metaKey) && event.key === "z" && state.detail) {
