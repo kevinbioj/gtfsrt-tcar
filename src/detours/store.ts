@@ -306,6 +306,35 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 		PRIMARY KEY (alert_number, route_id, direction_id)
 	) STRICT;
 	`,
+	// Un même sens peut porter des tracés incompatibles : la 305 file vers l'Hôtel de Ville ou vers le
+	// Lycée Flaubert, et un détour autour de l'un ne se dessine pas comme autour de l'autre. Un tronçon
+	// peut donc nommer les tracés qu'il vise ; sans aucun, il les vise tous — ce qui est le cas de tous
+	// les tronçons déjà saisis, et n'a rien à reprendre.
+	`
+	CREATE TABLE detour_segment_patterns (
+		alert_number TEXT    NOT NULL,
+		route_id     TEXT    NOT NULL,
+		direction_id INTEGER NOT NULL,
+		segment      INTEGER NOT NULL,
+		-- L'empreinte de la suite de quais du tracé (cf. RoutePattern).
+		pattern_id   TEXT    NOT NULL,
+		PRIMARY KEY (alert_number, route_id, direction_id, segment, pattern_id),
+		FOREIGN KEY (alert_number, route_id, direction_id, segment)
+			REFERENCES detour_segments (alert_number, route_id, direction_id, segment) ON DELETE CASCADE
+	) STRICT;
+	`,
+	// L'analyse IA voit parfois une ligne ou un sens que l'info trafic ne concerne pas. Un périmètre
+	// saisi vide ne l'efface pas — il dit « concernée, sans arrêt supprimé ». Il faut donc pouvoir dire
+	// « pas concernée du tout » : l'entrée est retirée, et l'analyse n'y revient pas au relevé suivant.
+	`
+	CREATE TABLE dismissed_scopes (
+		alert_number TEXT    NOT NULL,
+		route_id     TEXT    NOT NULL,
+		direction_id INTEGER NOT NULL,
+		dismissed_at INTEGER NOT NULL,
+		PRIMARY KEY (alert_number, route_id, direction_id)
+	) STRICT;
+	`,
 ];
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
@@ -348,6 +377,13 @@ export type DetourStop = {
  * un seul détour.
  */
 export type DetourSegment = {
+	/**
+	 * Les tracés empruntés que le tronçon vise (cf. `RoutePattern`), ou aucun pour les viser tous. Il
+	 * s'applique aux courses qui desservent ses bornes, et, s'il en nomme, à celles de ces tracés
+	 * seulement : c'est ce qui permet de dessiner autrement un même détour pour deux services d'un
+	 * même sens qui n'y arrivent pas par le même chemin.
+	 */
+	patternIds: string[];
 	/**
 	 * Premier arrêt de la plage, borne comprise. Publié comme `start_stop_selector` lorsque la plage
 	 * supprime des arrêts ; sinon il ne sert qu'à désigner les courses (cf. `removesStops`).
@@ -465,6 +501,7 @@ export function useDetourStore(path: string) {
 	const overrides = new Map<string, ScopeOverride>();
 	const standalone = new Map<string, StandaloneModification>();
 	const disabled = new Set<string>();
+	const dismissed = new Set<string>();
 
 	const reload = () => {
 		records.clear();
@@ -472,6 +509,7 @@ export function useDetourStore(path: string) {
 		overrides.clear();
 		standalone.clear();
 		disabled.clear();
+		dismissed.clear();
 
 		for (const row of db.prepare("SELECT * FROM standalone_modifications ORDER BY uid").all() as StandaloneRow[]) {
 			const alertNumber = standaloneNumber(row.uid);
@@ -490,6 +528,10 @@ export function useDetourStore(path: string) {
 
 		for (const row of db.prepare("SELECT * FROM disabled_modifications").all() as DisabledRow[]) {
 			disabled.add(detourKey(row.alert_number, row.route_id, row.direction_id));
+		}
+
+		for (const row of db.prepare("SELECT * FROM dismissed_scopes").all() as DisabledRow[]) {
+			dismissed.add(detourKey(row.alert_number, row.route_id, row.direction_id));
 		}
 
 		for (const row of db.prepare("SELECT * FROM provisional_stops ORDER BY stop_uid").all() as ProvisionalRow[]) {
@@ -513,6 +555,7 @@ export function useDetourStore(path: string) {
 			.prepare("SELECT * FROM detour_segments ORDER BY alert_number, route_id, direction_id, segment")
 			.all() as SegmentRow[]) {
 			records.get(detourKey(row.alert_number, row.route_id, row.direction_id))?.segments.push({
+				patternIds: [],
 				startStopId: row.start_stop_id,
 				endStopId: row.end_stop_id,
 				propagatedDelay: row.propagated_delay,
@@ -546,6 +589,16 @@ export function useDetourStore(path: string) {
 				longitude: row.longitude,
 				mode: row.mode === "route" ? "route" : "free",
 			});
+		}
+
+		for (const row of db
+			.prepare(
+				"SELECT * FROM detour_segment_patterns ORDER BY alert_number, route_id, direction_id, segment, pattern_id",
+			)
+			.all() as SegmentPatternRow[]) {
+			records
+				.get(detourKey(row.alert_number, row.route_id, row.direction_id))
+				?.segments[row.segment]?.patternIds.push(row.pattern_id);
 		}
 
 		for (const row of db.prepare("SELECT * FROM scope_overrides").all() as OverrideRow[]) {
@@ -583,6 +636,45 @@ export function useDetourStore(path: string) {
 
 		/** Les modifications désactivées, par {@link detourKey} — qu'une info trafic les porte ou non. */
 		disabledModifications: disabled as ReadonlySet<string>,
+
+		/** Les couples ligne/sens retirés d'une info trafic, par {@link detourKey} (cf. {@link dismiss}). */
+		dismissedScopes: dismissed as ReadonlySet<string>,
+
+		/**
+		 * Retire une ligne et un sens d'une info trafic : ils ne sont pas concernés, quoi qu'en dise
+		 * l'analyse. Ce qui s'y rattachait part avec — déclaration, périmètre saisi, désactivation :
+		 * rien de tout cela ne désigne plus une perturbation.
+		 */
+		dismiss(alertNumber: string, routeId: string, directionId: number, nowSeconds: number) {
+			const where = "WHERE alert_number = ? AND route_id = ? AND direction_id = ?";
+			db.exec("BEGIN");
+			try {
+				db.prepare(`DELETE FROM detours ${where}`).run(alertNumber, routeId, directionId);
+				db.prepare(`DELETE FROM scope_overrides ${where}`).run(alertNumber, routeId, directionId);
+				db.prepare(`DELETE FROM disabled_modifications ${where}`).run(alertNumber, routeId, directionId);
+				db.prepare(
+					`INSERT INTO dismissed_scopes (alert_number, route_id, direction_id, dismissed_at)
+					 VALUES (?, ?, ?, ?)
+					 ON CONFLICT (alert_number, route_id, direction_id) DO NOTHING`,
+				).run(alertNumber, routeId, directionId, nowSeconds);
+				db.exec("COMMIT");
+			} catch (cause) {
+				db.exec("ROLLBACK");
+				throw cause;
+			}
+
+			reload();
+		},
+
+		/** Rétablit un couple retiré : l'analyse en redit ce qu'elle en voit. */
+		restore(alertNumber: string, routeId: string, directionId: number): boolean {
+			const { changes } = db
+				.prepare("DELETE FROM dismissed_scopes WHERE alert_number = ? AND route_id = ? AND direction_id = ?")
+				.run(alertNumber, routeId, directionId);
+
+			reload();
+			return changes > 0;
+		},
 
 		/** Déclare une modification sans info trafic. Sa déviation se saisit ensuite comme les autres. */
 		createStandalone(
@@ -682,6 +774,13 @@ export function useDetourStore(path: string) {
 		): ScopeOverride {
 			db.exec("BEGIN");
 			try {
+				// Saisir un périmètre, c'est dire le couple concerné : il cesse d'être retiré.
+				db.prepare("DELETE FROM dismissed_scopes WHERE alert_number = ? AND route_id = ? AND direction_id = ?").run(
+					alertNumber,
+					routeId,
+					directionId,
+				);
+
 				db.prepare(
 					`INSERT INTO scope_overrides (alert_number, route_id, direction_id, updated_at)
 					 VALUES (?, ?, ?, ?)
@@ -762,6 +861,10 @@ export function useDetourStore(path: string) {
 					`INSERT INTO detour_path (alert_number, route_id, direction_id, segment, position, latitude, longitude)
 					 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 				);
+				const insertPattern = db.prepare(
+					`INSERT INTO detour_segment_patterns (alert_number, route_id, direction_id, segment, pattern_id)
+					 VALUES (?, ?, ?, ?, ?)`,
+				);
 				const insertWaypoint = db.prepare(
 					`INSERT INTO detour_waypoints
 						(alert_number, route_id, direction_id, segment, position, latitude, longitude, mode)
@@ -778,6 +881,9 @@ export function useDetourStore(path: string) {
 						segment.endStopId,
 						segment.propagatedDelay,
 					);
+					for (const patternId of new Set(segment.patternIds)) {
+						insertPattern.run(alertNumber, routeId, directionId, rank, patternId);
+					}
 					segment.stops.forEach((stop, position) => {
 						insertStop.run(alertNumber, routeId, directionId, rank, position, stop.stopId, stop.travelTime);
 					});
@@ -949,6 +1055,14 @@ type SegmentRow = {
 	start_stop_id: string | null;
 	end_stop_id: string | null;
 	propagated_delay: number;
+};
+
+type SegmentPatternRow = {
+	alert_number: string;
+	route_id: string;
+	direction_id: number;
+	segment: number;
+	pattern_id: string;
 };
 
 type OverrideRow = { alert_number: string; route_id: string; direction_id: number; updated_at: number };

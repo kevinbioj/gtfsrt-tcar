@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { unzipSync } from "fflate";
 
 import { type Coordinates, haversine, projectOnShape, type ShapePoint } from "../utils/geometry.js";
@@ -10,6 +12,25 @@ export type RouteDirection = { directionId: number; headsigns: string[] };
 
 /** Un arrêt dans l'itinéraire d'une ligne : son quai (stopId) et son nom normalisé. */
 export type OrderedStop = { stopId: string; name: string };
+
+/**
+ * Un tracé emprunté : les courses d'une ligne et d'un sens qui desservent exactement la même suite
+ * de quais. C'est ce qui départage deux services d'un même sens qui ne passent pas au même endroit —
+ * la 305 vers l'Hôtel de Ville ou vers le Lycée Flaubert.
+ *
+ * Il s'identifie par sa suite de quais, et non par son `shape_id` : sur le GTFS du réseau les deux se
+ * correspondent un pour un, mais la shape est une empreinte de géométrie qu'une régénération du GTFS
+ * peut renouveler sans qu'aucun arrêt ne bouge.
+ */
+export type RoutePattern = {
+	/** Empreinte de la suite de quais (cf. {@link patternIdOf}). */
+	patternId: string;
+	/** La shape de ses courses — celle de la première rencontrée, s'il devait y en avoir plusieurs. */
+	shapeId: string;
+	stops: OrderedStop[];
+	/** Nombre de courses du GTFS qui l'empruntent, tous services confondus. */
+	tripCount: number;
+};
 
 /**
  * Un arrêt dans l'horaire théorique d'un trip : sa position (stop_sequence), son quai, son abscisse
@@ -69,6 +90,16 @@ export type StaticGtfs = {
 	 * résume pas à un seul parcours, et une plage citée sur une branche resterait introuvable.
 	 */
 	routeStopSequences: Map<string, Map<number, OrderedStop[][]>>;
+	/**
+	 * routeId → directionId → tracés empruntés, du plus long au plus court. Contrairement à
+	 * {@link routeStopSequences}, les services partiels y restent : ce sont des courses à part entière,
+	 * qu'une déviation peut viser ou non.
+	 */
+	routePatterns: Map<string, Map<number, RoutePattern[]>>;
+	/** tripId → identifiant du tracé qu'il emprunte (cf. {@link RoutePattern}). */
+	tripPatterns: Map<string, string>;
+	/** routeId → nom commercial de la ligne (`route_short_name`) : « F7 », « Métro ». */
+	routeNames: Map<string, string>;
 	/** tripId → horaire théorique ordonné (pour réinsérer un arrêt supprimé absent du GTFS-RT). */
 	tripStopSequences: Map<string, TripStop[]>;
 	/**
@@ -340,6 +371,9 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		stopKeyIndex: new Map(),
 		routeDirections: new Map(),
 		routeStopSequences: new Map(),
+		routePatterns: new Map(),
+		tripPatterns: new Map(),
+		routeNames: new Map(),
 		tripStopSequences: new Map(),
 		tripDepartures: new Map(),
 		tripArrivals: new Map(),
@@ -366,6 +400,7 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		const files = unzipSync(buffer, {
 			filter: (file) =>
 				file.name === "stops.txt" ||
+				file.name === "routes.txt" ||
 				file.name === "trips.txt" ||
 				file.name === "stop_times.txt" ||
 				file.name === "shapes.txt" ||
@@ -381,6 +416,7 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		const decoder = new TextDecoder();
 		const { stopNameIndex, stopKeyIndex, idToName, coordinates } = buildStops(decoder.decode(files["stops.txt"]));
 		const { routeDirections, tripMeta, serviceTrips } = buildTrips(decoder.decode(files["trips.txt"]));
+		const routeNames = files["routes.txt"] ? buildRouteNames(decoder.decode(files["routes.txt"])) : new Map();
 		const calendars = files["calendar.txt"] ? buildCalendar(decoder.decode(files["calendar.txt"])) : new Map();
 		const calendarExceptions = files["calendar_dates.txt"]
 			? buildCalendarDates(decoder.decode(files["calendar_dates.txt"]))
@@ -388,12 +424,20 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		const { shapes, scales } = files["shapes.txt"]
 			? buildShapes(decoder.decode(files["shapes.txt"]))
 			: { shapes: new Map<string, ShapePoint[]>(), scales: new Map<string, number>() };
-		const { routeStopSequences, tripStopSequences, tripDepartures, tripArrivals, projectedStops } = files[
-			"stop_times.txt"
-		]
+		const {
+			routeStopSequences,
+			routePatterns,
+			tripPatterns,
+			tripStopSequences,
+			tripDepartures,
+			tripArrivals,
+			projectedStops,
+		} = files["stop_times.txt"]
 			? buildSequences(decoder.decode(files["stop_times.txt"]), tripMeta, idToName, shapes, scales, coordinates)
 			: {
 					routeStopSequences: new Map(),
+					routePatterns: new Map(),
+					tripPatterns: new Map(),
 					tripStopSequences: new Map(),
 					tripDepartures: new Map(),
 					tripArrivals: new Map(),
@@ -422,6 +466,9 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 				stopKeyIndex,
 				routeDirections,
 				routeStopSequences,
+				routePatterns,
+				tripPatterns,
+				routeNames,
 				tripStopSequences,
 				tripDepartures,
 				tripArrivals,
@@ -540,6 +587,26 @@ function indexStopName(
 		stopKeyIndex.set(fuzzyKey, names);
 	}
 	names.add(key);
+}
+
+/** Le nom commercial de chaque ligne. Une ligne sans `route_short_name` n'y figure pas. */
+function buildRouteNames(csv: string): Map<string, string> {
+	const names = new Map<string, string>();
+	const rows = parseCsv(csv);
+	const header = rows.next().value;
+	if (!header) return names;
+
+	const idCol = header.indexOf("route_id");
+	const nameCol = header.indexOf("route_short_name");
+	if (idCol === -1 || nameCol === -1) return names;
+
+	for (const row of rows) {
+		const routeId = row[idCol];
+		const name = row[nameCol]?.trim();
+		if (routeId && name) names.set(routeId, name);
+	}
+
+	return names;
 }
 
 function buildTrips(csv: string): {
@@ -801,6 +868,8 @@ function buildShapes(csv: string): { shapes: Map<string, ShapePoint[]>; scales: 
  * À partir de stop_times, construit :
  *  - `routeStopSequences` : par (routeId, directionId), les itinéraires distincts empruntés — sert
  *    à étendre les plages « de X à Y » ;
+ *  - `routePatterns` et `tripPatterns` : les tracés empruntés, services partiels compris, et celui
+ *    de chaque course — une déviation peut ne viser que certains d'entre eux ;
  *  - `tripStopSequences` : par tripId, l'horaire théorique ordonné — sert à réinsérer un arrêt
  *    supprimé absent du GTFS-RT, avec son stop_sequence, et à situer un véhicule sur sa course ;
  *  - `tripDepartures` et `tripArrivals` : par tripId, le départ du premier arrêt et l'arrivée au
@@ -821,12 +890,16 @@ function buildSequences(
 	stopCoordinates: Map<string, Coordinates>,
 ): {
 	routeStopSequences: Map<string, Map<number, OrderedStop[][]>>;
+	routePatterns: Map<string, Map<number, RoutePattern[]>>;
+	tripPatterns: Map<string, string>;
 	tripStopSequences: Map<string, TripStop[]>;
 	tripDepartures: Map<string, number>;
 	tripArrivals: Map<string, number>;
 	projectedStops: number;
 } {
 	const routeStopSequences = new Map<string, Map<number, OrderedStop[][]>>();
+	const routePatterns = new Map<string, Map<number, RoutePattern[]>>();
+	const tripPatterns = new Map<string, string>();
 	const tripStopSequences = new Map<string, TripStop[]>();
 	const tripDepartures = new Map<string, number>();
 	const tripArrivals = new Map<string, number>();
@@ -834,7 +907,17 @@ function buildSequences(
 
 	const rows = parseCsv(csv);
 	const header = rows.next().value;
-	if (!header) return { routeStopSequences, tripStopSequences, tripDepartures, tripArrivals, projectedStops };
+	if (!header) {
+		return {
+			routeStopSequences,
+			routePatterns,
+			tripPatterns,
+			tripStopSequences,
+			tripDepartures,
+			tripArrivals,
+			projectedStops,
+		};
+	}
 
 	const tripCol = header.indexOf("trip_id");
 	const stopCol = header.indexOf("stop_id");
@@ -843,7 +926,15 @@ function buildSequences(
 	const timeCol = header.indexOf("departure_time");
 	const arrivalCol = header.indexOf("arrival_time");
 	if (tripCol === -1 || stopCol === -1 || seqCol === -1) {
-		return { routeStopSequences, tripStopSequences, tripDepartures, tripArrivals, projectedStops };
+		return {
+			routeStopSequences,
+			routePatterns,
+			tripPatterns,
+			tripStopSequences,
+			tripDepartures,
+			tripArrivals,
+			projectedStops,
+		};
 	}
 
 	// Rangs des arrêts qui ont fourni le départ et l'arrivée retenus pour chaque course : le fichier
@@ -889,9 +980,9 @@ function buildSequences(
 		});
 	}
 
-	// Itinéraires distincts de chaque (route, sens), dédupliqués par suite de quais.
-	const seen = new Map<string, Set<string>>();
-	const variants = new Map<string, OrderedStop[][]>();
+	// Itinéraires distincts de chaque (route, sens), dédupliqués par suite de quais : ce sont les
+	// tracés empruntés, que l'on compte au passage.
+	const patterns = new Map<string, Map<string, RoutePattern>>();
 	// Un même quai revient sur toutes les courses d'une shape : sa projection ne se calcule qu'une fois.
 	const projected = new Map<string, number>();
 
@@ -916,39 +1007,60 @@ function buildSequences(
 		}
 
 		const key = `${meta.routeId}:${meta.directionId}`;
+		const patternId = patternIdOf(stops);
+		tripPatterns.set(tripId, patternId);
 
-		let signatures = seen.get(key);
-		if (signatures === undefined) {
-			signatures = new Set();
-			seen.set(key, signatures);
+		let known = patterns.get(key);
+		if (known === undefined) {
+			known = new Map();
+			patterns.set(key, known);
 		}
-		const signature = stops.map(({ stopId }) => stopId).join(">");
-		if (signatures.has(signature)) continue;
-		signatures.add(signature);
 
-		const ordered = stops.map(({ stopId }) => ({ stopId, name: normalizeStopName(idToName.get(stopId) ?? "") }));
-		let list = variants.get(key);
-		if (list === undefined) {
-			list = [];
-			variants.set(key, list);
+		const pattern = known.get(patternId);
+		if (pattern !== undefined) {
+			pattern.tripCount += 1;
+			continue;
 		}
-		list.push(ordered);
+
+		known.set(patternId, {
+			patternId,
+			shapeId: meta.shapeId,
+			stops: stops.map(({ stopId }) => ({ stopId, name: normalizeStopName(idToName.get(stopId) ?? "") })),
+			tripCount: 1,
+		});
 	}
 
-	for (const [key, list] of variants) {
+	for (const [key, known] of patterns) {
 		const [routeId, direction] = splitSequenceKey(key);
 		const directionId = Number.parseInt(direction, 10);
 		if (Number.isNaN(directionId)) continue;
 
-		let directions = routeStopSequences.get(routeId);
+		const list = [...known.values()].sort((a, b) => b.stops.length - a.stops.length || b.tripCount - a.tripCount);
+
+		let sequences = routeStopSequences.get(routeId);
+		if (sequences === undefined) {
+			sequences = new Map();
+			routeStopSequences.set(routeId, sequences);
+		}
+		sequences.set(directionId, maximalVariants(list.map((pattern) => pattern.stops)));
+
+		let directions = routePatterns.get(routeId);
 		if (directions === undefined) {
 			directions = new Map();
-			routeStopSequences.set(routeId, directions);
+			routePatterns.set(routeId, directions);
 		}
-		directions.set(directionId, maximalVariants(list));
+		directions.set(directionId, list);
 	}
 
-	return { routeStopSequences, tripStopSequences, tripDepartures, tripArrivals, projectedStops };
+	return {
+		routeStopSequences,
+		routePatterns,
+		tripPatterns,
+		tripStopSequences,
+		tripDepartures,
+		tripArrivals,
+		projectedStops,
+	};
 }
 
 /**
@@ -1017,6 +1129,17 @@ export function departureEpoch(secondsFromMidnight: number, nowSeconds: number):
 	}
 
 	return closest;
+}
+
+/**
+ * L'identifiant d'un tracé emprunté : une empreinte de sa suite de quais. Elle ne dépend que des
+ * arrêts, et survit donc à une régénération du GTFS qui ne les touche pas.
+ */
+function patternIdOf(stops: readonly { stopId: string }[]): string {
+	return createHash("sha1")
+		.update(stops.map(({ stopId }) => stopId).join(">"))
+		.digest("hex")
+		.slice(0, 12);
 }
 
 /** Sépare `routeId:directionId` — le routeId porte lui-même des « : » (« TCAR:90 »). */

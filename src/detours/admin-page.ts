@@ -64,6 +64,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	td > a.cell { display: block; margin: -5px -10px; padding: 5px 10px; color: inherit;
 		text-decoration: none; overflow: hidden; text-overflow: ellipsis; }
 	td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+	/* La cellule d'action n'est pas un lien : elle agit sur la ligne au lieu d'ouvrir la déviation. */
+	td.act { text-align: right; }
+	td.act button { padding: 1px 8px; font-size: 12px; }
 	/*
 	 * Le cartouche de la ligne, tel que le réseau le dessine : c'est par lui qu'on cherche dans la
 	 * liste, et il se reconnaît plus vite qu'un numéro. Toutes les lignes n'en ont pas — le numéro en
@@ -198,6 +201,51 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		text-decoration: none; }
 	a.usage:hover { text-decoration: underline; }
 	.usage .toward { margin-left: 2px; }
+	/*
+	 * Le panneau d'une déviation : ce qui défile au-dessus, la barre d'enregistrement en dessous, qui
+	 * reste en vue quelle que soit la longueur du reste. Le fond gris fait ressortir les cartes — une
+	 * par chose qu'on règle : la modification, les arrêts supprimés du sens, les tronçons.
+	 */
+	.panel.editor { width: 440px; padding: 0; display: flex; flex-direction: column; overflow: hidden; }
+	.editor .scroll { flex: 1; overflow-y: auto; padding: 12px; background: var(--bg); }
+	.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+		padding: 12px; margin-bottom: 12px; }
+	.card:last-child { margin-bottom: 0; }
+	.panel .card h2 { margin: 0 0 8px; }
+	/* Ce que couvre une section, dit à côté de son titre : le sens entier, ou le seul tronçon actif. */
+	.card h2 .scopeof { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 6px; }
+	.card h3 { font-size: 13px; font-weight: 600; margin: 14px 0 6px; padding-top: 10px;
+		border-top: 1px solid var(--line); }
+	.card h3.first { border-top: none; padding-top: 0; margin-top: 0; }
+	.heading { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600;
+		margin-bottom: 6px; }
+	.heading .grow { flex: 1; }
+	details > summary { cursor: pointer; color: var(--muted); font-size: 13px; margin: 4px 0; }
+	details[open] > summary { margin-bottom: 6px; }
+	/*
+	 * Les tronçons en onglets, collés au cadre du tronçon actif : tout ce qui est dans le cadre vaut
+	 * pour lui seul. L'onglet actif se fond dans le cadre plutôt que de prendre la couleur d'accent,
+	 * qui reste aux boutons qui agissent.
+	 */
+	.tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+	.tabs button { border-radius: 6px 6px 0 0; margin-bottom: -1px; background: var(--bg); }
+	.tabs button.active { background: var(--panel); color: var(--ink); border-color: var(--line);
+		border-bottom-color: var(--panel); font-weight: 600; position: relative; z-index: 1; }
+	.segment { border: 1px solid var(--line); border-radius: 0 6px 6px 6px; padding: 10px; }
+	/* Les tracés du sens, à cocher ; le nom se clique pour montrer le tracé sur la carte. */
+	.patterns { border: 1px solid var(--line); border-radius: 6px; }
+	.patterns div { display: flex; gap: 8px; align-items: center; padding: 4px 9px;
+		border-bottom: 1px solid var(--line); }
+	.patterns div:last-child { border-bottom: none; }
+	.patterns input { width: auto; flex: none; }
+	.patterns .name { flex: 1; cursor: pointer; }
+	.patterns .name.focused { font-weight: 600; }
+	.patterns .count { color: var(--muted); font-size: 12px; white-space: nowrap; }
+	.savebar { border-top: 1px solid var(--line); padding: 10px 12px; background: var(--panel); }
+	.savebar .actions { margin-top: 0; }
+	.savebar .grow { flex: 1; }
+	.savebar .status { margin: 6px 0 0; }
+	.savebar .status:empty, .savebar .note:empty { display: none; }
 </style>
 </head>
 <body>
@@ -267,80 +315,101 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 <div id="detailView" class="detail hidden">
 	<div id="map"></div>
-	<aside class="panel">
-		<div id="summary"></div>
+	<aside class="panel editor">
+		<div class="scroll">
+			<section class="card" id="summary"></section>
 
-		<h2>Périmètre du sens</h2>
-		<p class="note" id="scopeSummary"></p>
-		<div id="scopePicker"></div>
-		<div class="row" id="scopeActions" style="margin:8px 0 0"></div>
+			<section class="card">
+				<h2>Arrêts supprimés<span class="scopeof">— ligne et sens entiers</span></h2>
+				<p class="note" id="scopeSummary"></p>
+				<div id="scopePicker"></div>
+				<div class="row" id="scopeActions" style="margin:8px 0 0"></div>
+			</section>
 
-		<h2>Tronçons déviés</h2>
-		<div class="row" id="segmentBar"></div>
-		<p class="note" id="segmentNote"></p>
+			<section class="card">
+				<h2>Tronçons</h2>
+				<div class="tabs" id="segmentBar"></div>
+				<div class="segment">
+					<p class="note" id="segmentNote" style="margin-top:0"></p>
 
-		<h2>Bornes du tronçon</h2>
-		<p class="note" id="boundsNote"></p>
-		<div id="boundsWarnings"></div>
-		<div class="field" style="margin-bottom:8px"><label>Premier</label><select id="startStop"></select></div>
-		<div class="field"><label>Dernier</label><select id="endStop"></select></div>
-		<p class="note" id="referenceNote"></p>
-		<div class="field" style="margin-top:8px"><label>Délai propagé</label><input id="propagatedDelay" type="number" step="1" value="0"></div>
-		<p class="note">Secondes ajoutées aux horaires qui suivent le tronçon. 0 si le détour ne rallonge rien.</p>
-		<p class="note" id="tripCount"></p>
+					<h3 class="first">Tracés concernés</h3>
+					<div class="patterns" id="patternList"></div>
+					<p class="note" id="patternNote"></p>
 
-		<div id="stopSection">
-			<h2>Arrêts de substitution</h2>
-			<p class="note" id="travelTimeNote"></p>
-			<div id="stopList"></div>
-			<p class="note" id="stopNote"></p>
-			<button id="addStop">Ajouter un arrêt</button>
-			<div id="stopSearch" class="hidden">
-				<input id="stopQuery" placeholder="Nom de l'arrêt…" autocomplete="off">
-				<div class="results" id="stopResults"></div>
-				<p class="note" id="searchHint"></p>
+					<h3>Bornes</h3>
+					<p class="note" id="boundsNote"></p>
+					<div id="boundsWarnings"></div>
+					<div class="field" style="margin-bottom:8px"><label>Premier</label><select id="startStop"></select></div>
+					<div class="field"><label>Dernier</label><select id="endStop"></select></div>
+					<p class="note" id="referenceNote"></p>
+					<div class="field" style="margin-top:8px"><label>Délai propagé</label><input id="propagatedDelay" type="number" step="1" value="0"></div>
+					<p class="note">Secondes ajoutées aux horaires qui suivent le tronçon. 0 si le détour ne rallonge rien.</p>
+					<p class="note" id="tripCount"></p>
+
+					<div id="stopSection">
+						<h3>Arrêts de substitution</h3>
+						<p class="note" id="travelTimeNote"></p>
+						<div id="stopList"></div>
+						<p class="note" id="stopNote"></p>
+						<button id="addStop">Ajouter un arrêt</button>
+						<div id="stopSearch" class="hidden">
+							<input id="stopQuery" placeholder="Nom de l'arrêt…" autocomplete="off">
+							<div class="results" id="stopResults"></div>
+							<p class="note" id="searchHint"></p>
+						</div>
+					</div>
+
+					<h3>Tracé</h3>
+					<p class="note">Partir d'où la course quitte son itinéraire, et y revenir plus loin — ou
+						s'arrêter à l'écart si la ligne est coupée.</p>
+
+					<details>
+						<summary>Gestes sur la carte</summary>
+						<ul class="hints">
+							<li>Clic : poser un point de passage. Glisser : le déplacer. Alt+clic : le retirer.</li>
+							<li>Clic sur une jambe : y insérer un point. Sa pastille centrale la bascule entre rue et
+								ligne droite.</li>
+							<li>En « suivre les rues », le point posé se recale sur la chaussée : c'est lui qui sera
+								publié, pas le clic.</li>
+							<li>Sens interdits et accès réservés ne sont pas opposés au tracé : l'itinéraire remonte une
+								rue à sens unique si c'est le plus court.</li>
+							<li>La course ne reprend sa ligne que si le tracé l'y ramène. Le finir à l'écart, c'est
+								l'arrêter là : terminus provisoire, ligne coupée.</li>
+						</ul>
+					</details>
+
+					<div class="row"><button id="draw" class="grow">Dessiner</button></div>
+					<div class="field"><label>Trait</label>
+						<div class="segmented">
+							<button id="penRoute">Suivre les rues</button>
+							<button id="penFree">Ligne droite</button>
+						</div>
+					</div>
+					<p class="note" id="penNote"></p>
+
+					<div class="actions divided">
+						<button id="undo">Annuler le dernier point</button>
+						<button id="clearPath" class="danger">Effacer</button>
+					</div>
+					<p class="note" id="pathNote"></p>
+
+					<div class="actions divided" id="segmentFoot">
+						<button id="removeSegment" class="danger">Supprimer ce tronçon</button>
+					</div>
+				</div>
+			</section>
+		</div>
+
+		<footer class="savebar">
+			<p class="note" id="disabledNote" style="margin:0 0 6px"></p>
+			<div class="actions">
+				<button id="save" class="primary">Enregistrer les tronçons</button>
+				<button id="toggleDisabled"></button>
+				<span class="grow"></span>
+				<button id="remove" class="danger">Supprimer la déclaration</button>
 			</div>
-		</div>
-
-		<h2>Tracé du tronçon</h2>
-		<p class="note">Partir d'où la course quitte son itinéraire, et y revenir plus loin — ou
-			s'arrêter à l'écart si la ligne est coupée.</p>
-
-		<ul class="hints">
-			<li>Clic : poser un point de passage. Glisser : le déplacer. Alt+clic : le retirer.</li>
-			<li>Clic sur une jambe : y insérer un point. Sa pastille centrale la bascule entre rue et
-				ligne droite.</li>
-			<li>En « suivre les rues », le point posé se recale sur la chaussée : c'est lui qui sera
-				publié, pas le clic.</li>
-			<li>Sens interdits et accès réservés ne sont pas opposés au tracé : l'itinéraire remonte une
-				rue à sens unique si c'est le plus court.</li>
-			<li>La course ne reprend sa ligne que si le tracé l'y ramène. Le finir à l'écart, c'est
-				l'arrêter là : terminus provisoire, ligne coupée.</li>
-		</ul>
-
-		<div class="row"><button id="draw" class="grow">Dessiner</button></div>
-		<div class="field"><label>Trait</label>
-			<div class="segmented">
-				<button id="penRoute">Suivre les rues</button>
-				<button id="penFree">Ligne droite</button>
-			</div>
-		</div>
-		<p class="note" id="penNote"></p>
-
-		<div class="actions divided">
-			<button id="undo">Annuler le dernier point</button>
-			<button id="clearPath" class="danger">Effacer</button>
-		</div>
-		<p class="note" id="pathNote"></p>
-
-		<h2>Publication</h2>
-		<p class="note" id="disabledNote"></p>
-		<div class="actions">
-			<button id="save" class="primary">Enregistrer</button>
-			<button id="toggleDisabled"></button>
-			<button id="remove" class="danger">Supprimer la déclaration</button>
-		</div>
-		<p class="status" id="status"></p>
+			<p class="status" id="status"></p>
+		</footer>
 	</aside>
 </div>
 
@@ -359,7 +428,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		scopeSelection: null,
 		map: null, base: null, routeLayer: null, otherLayer: null, drawLayer: null, previewLine: null,
 		stopMarkers: [], waypointMarkers: [], legLines: [], legToggles: [], pen: "free",
-		shapes: [], searchTimer: null, countTimer: null,
+		shapes: [], shapeLayers: {}, searchTimer: null, countTimer: null,
+		// Le tracé mis en avant sur la carte, et sur lequel porte l'aperçu : null, c'est le premier que
+		// vise le tronçon actif.
+		focusPattern: null,
 		// Les lecteurs des champs de période : celui de la création, et celui du détail.
 		readNewPeriod: null, readPeriod: null
 	};
@@ -571,7 +643,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 */
 	var COLUMNS = {
 		lineAndSens: { label: "Ligne et sens", cell: function (row) {
-			return lineChip(row.line) + "<span class='toward'>" + escapeHtml(towardOf(row)) + "</span>";
+			return lineChip(row.lineCode, row.line) + "<span class='toward'>" + escapeHtml(towardOf(row)) + "</span>";
 		} },
 		sens: { label: "Sens", cell: function (row) {
 			return "<span class='toward' style='margin-left:0'>" + escapeHtml(towardOf(row)) + "</span>";
@@ -584,7 +656,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			return escapeHtml(describePeriodsShort(row.periods));
 		} },
 		state: { label: "État", cell: stateBadge },
-		declaration: { label: "Déclaration", cell: declarationBadge }
+		declaration: { label: "Déclaration", cell: declarationBadge },
+		remove: { label: "", action: true }
 	};
 
 	/**
@@ -594,10 +667,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 */
 	var GROUPINGS = {
 		line: {
-			columns: [["sens", "24%"], ["alert", "32%"], ["stops", "7%"], ["period", "16%"], ["state", "9%"], ["declaration", "12%"]],
+			columns: [["sens", "22%"], ["alert", "30%"], ["stops", "7%"], ["period", "15%"], ["state", "9%"], ["declaration", "11%"], ["remove", "6%"]],
 			keyOf: function (row) { return row.routeId; },
 			heading: function (rows) {
-				return lineChip(rows[0].line) + "<span class='title' style='margin-left:8px'>Ligne "
+				return lineChip(rows[0].lineCode, rows[0].line) + "<span class='title' style='margin-left:8px'>Ligne "
 					+ escapeHtml(rows[0].line) + "</span><span class='grow'></span>"
 					+ "<span class='note'>" + countLabel(rows) + "</span>";
 			}
@@ -605,8 +678,11 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		alert: {
 			// La période et l'état appartiennent à l'info trafic, pas au sens : ils montent dans le
 			// bandeau, et les lignes n'ont plus à porter six fois la même date.
-			columns: [["lineAndSens", "52%"], ["stops", "16%"], ["declaration", "32%"]],
+			columns: [["lineAndSens", "50%"], ["stops", "14%"], ["declaration", "28%"], ["remove", "8%"]],
 			keyOf: function (row) { return row.alertNumber; },
+			// Le serveur classe par ligne ; une perturbation se traite de bout en bout, et celles en
+			// vigueur passent devant.
+			rank: function (rows) { return rows.some(function (row) { return row.active; }) ? 0 : 1; },
 			heading: function (rows) {
 				var row = rows[0];
 				return perturbationRef(row)
@@ -628,11 +704,14 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 */
 	var PICTO_FALLBACK = "this.parentNode.className=&#39;line plain&#39;;this.parentNode.removeChild(this)";
 
-	/** Le cartouche de la ligne, le numéro en clair derrière lui si l'image ne vient pas. */
-	function lineChip(line) {
+	/**
+	 * Le cartouche de la ligne, son nom commercial en clair derrière lui si l'image ne vient pas. Les
+	 * images portent le bout de l'identifiant (« 07 »), le texte le nom qu'on lit sur le bus (« F7 »).
+	 */
+	function lineChip(code, name) {
 		return "<span class='line'><img alt='' onerror='" + PICTO_FALLBACK + "' src='"
-			+ LINE_CARTRIDGE + encodeURIComponent(line) + ".svg'>"
-			+ "<span class='code'>" + escapeHtml(line) + "</span></span>";
+			+ LINE_CARTRIDGE + encodeURIComponent(code) + ".svg'>"
+			+ "<span class='code'>" + escapeHtml(name) + "</span></span>";
 	}
 
 	function towardOf(row) {
@@ -714,10 +793,14 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			else group.push(row);
 		});
 
+		// Le tri est stable : à rang égal, l'ordre du serveur tient.
+		var ordered = Array.from(groups.values());
+		if (grouping.rank) ordered.sort(function (a, b) { return grouping.rank(a) - grouping.rank(b); });
+
 		var body = el("listBody");
 		body.innerHTML = "";
 
-		groups.forEach(function (rows) {
+		ordered.forEach(function (rows) {
 			var head = document.createElement("tr");
 			head.className = "group";
 			head.innerHTML = "<td colspan='" + grouping.columns.length + "'><div class='bar'>"
@@ -736,14 +819,37 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 				tr.innerHTML = grouping.columns.map(function (column) {
 					var definition = COLUMNS[column[0]];
+					if (definition.action) return "<td class='act'><button class='del danger'>Supprimer</button></td>";
 					return "<td" + (definition.className ? " class='" + definition.className + "'" : "") + ">"
 						+ "<a class='cell' href='" + href + "'>" + definition.cell(row) + "</a></td>";
 				}).join("");
+				tr.querySelector(".del").onclick = function () { dismissRow(row); };
 				body.appendChild(tr);
 			});
 		});
 
 		el("listEmpty").className = visible.length === 0 ? "note" : "note hidden";
+	}
+
+	/**
+	 * Retire une entrée de la liste : l'info trafic ne concerne pas cette ligne dans ce sens. Ce qui a
+	 * été déclaré part avec, et la confirmation le dit. Une modification sans info trafic, elle, est
+	 * effacée : rien ne la ferait revenir.
+	 */
+	function dismissRow(row) {
+		var what = row.line + " " + towardOf(row);
+		var question = row.standalone
+			? "Supprimer la modification sans info trafic sur " + what + ", avec sa période et ses tronçons ?"
+			: "Retirer " + what + " de l'info trafic " + row.alertNumber + " ?\n\n"
+				+ "L'entrée disparaît de la liste"
+				+ (row.declared ? ", avec ses tronçons déclarés" : "")
+				+ (row.manualScope ? " et son périmètre saisi" : "")
+				+ ". Elle se rétablit depuis « Ajouter une ligne concernée ».";
+		if (!confirm(question)) return;
+
+		request(API + "/api/dismissed/" + encodeURIComponent(row.key), { method: "PUT" })
+			.then(loadList)
+			.catch(function (error) { alert(error.message); });
 	}
 
 	function escapeHtml(text) {
@@ -800,16 +906,32 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var row = document.createElement("div");
 		row.className = "dir";
 
-		var what = direction.manual
+		var what = direction.dismissed
+			? '<span class="badge off">retirée</span>'
+			: direction.manual
 			? '<span class="badge warn">périmètre saisi</span>'
 			: direction.scoped
 				? '<span class="badge ok">' + direction.removedStopCount + " supprimés</span>"
 				: '<span class="badge off">hors périmètre</span>';
 
-		row.innerHTML = lineChip(route.line) + "<span class='grow'><span class='toward'>"
+		row.innerHTML = lineChip(route.lineCode, route.line) + "<span class='grow'><span class='toward'>"
 			+ escapeHtml(direction.headsigns.length ? "→ " + direction.headsigns.join(" / ") : "sens " + direction.directionId)
 			+ "</span></span>" + what
 			+ (direction.declared ? ' <span class="badge ok">déclarée</span>' : "");
+
+		// Une entrée retirée se rétablit telle que l'analyse la voit ; la déclarer concernée la
+		// rétablirait aussi, mais avec un périmètre vide à la place de ce que l'analyse y lisait.
+		if (direction.dismissed) {
+			var restore = document.createElement("button");
+			restore.textContent = "Rétablir";
+			restore.onclick = function () {
+				request(API + "/api/dismissed/" + encodeURIComponent(direction.key), { method: "DELETE" })
+					.then(openScopes)
+					.catch(function (error) { alert(error.message); });
+			};
+			row.appendChild(restore);
+			return row;
+		}
 
 		var action = document.createElement("a");
 		action.className = "button";
@@ -897,7 +1019,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		if (stop.usages.length === 0) return "<span class='note'>aucune</span>";
 
 		return stop.usages.map(function (usage) {
-			var what = lineChip(usage.line) + "<span class='toward'>" + escapeHtml(towardOf(usage)) + "</span>";
+			var what = lineChip(usage.lineCode, usage.line) + "<span class='toward'>" + escapeHtml(towardOf(usage)) + "</span>";
 			var title = (usage.standalone ? "Sans info trafic" : "Info trafic " + usage.alertNumber)
 				+ (usage.headerText ? " — " + usage.headerText : "");
 			// Les attributs entre guillemets doubles : ce sont eux qu'échappe escapeHtml, et les intitulés
@@ -1163,14 +1285,18 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 * qu'il y a d'interruptions sur l'itinéraire.
 	 */
 	function adoptSegment(segment) {
+		var patterns = checkedPatterns(segment.patternIds);
 		var adopted = {
+			patterns: patterns,
+			// Des tracés nommés que le GTFS ne connaît plus : on le dit, et on ne les coche pas.
+			stalePatterns: segment.patternIds.length === 0 ? 0 : segment.patternIds.length - patterns.length,
 			startStopId: segment.startStopId, endStopId: segment.endStopId,
 			propagatedDelay: segment.propagatedDelay,
 			stops: segment.stops.map(adoptStop),
 			path: segment.path.map(asPair),
 			waypoints: [], legs: [],
 			publishable: segment.publishable,
-			matchingTrips: segment.matchingTrips
+			tripsByPattern: segment.tripsByPattern || {}
 		};
 
 		adoptDrawing(adopted, (segment.waypoints || []).map(function (waypoint) {
@@ -1239,6 +1365,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	function openDetail(key) {
 		request(API + "/api/detours/" + encodeURIComponent(key)).then(function (detail) {
 			state.active = 0;
+			state.focusPattern = null;
 			// L'accrochage aux rues est ce qu'on veut presque toujours ; le dessin libre reste à un clic.
 			state.pen = detail.roadRouting ? "route" : "free";
 
@@ -1277,9 +1404,126 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	function emptySegment() {
 		return {
+			patterns: checkedPatterns([]), stalePatterns: 0,
 			startStopId: null, endStopId: null, propagatedDelay: 0, stops: [],
-			waypoints: [], legs: [], path: [], matchingTrips: 0
+			waypoints: [], legs: [], path: [], tripsByPattern: {}
 		};
+	}
+
+	// --- tracés empruntés ---
+
+	/**
+	 * Les tracés cochés d'un tronçon, d'après ce que le serveur en retient : aucun tracé nommé veut
+	 * dire tous. L'éditeur, lui, tient toujours la liste explicite — c'est ce que montrent les cases.
+	 */
+	function checkedPatterns(patternIds) {
+		var known = state.detail.patterns.map(function (pattern) { return pattern.patternId; });
+		if (!patternIds || patternIds.length === 0) return known;
+		return patternIds.filter(function (patternId) { return known.indexOf(patternId) !== -1; });
+	}
+
+	/** Les tracés que vise un tronçon, dans l'ordre du serveur — les plus longs d'abord. */
+	function segmentPatterns(segment) {
+		return state.detail.patterns.filter(function (pattern) {
+			return segment.patterns.indexOf(pattern.patternId) !== -1;
+		});
+	}
+
+	/** Deux tronçons peuvent-ils se retrouver sur la même course ? Seulement s'ils visent un même tracé. */
+	function sharePattern(a, b) {
+		return a.patterns.some(function (patternId) { return b.patterns.indexOf(patternId) !== -1; });
+	}
+
+	/** Les courses que le tronçon modifierait : celles des tracés cochés qui desservent ses bornes. */
+	function matchingTrips(segment) {
+		return segment.patterns.reduce(function (total, patternId) {
+			return total + (segment.tripsByPattern[patternId] || 0);
+		}, 0);
+	}
+
+	/** Le tracé mis en avant : celui qu'on a cliqué, sinon le premier que vise le tronçon actif. */
+	function focusedPattern() {
+		var patterns = state.detail.patterns;
+		var clicked = patterns.filter(function (pattern) { return pattern.patternId === state.focusPattern; })[0];
+		return clicked || segmentPatterns(seg())[0] || patterns[0] || null;
+	}
+
+	function renderPatterns() {
+		var segment = seg();
+		var list = el("patternList");
+		var focused = focusedPattern();
+		var bounded = segment.startStopId !== null && segment.endStopId !== null;
+		list.innerHTML = "";
+
+		state.detail.patterns.forEach(function (pattern) {
+			var row = document.createElement("div");
+
+			var input = document.createElement("input");
+			input.type = "checkbox";
+			input.checked = segment.patterns.indexOf(pattern.patternId) !== -1;
+			input.onchange = function () {
+				var index = segment.patterns.indexOf(pattern.patternId);
+				if (input.checked && index === -1) segment.patterns.push(pattern.patternId);
+				if (!input.checked && index !== -1) segment.patterns.splice(index, 1);
+				// L'ordre des cases, pas celui des clics : c'est lui qui départage les tracés ensuite.
+				var chosen = segment.patterns;
+				segment.patterns = state.detail.patterns
+					.map(function (candidate) { return candidate.patternId; })
+					.filter(function (patternId) { return chosen.indexOf(patternId) !== -1; });
+				segment.stalePatterns = 0;
+				renderSegment();
+			};
+
+			var name = document.createElement("span");
+			name.className = focused && focused.patternId === pattern.patternId ? "name focused" : "name";
+			name.textContent = pattern.label;
+			name.onclick = function () {
+				state.focusPattern = pattern.patternId;
+				renderPatterns();
+				styleShapes();
+				renderPath();
+			};
+
+			var count = document.createElement("span");
+			count.className = "count";
+			var trips = segment.tripsByPattern[pattern.patternId] || 0;
+			count.textContent = !bounded ? "" : trips > 0 ? trips + " courses" : "ne dessert pas ces bornes";
+
+			row.appendChild(input);
+			row.appendChild(name);
+			row.appendChild(count);
+			list.appendChild(row);
+		});
+
+		var note = el("patternNote");
+		if (segment.stalePatterns > 0) {
+			note.textContent = segment.stalePatterns + " tracé(s) visé(s) ont disparu du GTFS : cocher ceux que le tronçon vise.";
+			note.style.color = "var(--warn)";
+		} else if (segment.patterns.length === 0) {
+			note.textContent = "Aucun tracé coché : le tronçon ne vise aucune course.";
+			note.style.color = "var(--danger)";
+		} else {
+			note.textContent = "";
+		}
+	}
+
+	/**
+	 * Les itinéraires d'origine sur la carte : ceux que vise le tronçon actif en avant, les autres en
+	 * retrait, et le tracé mis en avant plus épais — c'est sur lui que porte l'aperçu.
+	 */
+	function styleShapes() {
+		var targeted = {};
+		segmentPatterns(seg()).forEach(function (pattern) { targeted[pattern.shapeId] = true; });
+		var focused = focusedPattern();
+
+		Object.keys(state.shapeLayers).forEach(function (shapeId) {
+			var main = focused !== null && focused.shapeId === shapeId;
+			state.shapeLayers[shapeId].setStyle({
+				color: main ? "#57606a" : "#8b949e",
+				weight: main ? 6 : 4,
+				opacity: targeted[shapeId] || main ? .7 : .2
+			});
+		});
 	}
 
 	// --- tronçons ---
@@ -1288,6 +1532,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	function renderSegment() {
 		renderPen();
 		renderSegments();
+		renderPatterns();
+		styleShapes();
 		renderBounds();
 		renderStops();
 		renderPath();
@@ -1299,14 +1545,15 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 * bornes comprises — porte-t-elle un arrêt que le périmètre déclare supprimé ? Sinon le véhicule
 	 * passe ailleurs entre deux arrêts qu'il dessert toujours, et seul le tracé sera publié.
 	 *
-	 * Même règle que le serveur (cf. removesStops), sur les itinéraires que le détail porte.
+	 * Même règle que le serveur (cf. removesStops), sur les tracés que le tronçon vise.
 	 */
 	function removesStops(segment) {
 		if (segment.startStopId === null || segment.endStopId === null) return false;
 		if (state.detail.removedStopIds.length === 0) return false;
 
 		var removed = false;
-		state.detail.sequences.forEach(function (sequence) {
+		segmentPatterns(segment).forEach(function (pattern) {
+			var sequence = pattern.sequence;
 			var start = -1, end = -1;
 			sequence.forEach(function (stop, index) {
 				if (stop.stopId === segment.startStopId && start === -1) start = index;
@@ -1329,6 +1576,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			var what = segment.stops.length > 0 ? segment.stops.length + " arrêts"
 				: segment.path.length >= 2 ? (removesStops(segment) ? "tracé seul" : "chemin")
 				: "vide";
+			// Un tronçon qui ne vise qu'une partie des tracés le dit dès l'onglet : c'est ce qui distingue
+			// deux tronçons aux mêmes bornes.
+			var total = state.detail.patterns.length;
+			if (segment.patterns.length < total) what += " · " + segment.patterns.length + "/" + total + " tracés";
 			button.textContent = "Tronçon " + (index + 1) + " · " + what;
 			button.className = index === state.active ? "active" : "";
 			button.onclick = function () { selectSegment(index); };
@@ -1336,23 +1587,14 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		});
 
 		var add = document.createElement("button");
-		add.textContent = "Ajouter un tronçon";
+		add.textContent = "+ Ajouter";
 		add.onclick = function () {
 			state.segments.push(emptySegment());
 			selectSegment(state.segments.length - 1);
 		};
 		bar.appendChild(add);
 
-		if (state.segments.length > 1) {
-			var remove = document.createElement("button");
-			remove.className = "danger";
-			remove.textContent = "Supprimer ce tronçon";
-			remove.onclick = function () {
-				state.segments.splice(state.active, 1);
-				selectSegment(Math.min(state.active, state.segments.length - 1));
-			};
-			bar.appendChild(remove);
-		}
+		el("segmentFoot").className = state.segments.length > 1 ? "actions divided" : "actions divided hidden";
 
 		// À un seul tronçon il n'y a rien à dire : la barre le montre déjà.
 		el("segmentNote").textContent = state.segments.length === 1
@@ -1362,6 +1604,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	function selectSegment(index) {
 		state.active = index;
+		state.focusPattern = null;
 		setMode("idle");
 		renderSegment();
 	}
@@ -1376,11 +1619,13 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 * théorique d'aucune course de la ligne.
 	 */
 	function renderTripCount() {
-		var count = seg().matchingTrips;
+		var count = matchingTrips(seg());
 		var note = el("tripCount");
-		note.textContent = count === 0
-			? "Aucune course ne dessert ces bornes : ce tronçon ne sera pas publié."
-			: count + " courses concernées d'ici la fin du service.";
+		note.textContent = count > 0
+			? count + " courses concernées d'ici la fin du service."
+			: seg().patterns.length === 0
+				? "Aucun tracé coché : ce tronçon ne sera pas publié."
+				: "Aucune course des tracés cochés ne dessert ces bornes : ce tronçon ne sera pas publié.";
 		note.style.color = count === 0 ? "var(--danger)" : "var(--muted)";
 	}
 
@@ -1391,8 +1636,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	function refreshTripCount() {
 		var segment = seg();
 		if (segment.startStopId === null || segment.endStopId === null) {
-			segment.matchingTrips = 0;
+			segment.tripsByPattern = {};
 			renderTripCount();
+			renderPatterns();
 			return;
 		}
 
@@ -1400,9 +1646,13 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		state.countTimer = setTimeout(function () {
 			var url = API + "/api/detours/" + encodeURIComponent(state.detail.key) + "/trip-count"
 				+ "?start=" + encodeURIComponent(segment.startStopId) + "&end=" + encodeURIComponent(segment.endStopId);
+			// Le compte revient par tracé, qu'il soit coché ou non : cocher ou décocher n'a alors plus
+			// rien à redemander, et chaque case dit si son tracé dessert ces bornes.
 			request(url).then(function (answer) {
-				segment.matchingTrips = answer.matchingTrips;
-				if (seg() === segment) renderTripCount();
+				segment.tripsByPattern = answer.tripsByPattern;
+				if (seg() !== segment) return;
+				renderTripCount();
+				renderPatterns();
 			}).catch(function (error) { setStatus(error.message, "error"); });
 		}, 150);
 	}
@@ -1412,8 +1662,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	/** Le libellé d'un arrêt de la ligne, d'après les itinéraires que le détail porte. */
 	function stopNameOf(stopId) {
 		var found = stopId;
-		state.detail.sequences.forEach(function (sequence) {
-			sequence.forEach(function (stop) { if (stop.stopId === stopId) found = stop.name; });
+		state.detail.patterns.forEach(function (pattern) {
+			pattern.sequence.forEach(function (stop) { if (stop.stopId === stopId) found = stop.name; });
 		});
 		return found;
 	}
@@ -1530,22 +1780,26 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	function renderSummary() {
 		var detail = state.detail;
-		var heading = "<h2 style='display:flex;align-items:center;gap:8px'>" + lineChip(detail.line)
-			+ "<span>" + escapeHtml(detail.line + " " + towardOf(detail)) + "</span>" + stateBadge(detail) + "</h2>";
+		var heading = "<div class='heading'>" + lineChip(detail.lineCode, detail.line)
+			+ "<span>" + escapeHtml(detail.line + " " + towardOf(detail)) + "</span><span class='grow'></span>"
+			+ stateBadge(detail) + "</div>";
 
 		if (!detail.standalone) {
+			// Le texte de l'info trafic est long, plans compris : il se déplie à la demande, et ne
+			// repousse pas les tronçons hors de vue à chaque ouverture.
 			el("summary").innerHTML = heading +
-				"<p><strong>" + escapeHtml(detail.headerText) + "</strong></p>" +
-				"<div class='richtext'>" + detail.descriptionHtml + "</div>" +
-				"<p class='note'>Info trafic " + detail.alertNumber + " · " + escapeHtml(describePeriods(detail.periods)) + "</p>";
+				"<p style='margin:0 0 4px'><span class='ref'>" + escapeHtml(detail.alertNumber) + "</span>"
+					+ "<strong>" + escapeHtml(detail.headerText) + "</strong></p>" +
+				"<p class='note' style='margin:0'>" + escapeHtml(describePeriods(detail.periods)) + "</p>" +
+				"<details><summary>Texte de l'info trafic</summary><div class='richtext'>" + detail.descriptionHtml + "</div></details>";
 			state.readPeriod = null;
 			return;
 		}
 
 		// Sans info trafic, c'est ici que vivent l'intitulé et la période : ils se reprennent sur place.
 		el("summary").innerHTML = heading +
-			"<p>" + perturbationRef(detail) + "<strong>" + escapeHtml(detail.headerText) + "</strong></p>" +
-			"<h2>Période d'application</h2><div class='form' id='periodEditor'></div>" +
+			"<p style='margin:0'>" + perturbationRef(detail) + "<strong>" + escapeHtml(detail.headerText) + "</strong></p>" +
+			"<h3>Période d'application</h3><div class='form' id='periodEditor'></div>" +
 			"<div class='row'><button id='savePeriod'>Enregistrer la période</button></div>";
 
 		state.readPeriod = periodFields(el("periodEditor"), detail.period);
@@ -1607,11 +1861,14 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		}).catch(function (error) { setStatus(error.message, "error"); });
 	}
 
-	/** Tous les arrêts de la ligne/sens, dédoublonnés, dans l'ordre du premier itinéraire qui les voit. */
-	function routeStops() {
+	/**
+	 * Les arrêts de ces tracés — de tous ceux du sens, à défaut —, dédoublonnés, dans l'ordre du premier
+	 * tracé qui les voit.
+	 */
+	function routeStops(patterns) {
 		var seen = {}, stops = [];
-		state.detail.sequences.forEach(function (sequence) {
-			sequence.forEach(function (stop) {
+		(patterns || state.detail.patterns).forEach(function (pattern) {
+			pattern.sequence.forEach(function (stop) {
 				if (seen[stop.stopId]) return;
 				seen[stop.stopId] = true;
 				stops.push(stop);
@@ -1622,12 +1879,14 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	/**
 	 * L'arrêt d'où se comptent les temps de parcours : celui qui précède la borne amont sur le premier
-	 * itinéraire qui la dessert. Rien lorsque la borne ouvre l'itinéraire — la référence est alors
-	 * cette borne même, et les temps peuvent être négatifs.
+	 * des tracés visés qui la dessert. Rien lorsque la borne ouvre l'itinéraire — la référence est
+	 * alors cette borne même, et les temps peuvent être négatifs.
 	 */
-	function referenceOf(startStopId) {
+	function referenceOf(segment) {
+		var startStopId = segment.startStopId;
 		var found = null;
-		state.detail.sequences.forEach(function (sequence) {
+		segmentPatterns(segment).forEach(function (pattern) {
+			var sequence = pattern.sequence;
 			if (found !== null) return;
 			for (var index = 0; index < sequence.length; index += 1) {
 				if (sequence[index].stopId !== startStopId) continue;
@@ -1640,7 +1899,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	function renderBounds() {
 		var segment = seg();
-		var stops = routeStops();
+		var stops = routeStops(segmentPatterns(segment));
 
 		// Les bornes désignent les courses dans tous les cas — celles dont l'horaire porte les deux, dans
 		// l'ordre. Ce qu'elles disent de plus dépend du périmètre : des arrêts supprimés, ou les deux
@@ -1669,11 +1928,22 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				select.appendChild(option);
 			});
 
+			// Une borne qu'aucun tracé coché ne dessert reste affichée : elle est toujours enregistrée, et
+			// la laisser disparaître de la liste ferait croire qu'elle a été vidée.
+			var current = segment[pair[1]];
+			if (current && !stops.some(function (stop) { return stop.stopId === current; })) {
+				var stray = document.createElement("option");
+				stray.value = current;
+				stray.textContent = "⚠ " + stopNameOf(current) + " (hors des tracés cochés)";
+				select.appendChild(stray);
+			}
+
 			select.value = segment[pair[1]] || "";
 			select.onchange = function (event) {
 				segment[pair[1]] = event.target.value || null;
 				renderBounds();
 				renderStops();
+				renderSegments();
 				refreshTripCount();
 			};
 		});
@@ -1709,7 +1979,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	function referenceNote(segment) {
 		if (segment.startStopId === null) return "Choisir la borne amont pour connaître l'arrêt de référence.";
 
-		var reference = referenceOf(segment.startStopId);
+		var reference = referenceOf(segment);
 		if (!reference) return "Temps comptés depuis <strong>le premier arrêt de la course</strong> : ils peuvent être négatifs.";
 
 		var note = "Temps comptés depuis l'arrivée à <strong>" + escapeHtml(reference.name) + "</strong>.";
@@ -1720,7 +1990,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var upstream = mergedInto(segment);
 		if (upstream === null) return note;
 
-		var root = referenceOf(state.segments[upstream].startStopId);
+		var root = referenceOf(state.segments[upstream]);
 		return note + " Il suit le tronçon " + (upstream + 1) + " : à la publication les deux n'en feront qu'un, "
 			+ "et ces temps seront recomptés depuis <strong>" + escapeHtml(root ? root.name : "le premier arrêt de la course")
 			+ "</strong>.";
@@ -1737,12 +2007,13 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 		for (var guard = 0; guard < state.segments.length; guard += 1) {
 			if (current.startStopId === null) return found;
-			var reference = referenceOf(current.startStopId);
+			var reference = referenceOf(current);
 			if (!reference) return found;
 
+			// Seul un tronçon qui court sur les mêmes courses peut en absorber un autre.
 			var index = -1;
 			state.segments.forEach(function (other, rank) {
-				if (other !== current && other.endStopId === reference.stopId) index = rank;
+				if (other !== current && other.endStopId === reference.stopId && sharePattern(other, current)) index = rank;
 			});
 			if (index === -1) return found;
 
@@ -1765,9 +2036,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	}
 
 	/**
-	 * Met un arrêt en lumière : un large anneau autour de lui, et son nom. La carte ne se déplace que
-	 * s'il est hors de vue — et alors juste assez pour l'y faire entrer : un survol ne doit pas faire
-	 * perdre ce qu'on regardait.
+	 * Met un arrêt en lumière : un large anneau autour de lui, et son nom, au centre de la carte. Le
+	 * zoom ne bouge pas : on voit l'arrêt au milieu de ce qu'on regardait, et non en bordure.
 	 */
 	function highlightStop(map, stop) {
 		clearHighlight();
@@ -1779,7 +2049,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		}).bindTooltip(stop.name, { permanent: true, direction: "top", offset: [0, -14] }).addTo(map);
 
 		state.highlight = { map: map, marker: marker };
-		map.panInside(at, { padding: [40, 40] });
+		map.panTo(at);
 	}
 
 	function clearHighlight() {
@@ -1802,6 +2072,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		state.base.clearLayers();
 		state.routeLayer.clearLayers();
 		state.shapes = [];
+		state.shapeLayers = {};
 
 		var bounds = [];
 
@@ -1811,7 +2082,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		state.detail.shapes.forEach(function (shape) {
 			var points = decodePolyline(shape.encodedPolyline);
 			state.shapes.push({ shapeId: shape.shapeId, points: points });
-			L.polyline(points, { color: "#8b949e", weight: 4, opacity: .7 }).addTo(state.base);
+			state.shapeLayers[shape.shapeId] = L.polyline(points, { color: "#8b949e", weight: 4, opacity: .7 }).addTo(state.base);
 			bounds = bounds.concat(points);
 		});
 
@@ -1977,7 +2248,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		// subsistent d'un périmètre précédent — il faut alors pouvoir les retirer.
 		el("stopSection").className = removesStops(seg()) || seg().stops.length > 0 ? "" : "hidden";
 
-		var reference = seg().startStopId === null ? null : referenceOf(seg().startStopId);
+		var reference = seg().startStopId === null ? null : referenceOf(seg());
 		var from = "Secondes depuis l'arrivée à " + (reference ? reference.name : "l'arrêt de départ de la course");
 		el("travelTimeNote").innerHTML = referenceNote(seg()) + " En <code>mm:ss</code> ou en secondes, croissants.";
 
@@ -2351,7 +2622,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		}
 
 		var text = (segment.waypoints.length === 0 ? "Aucun tracé ici. En bleu" : counted + ". En bleu")
-			+ ", le trajet publié — ";
+			+ ", le trajet publié"
+			+ (preview.pattern !== null && state.detail.patterns.length > 1 ? " sur « " + preview.pattern.label + " »" : "")
+			+ " — ";
 		text += preview.rejoined
 			? "il revient sur l'itinéraire."
 			: "il s'achève au dernier tracé, en terminus provisoire.";
@@ -2441,20 +2714,25 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 * TOUS les tronçons y entrent, dans l'ordre où la course les rencontre et non dans celui où ils ont
 	 * été saisis : c'est un seul trajet qui sera publié pour la course.
 	 *
-	 * Le premier itinéraire du sens sert de référence pour l'affichage ; le serveur, lui, recoud dans
-	 * chacun de ceux qu'empruntent les courses visées. La prévisualisation se contente des sommets —
-	 * le serveur projette sur les segments — mais elle suffit à juger des raccords.
+	 * L'aperçu porte sur le tracé mis en avant, et n'y coud que les tronçons qui le visent ; le
+	 * serveur, lui, recoud dans chacun de ceux qu'empruntent les courses visées. La prévisualisation se
+	 * contente des sommets — le serveur projette sur les segments — mais elle suffit à juger des
+	 * raccords.
 	 *
 	 * Renvoie l'écart maximal aux points de divergence, en mètres, et de quoi rédiger la note ; ou null
 	 * s'il n'y avait rien à prévisualiser.
 	 */
 	function drawPreview() {
-		var shape = state.shapes[0];
+		var pattern = focusedPattern();
+		var shape = pattern === null ? state.shapes[0] : state.shapes.filter(function (candidate) {
+			return candidate.shapeId === pattern.shapeId;
+		})[0];
 		if (!shape || shape.points.length < 2) return null;
 
 		var drawn = [];
 		state.segments.forEach(function (segment) {
 			if (segment.path.length < 2) return;
+			if (pattern !== null && segment.patterns.indexOf(pattern.patternId) === -1) return;
 			var from = nearestIndex(shape.points, segment.path[0]);
 			var to = nearestIndex(shape.points, segment.path[segment.path.length - 1]);
 			// Reprend-on l'itinéraire ? Seulement si le tracé y ramène : cf. spliceShape, côté serveur.
@@ -2481,7 +2759,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		state.previewLine = L.polyline(preview, { color: "#1f6feb", weight: 3, opacity: .9, dashArray: "6 4" })
 			.addTo(state.base);
 
-		return { offset: offset, rejoined: open, unreachable: unreachable };
+		return { offset: offset, rejoined: open, unreachable: unreachable, pattern: pattern };
 	}
 
 	/** Le sommet le plus proche d'un point, et son écart approché en mètres. */
@@ -2504,9 +2782,19 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	}
 
 	function save() {
+		// Aucun tracé coché s'enverrait comme une liste vide, que le serveur lit « tous » : c'est le
+		// seul cas qu'on refuse avant d'envoyer.
+		var unchecked = state.segments.map(function (segment) { return segment.patterns.length === 0; }).indexOf(true);
+		if (unchecked !== -1) {
+			setStatus("Tronçon " + (unchecked + 1) + " : cocher au moins un tracé.", "error");
+			return;
+		}
+
+		var total = state.detail.patterns.length;
 		var payload = {
 			segments: state.segments.map(function (segment) {
 				return {
+					patternIds: segment.patterns.length === total ? [] : segment.patterns,
 					startStopId: segment.startStopId,
 					endStopId: segment.endStopId,
 					propagatedDelay: segment.propagatedDelay,
@@ -2537,7 +2825,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			// et le nommer évite de les passer tous en revue.
 			var blocking = -1;
 			state.segments.forEach(function (segment, index) {
-				if (blocking === -1 && (!segment.publishable || segment.matchingTrips === 0)) blocking = index;
+				if (blocking === -1 && (!segment.publishable || matchingTrips(segment) === 0)) blocking = index;
 			});
 
 			var message;
@@ -2547,7 +2835,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				var segment = state.segments[blocking];
 				var why = segment.startStopId === null || segment.endStopId === null
 					? "bornes manquantes."
-					: segment.matchingTrips === 0 ? "aucune course ne dessert ses bornes."
+					: matchingTrips(segment) === 0 ? "aucune course des tracés cochés ne dessert ses bornes."
 					: removesStops(segment) ? "ni arrêt ni tracé."
 					: "tracé manquant.";
 				message = "Enregistré. Tronçon " + (blocking + 1) + " : " + why;
@@ -2595,6 +2883,11 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		renderSegments();
 	};
 	el("save").onclick = save;
+	el("removeSegment").onclick = function () {
+		if (state.segments.length < 2) return;
+		state.segments.splice(state.active, 1);
+		selectSegment(Math.min(state.active, state.segments.length - 1));
+	};
 	el("toggleDisabled").onclick = toggleDisabled;
 	el("remove").onclick = remove;
 	el("create").onclick = createModification;

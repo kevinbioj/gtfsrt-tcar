@@ -35,6 +35,8 @@ type Candidate = {
 	alertId: string | null;
 	routeId: string;
 	directionId: number;
+	/** Les tracés visés, ou `null` pour tous (cf. `DetourSegment.patternIds`). */
+	patternIds: ReadonlySet<string> | null;
 	startStopId: string;
 	endStopId: string;
 	propagatedDelay: number;
@@ -149,13 +151,14 @@ export function buildDetourEntities(
 				const schedule = gtfs.tripStopSequences.get(tripId);
 				if (schedule === undefined) continue;
 
-				const matched = matchOnTrip(applicable, schedule);
+				const matched = matchOnTrip(applicable, schedule, gtfs.tripPatterns.get(tripId));
 				if (matched.length === 0) continue;
 
 				// Les deux natures de tronçon se séparent ici, et ne se revoient qu'au tracé. Un tronçon
 				// qui ne supprime rien n'a pas de `Modification` à replier avec les autres : il n'en
 				// produit aucune, et ce qu'il dessine se coud dans la shape comme le reste.
 				const resolved = mergeOverlaps(
+					gtfs,
 					matched.filter((entry) => entry.candidate.removes),
 					schedule,
 					problems,
@@ -233,8 +236,10 @@ export function buildDetourEntities(
 		for (const candidate of list) {
 			if (applied.has(candidate.label)) continue;
 			problems.add(
-				`${candidate.label} — aucune course de ${lineOf(candidate.routeId)} sens ${candidate.directionId} ne ` +
-					`dessert ${candidate.startStopId} puis ${candidate.endStopId} d'ici la fin du service : vérifier les bornes.`,
+				`${candidate.label} — aucune course de ${lineOf(gtfs, candidate.routeId)} sens ${candidate.directionId} ` +
+					(candidate.patternIds === null ? "" : `sur ${[...candidate.patternIds].join(", ")} `) +
+					`ne dessert ${candidate.startStopId} puis ${candidate.endStopId} d'ici la fin du service : ` +
+					(candidate.patternIds === null ? "vérifier les bornes." : "vérifier les bornes et les tracés visés."),
 			);
 		}
 	}
@@ -260,8 +265,9 @@ export function buildDetourEntities(
 
 /**
  * Le nombre de courses qu'un tronçon modifierait avec ces bornes, toutes journées de service
- * confondues. L'interface s'en sert pour le dire AVANT l'enregistrement : des bornes que l'horaire
- * théorique ne porte pas ne sélectionnent rien, et le tronçon n'entre alors pas dans le feed.
+ * confondues, par tracé emprunté. L'interface s'en sert pour le dire AVANT l'enregistrement : des
+ * bornes que l'horaire théorique ne porte pas ne sélectionnent rien, et le tronçon n'entre alors pas
+ * dans le feed. Le détail par tracé dit en plus lesquels desservent ces bornes.
  */
 export function countSelectableTrips(
 	gtfs: StaticGtfs,
@@ -270,8 +276,8 @@ export function countSelectableTrips(
 	startStopId: string,
 	endStopId: string,
 	nowSeconds: number,
-): number {
-	let count = 0;
+): Map<string, number> {
+	const counts = new Map<string, number>();
 
 	for (const day of serviceDays(gtfs, CANDIDATE_DAYS)) {
 		for (const serviceId of day.services) {
@@ -283,12 +289,16 @@ export function countSelectableTrips(
 				if (arrival === undefined || day.midnight + arrival < nowSeconds) continue;
 
 				const schedule = gtfs.tripStopSequences.get(tripId);
-				if (schedule !== undefined && boundsOn(schedule, startStopId, endStopId) !== undefined) count += 1;
+				const patternId = gtfs.tripPatterns.get(tripId);
+				if (schedule === undefined || patternId === undefined) continue;
+				if (boundsOn(schedule, startStopId, endStopId) === undefined) continue;
+
+				counts.set(patternId, (counts.get(patternId) ?? 0) + 1);
 			}
 		}
 	}
 
-	return count;
+	return counts;
 }
 
 // ---
@@ -378,6 +388,7 @@ function collectCandidates(
 				alertId: scope.alertId,
 				routeId: record.routeId,
 				directionId: record.directionId,
+				patternIds: segment.patternIds.length === 0 ? null : new Set(segment.patternIds),
 				startStopId,
 				endStopId,
 				propagatedDelay: removes ? segment.propagatedDelay : 0,
@@ -398,12 +409,17 @@ function collectCandidates(
  *
  * Un tronçon n'est retenu que si l'horaire porte ses DEUX bornes, dans l'ordre : c'est ce qui écarte
  * les branches et les services partiels qui ne passent pas par le segment dévié, sans avoir à les
- * deviner.
+ * deviner. S'il nomme des tracés, la course doit en plus emprunter l'un d'eux.
  */
-function matchOnTrip(candidates: readonly Candidate[], schedule: TripStop[]): Applicable[] {
+function matchOnTrip(
+	candidates: readonly Candidate[],
+	schedule: TripStop[],
+	patternId: string | undefined,
+): Applicable[] {
 	const matched: Applicable[] = [];
 
 	for (const candidate of candidates) {
+		if (candidate.patternIds !== null && (patternId === undefined || !candidate.patternIds.has(patternId))) continue;
 		const bounds = boundsOn(schedule, candidate.startStopId, candidate.endStopId);
 		if (bounds !== undefined) matched.push({ candidate, ...bounds });
 	}
@@ -442,7 +458,12 @@ function boundsOn(
  * substitution bout à bout, additionne les délais propagés, et REBASE les temps du second sur la
  * référence du premier — la seule qui survive.
  */
-function mergeOverlaps(matched: Applicable[], schedule: TripStop[], problems: Set<string>): Modification[] {
+function mergeOverlaps(
+	gtfs: StaticGtfs,
+	matched: Applicable[],
+	schedule: TripStop[],
+	problems: Set<string>,
+): Modification[] {
 	const merged: Modification[] = [];
 
 	for (const { candidate, startIndex, endIndex } of matched) {
@@ -471,7 +492,7 @@ function mergeOverlaps(matched: Applicable[], schedule: TripStop[], problems: Se
 		// probablement la même perturbation, et leurs délais propagés se comptent alors deux fois.
 		if (startIndex <= previous.endIndex) {
 			problems.add(
-				`${previous.parts.join("+")} et ${candidate.label} se recouvrent sur ${lineOf(candidate.routeId)} sens ` +
+				`${previous.parts.join("+")} et ${candidate.label} se recouvrent sur ${lineOf(gtfs, candidate.routeId)} sens ` +
 					`${candidate.directionId} : fusionnés en une seule modification. À ressaisir en un seul tronçon.`,
 			);
 		}
@@ -634,9 +655,9 @@ function report(
 	for (const problem of problems) console.warn(`\t✘ ${problem}`);
 }
 
-/** Le libellé de ligne que porte un identifiant de route (« TCAR:07 » → « 07 »). */
-function lineOf(routeId: string): string {
-	return routeId.split(":").at(-1) ?? routeId;
+/** Le nom commercial de la ligne (« TCAR:07 » → « F7 »), ou à défaut le bout de son identifiant. */
+function lineOf(gtfs: StaticGtfs, routeId: string): string {
+	return gtfs.routeNames.get(routeId) ?? routeId.split(":").at(-1) ?? routeId;
 }
 
 /** La part distinctive d'un identifiant d'itinéraire, pour en dériver celui du tracé recousu. */

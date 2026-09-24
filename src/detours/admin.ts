@@ -9,13 +9,13 @@ import {
 	hasEnded,
 	isActive,
 } from "../gtfs-rt/use-service-alerts.js";
-import { normalizeStopName, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
+import { normalizeStopName, type RoutePattern, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
 import type { RoadGraph, RoadGraphHandle } from "../routing/road-graph.js";
 import { routeOnRoad } from "../routing/route-on-road.js";
 import { encodePolyline } from "../utils/encode-polyline.js";
 import { sanitizeHtml } from "../utils/sanitize-html.js";
 import { ADMIN_PAGE } from "./admin-page.js";
-import { deduceBounds, overlappingSegments, removesStops } from "./bounds.js";
+import { deduceBounds, overlappingSegments, removesStops, type SegmentScope, targets } from "./bounds.js";
 import { countSelectableTrips } from "./build-entities.js";
 import {
 	type DetourInput,
@@ -71,7 +71,7 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 	admin.get("/", (c) => c.html(ADMIN_PAGE));
 
 	admin.get("/api/detours", (c) => {
-		const scopes = [...deps.serviceAlerts.alertScopes.values()].sort(compareScopes);
+		const scopes = [...deps.serviceAlerts.alertScopes.values()].sort((a, b) => compareScopes(a, b, deps.gtfs.data));
 		return c.json(scopes.map((scope) => summarize(scope, deps)));
 	});
 
@@ -188,23 +188,27 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 			headerText: alert.headerText,
 			periods: alert.periods,
 			active: isActive(alert.periods, now),
-			routes: alert.routeIds.map((routeId) => ({
-				routeId,
-				line: routeId.split(":").at(-1),
-				directions: (gtfs.routeDirections.get(routeId) ?? []).map((direction) => {
-					const key = detourKey(alert.alertNumber, routeId, direction.directionId);
-					const scope = deps.serviceAlerts.alertScopes.get(key);
-					return {
-						key,
-						directionId: direction.directionId,
-						headsigns: direction.headsigns,
-						scoped: scope !== undefined,
-						manual: deps.store.scopeOverrides.has(key),
-						removedStopCount: scope?.removedStopIds.size ?? 0,
-						declared: deps.store.records.has(key),
-					};
-				}),
-			})),
+			routes: [...alert.routeIds]
+				.sort((a, b) => compareLines(gtfs, a, b))
+				.map((routeId) => ({
+					routeId,
+					line: lineName(gtfs, routeId),
+					lineCode: lineCode(routeId),
+					directions: (gtfs.routeDirections.get(routeId) ?? []).map((direction) => {
+						const key = detourKey(alert.alertNumber, routeId, direction.directionId);
+						const scope = deps.serviceAlerts.alertScopes.get(key);
+						return {
+							key,
+							directionId: direction.directionId,
+							headsigns: direction.headsigns,
+							scoped: scope !== undefined,
+							manual: deps.store.scopeOverrides.has(key),
+							dismissed: deps.store.dismissedScopes.has(key),
+							removedStopCount: scope?.removedStopIds.size ?? 0,
+							declared: deps.store.records.has(key),
+						};
+					}),
+				})),
 		}));
 
 		return c.json(alerts);
@@ -277,18 +281,56 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		return c.json({ code: 200, message: "Périmètre rendu à l'analyse." });
 	});
 
+	/**
+	 * Retire une entrée de la liste : l'info trafic ne concerne pas cette ligne dans ce sens, quoi
+	 * qu'en dise l'analyse. Sa déclaration, son périmètre saisi et sa désactivation partent avec.
+	 *
+	 * Une modification sans info trafic n'a pas d'analyse qui la ferait revenir : la retirer, c'est
+	 * l'effacer tout entière, comme depuis son détail.
+	 */
+	admin.put("/api/dismissed/:key", (c) => {
+		const scope = deps.serviceAlerts.alertScopes.get(c.req.param("key"));
+		if (scope === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
+
+		const uid = scope.standalone ? standaloneUid(scope.alertNumber) : undefined;
+		if (uid !== undefined) deps.store.removeStandalone(uid);
+		else deps.store.dismiss(scope.alertNumber, scope.routeId, scope.directionId, Math.floor(Date.now() / 1000));
+
+		deps.reindexAlerts();
+		deps.rebuild();
+		return c.json({ code: 200, message: uid !== undefined ? "Modification supprimée." : "Entrée retirée." });
+	});
+
+	/** Rétablit une entrée retirée : l'analyse en redit ce qu'elle voit, ou rien si elle n'y voit rien. */
+	admin.delete("/api/dismissed/:key", (c) => {
+		const target = parseKey(c.req.param("key"), deps);
+		if ("message" in target) return c.json({ code: 400, message: target.message }, 400);
+
+		if (!deps.store.restore(target.alertNumber, target.routeId, target.directionId)) {
+			return c.json({ code: 404, message: "Cette ligne et ce sens n'ont pas été retirés." }, 404);
+		}
+
+		deps.reindexAlerts();
+		deps.rebuild();
+		return c.json({ code: 200, message: "Entrée rétablie." });
+	});
+
 	/** Les lignes du réseau et leurs sens : de quoi choisir où porte une modification sans info trafic. */
 	admin.get("/api/routes", (c) => {
-		const routes = [...deps.gtfs.data.routeDirections].map(([routeId, directions]) => ({
-			routeId,
-			line: routeId.split(":").at(-1) ?? routeId,
-			directions: directions.map((direction) => ({
-				directionId: direction.directionId,
-				headsigns: direction.headsigns,
-			})),
-		}));
+		const gtfs = deps.gtfs.data;
+		const routes = [...gtfs.routeDirections]
+			.sort(([a], [b]) => compareLines(gtfs, a, b))
+			.map(([routeId, directions]) => ({
+				routeId,
+				line: lineName(gtfs, routeId),
+				lineCode: lineCode(routeId),
+				directions: directions.map((direction) => ({
+					directionId: direction.directionId,
+					headsigns: direction.headsigns,
+				})),
+			}));
 
-		return c.json(routes.sort((a, b) => a.line.localeCompare(b.line, "fr", { numeric: true })));
+		return c.json(routes);
 	});
 
 	/**
@@ -410,16 +452,21 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 
 	/**
 	 * Combien de courses ces bornes-là modifieraient, sans rien enregistrer. L'interface l'interroge dès
-	 * qu'on change une borne : avec plusieurs tronçons, un compte figé au chargement de la page dirait
-	 * n'importe quoi, et c'est précisément le chiffre qui dit si le tronçon sortira du feed.
+	 * qu'on change une borne ou un tracé visé : avec plusieurs tronçons, un compte figé au chargement de
+	 * la page dirait n'importe quoi, et c'est précisément le chiffre qui dit si le tronçon sortira du
+	 * feed. Le détail par tracé dit lesquels desservent ces bornes, qu'ils soient visés ou non.
 	 */
 	admin.get("/api/detours/:key/trip-count", (c) => {
 		const scope = deps.serviceAlerts.alertScopes.get(c.req.param("key"));
 		if (scope === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
 
-		const startStopId = c.req.query("start") ?? null;
-		const endStopId = c.req.query("end") ?? null;
-		return c.json({ matchingTrips: countMatchingTrips({ startStopId, endStopId }, scope, deps) });
+		const segment: SegmentScope = {
+			startStopId: c.req.query("start") ?? null,
+			endStopId: c.req.query("end") ?? null,
+			patternIds: (c.req.query("patterns") ?? "").split(",").filter((patternId) => patternId.length > 0),
+		};
+		const counts = countTripsByPattern(segment, scope, deps);
+		return c.json({ matchingTrips: sumTargeted(counts, segment), tripsByPattern: Object.fromEntries(counts) });
 	});
 
 	admin.put("/api/detours/:key", async (c) => {
@@ -565,12 +612,40 @@ function parseKey(
 	return { key: detourKey(alertNumber, routeId, directionId), alertNumber, routeId, directionId };
 }
 
-/** En vigueur d'abord, puis par ligne et par sens : l'ordre dans lequel on veut les traiter. */
-function compareScopes(a: AlertScope, b: AlertScope): number {
-	if (a.active !== b.active) return a.active ? -1 : 1;
-	if (a.routeId !== b.routeId) return a.routeId.localeCompare(b.routeId);
+/**
+ * Par ligne, dans l'ordre du réseau, puis par sens ; en vigueur d'abord au sein d'un même sens. La
+ * liste groupée par info trafic remonte elle-même les perturbations en vigueur.
+ */
+function compareScopes(a: AlertScope, b: AlertScope, gtfs: StaticGtfs): number {
+	if (a.routeId !== b.routeId) return compareLines(gtfs, a.routeId, b.routeId);
 	if (a.directionId !== b.directionId) return a.directionId - b.directionId;
+	if (a.active !== b.active) return a.active ? -1 : 1;
 	return a.alertNumber.localeCompare(b.alertNumber);
+}
+
+/** Le nom commercial d'une ligne (« F7 », « Métro »), ou à défaut le bout de son identifiant. */
+function lineName(gtfs: StaticGtfs, routeId: string): string {
+	return gtfs.routeNames.get(routeId) ?? lineCode(routeId);
+}
+
+/** Le bout de l'identifiant de ligne (« TCAR:07 » → « 07 ») : c'est lui qui nomme les cartouches. */
+function lineCode(routeId: string): string {
+	return routeId.split(":").at(-1) ?? routeId;
+}
+
+/** Le métro, puis les lignes T, puis les lignes F, puis tout le reste. */
+function lineRank(name: string): number {
+	if (/^m[ée]tro$/i.test(name)) return 0;
+	if (/^T\d+$/.test(name)) return 1;
+	if (/^F\d+$/.test(name)) return 2;
+	return 3;
+}
+
+/** L'ordre du réseau : par rang, puis par nom, les nombres comparés comme tels (F2 avant F10). */
+function compareLines(gtfs: StaticGtfs, a: string, b: string): number {
+	const nameA = lineName(gtfs, a);
+	const nameB = lineName(gtfs, b);
+	return lineRank(nameA) - lineRank(nameB) || nameA.localeCompare(nameB, "fr", { numeric: true });
 }
 
 /** Ce que la liste affiche d'une déviation, sans la géographie que seul le détail demande. */
@@ -583,7 +658,8 @@ function summarize(scope: AlertScope, deps: AdminDependencies) {
 		key: scope.key,
 		alertNumber: scope.alertNumber,
 		routeId: scope.routeId,
-		line: scope.routeId.split(":").at(-1),
+		line: lineName(gtfs, scope.routeId),
+		lineCode: lineCode(scope.routeId),
 		directionId: scope.directionId,
 		headsigns:
 			gtfs.routeDirections.get(scope.routeId)?.find((d) => d.directionId === scope.directionId)?.headsigns ?? [],
@@ -633,14 +709,22 @@ function detail(scope: AlertScope, deps: AdminDependencies) {
 	const gtfs = deps.gtfs.data;
 	const record = deps.store.records.get(detourKey(scope.alertNumber, scope.routeId, scope.directionId));
 
-	const sequences = (gtfs.routeStopSequences.get(scope.routeId)?.get(scope.directionId) ?? []).map((sequence) =>
-		sequence.map((stop) => ({
+	// Les tracés empruntés du sens, services partiels compris : un tronçon peut n'en viser que certains,
+	// et c'est sur leurs arrêts que se choisissent ses bornes.
+	const routePatterns = gtfs.routePatterns.get(scope.routeId)?.get(scope.directionId) ?? [];
+	const labels = patternLabels(routePatterns, gtfs);
+	const patterns = routePatterns.map((pattern, index) => ({
+		patternId: pattern.patternId,
+		shapeId: pattern.shapeId,
+		label: labels[index],
+		tripCount: pattern.tripCount,
+		sequence: pattern.stops.map((stop) => ({
 			stopId: stop.stopId,
 			name: gtfs.stopNames.get(stop.stopId) ?? stop.name,
 			...(gtfs.stopCoordinates.get(stop.stopId) ?? { latitude: null, longitude: null }),
 			removed: scope.removedStopIds.has(stop.stopId),
 		})),
-	);
+	}));
 
 	// Les tracés d'origine des courses de la ligne/sens : ce sont eux que la déviation quitte, et il
 	// faut les voir pour dessiner. Distincts seulement — plusieurs centaines de courses les partagent.
@@ -663,8 +747,9 @@ function detail(scope: AlertScope, deps: AdminDependencies) {
 	// ligne déviée dans un sens où elle ne perd aucun arrêt.
 	const fallback: DetourSegment[] =
 		scope.removedStopIds.size === 0
-			? [{ startStopId: null, endStopId: null, propagatedDelay: 0, stops: [], waypoints: [], path: [] }]
+			? [{ patternIds: [], startStopId: null, endStopId: null, propagatedDelay: 0, stops: [], waypoints: [], path: [] }]
 			: proposed.map((bounds) => ({
+					patternIds: [],
 					startStopId: bounds.startStopId,
 					endStopId: bounds.endStopId,
 					propagatedDelay: 0,
@@ -700,37 +785,74 @@ function detail(scope: AlertScope, deps: AdminDependencies) {
 		// Le périmètre vient-il de l'analyse, ou a-t-il été saisi ? L'interface le dit, et propose de
 		// rendre la main à l'analyse — c'est la seule façon de revenir en arrière.
 		manualScope: deps.store.scopeOverrides.has(scope.key),
-		sequences,
+		patterns,
 		shapes,
 		boundsCandidates,
 		// Un arrêt n'est plus décrit dans la déclaration, seulement désigné : son libellé et sa position
 		// se relisent à l'affichage, du GTFS ou de la base provisoire. Un arrêt provisoire déplacé depuis
 		// une autre déviation se voit donc tout de suite, sans rien avoir à recopier.
 		//
-		// `matchingTrips` dit combien de courses ces bornes-là modifieraient. Zéro veut dire que le
-		// tronçon ne sortira pas du tout dans le feed, et c'est exactement ce qu'il faut voir AVANT
-		// d'enregistrer : des bornes prises sur une autre branche, ou des quais renumérotés par un GTFS
-		// plus récent, ne sélectionnent rien.
-		segments: segments.map((segment) => ({
-			startStopId: segment.startStopId,
-			endStopId: segment.endStopId,
-			propagatedDelay: segment.propagatedDelay,
-			stops: segment.stops.map((stop) => ({ ...stop, ...describeStop(stop.stopId, deps) })),
-			waypoints: segment.waypoints,
-			path: segment.path,
-			publishable: isSegmentPublishable(segment, scope, deps),
-			matchingTrips: countMatchingTrips(segment, scope, deps),
-		})),
+		// `matchingTrips` dit combien de courses ces bornes-là modifieraient sur les tracés visés. Zéro
+		// veut dire que le tronçon ne sortira pas du tout dans le feed, et c'est exactement ce qu'il faut
+		// voir AVANT d'enregistrer : des bornes prises sur une autre branche, des quais renumérotés ou
+		// un tracé disparu d'un GTFS plus récent ne sélectionnent rien.
+		segments: segments.map((segment) => {
+			const counts = countTripsByPattern(segment, scope, deps);
+			return {
+				patternIds: segment.patternIds,
+				startStopId: segment.startStopId,
+				endStopId: segment.endStopId,
+				propagatedDelay: segment.propagatedDelay,
+				stops: segment.stops.map((stop) => ({ ...stop, ...describeStop(stop.stopId, deps) })),
+				waypoints: segment.waypoints,
+				path: segment.path,
+				publishable: isSegmentPublishable(segment, scope, deps),
+				tripsByPattern: Object.fromEntries(counts),
+				matchingTrips: sumTargeted(counts, segment),
+			};
+		}),
 	};
 }
 
-/** Combien de courses les bornes d'un tronçon désignent, ou zéro tant qu'elles ne sont pas arrêtées. */
-function countMatchingTrips(
+/**
+ * Le libellé d'un tracé : « premier arrêt → dernier arrêt ». Deux tracés qui partent et arrivent au
+ * même endroit se départagent par le premier arrêt que l'un dessert et pas l'autre.
+ */
+function patternLabels(patterns: readonly RoutePattern[], gtfs: StaticGtfs): string[] {
+	const nameOf = (stopId: string | undefined) => (stopId === undefined ? "?" : (gtfs.stopNames.get(stopId) ?? stopId));
+	const base = patterns.map(
+		(pattern) => `${nameOf(pattern.stops[0]?.stopId)} → ${nameOf(pattern.stops.at(-1)?.stopId)}`,
+	);
+
+	return patterns.map((pattern, index) => {
+		const twins = patterns.filter((_, other) => other !== index && base[other] === base[index]);
+		if (twins.length === 0) return base[index] as string;
+
+		const elsewhere = new Set(twins.flatMap((twin) => twin.stops.map((stop) => stop.stopId)));
+		const own = pattern.stops.find((stop) => !elsewhere.has(stop.stopId));
+		return own === undefined
+			? `${base[index]} (${pattern.stops.length} arrêts)`
+			: `${base[index]} via ${nameOf(own.stopId)}`;
+	});
+}
+
+/** Le nombre de courses touchées sur les seuls tracés visés, d'après {@link countTripsByPattern}. */
+function sumTargeted(counts: ReadonlyMap<string, number>, segment: { patternIds: readonly string[] }): number {
+	let total = 0;
+	for (const [patternId, count] of counts) if (targets(segment, patternId)) total += count;
+	return total;
+}
+
+/**
+ * Combien de courses les bornes d'un tronçon désignent sur chaque tracé, qu'il le vise ou non. Rien
+ * tant qu'elles ne sont pas arrêtées.
+ */
+function countTripsByPattern(
 	segment: { startStopId: string | null; endStopId: string | null },
 	scope: AlertScope,
 	deps: AdminDependencies,
-): number {
-	if (segment.startStopId === null || segment.endStopId === null) return 0;
+): Map<string, number> {
+	if (segment.startStopId === null || segment.endStopId === null) return new Map();
 
 	return countSelectableTrips(
 		deps.gtfs.data,
@@ -764,8 +886,10 @@ function parseInput(
 	// la course s'y arrêterait deux fois. Tous tronçons confondus — ils se suivent sur la même course.
 	const designated = new Set<string>();
 
+	const patterns = gtfs.routePatterns.get(scope.routeId)?.get(scope.directionId) ?? [];
+
 	for (const [index, raw] of payload.segments.entries()) {
-		const parsed = parseSegment(raw, `Tronçon ${index + 1}`, designated, gtfs, store);
+		const parsed = parseSegment(raw, `Tronçon ${index + 1}`, designated, patterns, gtfs, store);
 		if ("message" in parsed) return parsed;
 		segments.push(parsed.segment);
 	}
@@ -788,11 +912,31 @@ function parseSegment(
 	raw: unknown,
 	label: string,
 	designated: Set<string>,
+	patterns: readonly RoutePattern[],
 	gtfs: StaticGtfs,
 	store: DetourStore,
 ): { segment: DetourSegment } | { message: string } {
 	if (typeof raw !== "object" || raw === null) return { message: `${label} : illisible.` };
 	const payload = raw as Record<string, unknown>;
+
+	// Les tracés visés sont facultatifs : sans eux, le tronçon les vise tous, comme avant qu'on puisse
+	// les distinguer. Un tracé inconnu est refusé plutôt qu'écarté — l'écarter élargirait en silence
+	// le tronçon à des courses qu'on n'a pas choisies.
+	const patternIds: string[] = [];
+	if (payload.patternIds !== undefined) {
+		if (!Array.isArray(payload.patternIds)) return { message: `${label} : tracés visés attendus, une liste.` };
+
+		for (const patternId of payload.patternIds) {
+			if (typeof patternId !== "string" || !patterns.some((pattern) => pattern.patternId === patternId)) {
+				return { message: `${label} : tracé « ${String(patternId)} » inconnu du GTFS pour cette ligne et ce sens.` };
+			}
+			if (!patternIds.includes(patternId)) patternIds.push(patternId);
+		}
+
+		// Les nommer tous revient à n'en nommer aucun, et cette forme-là survit à un tracé que le GTFS
+		// ajouterait demain.
+		if (patternIds.length === patterns.length) patternIds.length = 0;
+	}
 
 	const startStopId = payload.startStopId ?? null;
 	const endStopId = payload.endStopId ?? null;
@@ -895,6 +1039,7 @@ function parseSegment(
 
 	return {
 		segment: {
+			patternIds,
 			startStopId: startStopId as string | null,
 			endStopId: endStopId as string | null,
 			propagatedDelay: propagatedDelay as number,
@@ -918,7 +1063,8 @@ function describeUsage(alertNumber: string, routeId: string, directionId: number
 		key,
 		alertNumber,
 		standalone: scope?.standalone ?? false,
-		line: routeId.split(":").at(-1) ?? routeId,
+		line: lineName(deps.gtfs.data, routeId),
+		lineCode: lineCode(routeId),
 		directionId,
 		headsigns:
 			deps.gtfs.data.routeDirections.get(routeId)?.find((direction) => direction.directionId === directionId)

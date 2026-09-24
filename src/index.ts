@@ -89,6 +89,7 @@ const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL,
 	overrides: detourStore.scopeOverrides,
 	standalone: detourStore.standaloneModifications,
 	disabled: detourStore.disabledModifications,
+	dismissed: detourStore.dismissedScopes,
 }));
 // Sa présence est constatée ici, ses octets ne seront lus qu'au premier accrochage.
 const roadGraph = useRoadGraph(ROAD_GRAPH_PATH);

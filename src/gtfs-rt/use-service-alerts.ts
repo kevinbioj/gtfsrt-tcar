@@ -126,12 +126,15 @@ type StandaloneEntry = {
 
 /**
  * Tout ce qui a été saisi à la main et que l'indexation doit relire : les périmètres, les
- * modifications sans info trafic, et les modifications désactivées (par {@link detourKey}).
+ * modifications sans info trafic, les modifications désactivées et les couples ligne/sens retirés
+ * (ces deux derniers par {@link detourKey}).
  */
 export type HandwrittenIndex = {
 	overrides: ScopeOverrideIndex;
 	standalone: StandaloneIndex;
 	disabled: ReadonlySet<string>;
+	/** Les couples que l'info trafic ne concerne pas, quoi qu'en dise l'analyse : ni périmètre ni arrêt sauté. */
+	dismissed: ReadonlySet<string>;
 };
 
 /** L'intitulé d'une modification sans info trafic à qui l'on n'en a pas donné. */
@@ -459,7 +462,7 @@ export function indexAlerts(
 	handwritten: HandwrittenIndex,
 	now: Temporal.Instant,
 ): { skipIndex: SkipIndex; alertScopes: AlertScopeIndex } {
-	const { overrides, disabled } = handwritten;
+	const { overrides, disabled, dismissed } = handwritten;
 	const alerts = [...analyzed, ...handwritten.standalone.values().map(asAlert)];
 	const skipIndex: SkipIndex = new Map();
 	const alertScopes: AlertScopeIndex = new Map();
@@ -472,7 +475,11 @@ export function indexAlerts(
 			// Un bucket « les deux sens » se dédouble : la maille d'une déviation est le sens, et un seul
 			// des deux peut avoir été repris à la main — l'autre garde alors ce que l'analyse en dit.
 			const directions = directionId === null ? [0, 1] : [directionId];
-			const free = directions.filter((direction) => !overrides.has(detourKey(alert.alertNumber, routeId, direction)));
+			// Un sens retiré n'est pas libre non plus : il n'y a plus rien à en dire.
+			const free = directions.filter((direction) => {
+				const key = detourKey(alert.alertNumber, routeId, direction);
+				return !overrides.has(key) && !dismissed.has(key);
+			});
 			if (free.length === 0) continue;
 
 			// Même dédoublement pour la désactivation : un sens désactivé cesse de supprimer ses arrêts,
@@ -502,6 +509,9 @@ export function indexAlerts(
 		// L'info trafic n'est plus au flux : il n'y a plus de perturbation à porter. La saisie reste en
 		// base — les travaux reprennent, et le numéro avec eux.
 		if (alert === undefined) continue;
+		// Retirer un couple efface son périmètre, et en saisir un le rétablit : les deux ne coexistent
+		// pas en base. La garde ne coûte rien, et tient l'invariant ici aussi.
+		if (dismissed.has(detourKey(override.alertNumber, override.routeId, override.directionId))) continue;
 
 		const active = isActive(alert.periods, now);
 		const stopIds = new Set(override.removedStopIds);
@@ -515,7 +525,7 @@ export function indexAlerts(
 	}
 
 	console.log(
-		`✓ ${skipIndex.size} routes with skipped stops (${removedCount} entries, ${alertScopes.size} detour scopes, ${overrides.size} hand-written, ${handwritten.standalone.size} without alert, ${disabled.size} disabled).`,
+		`✓ ${skipIndex.size} routes with skipped stops (${removedCount} entries, ${alertScopes.size} detour scopes, ${overrides.size} hand-written, ${handwritten.standalone.size} without alert, ${disabled.size} disabled, ${dismissed.size} dismissed).`,
 	);
 
 	return { skipIndex, alertScopes };
