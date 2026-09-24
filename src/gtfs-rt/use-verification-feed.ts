@@ -5,8 +5,9 @@ import { VERIFICATION_FEED_INTERVAL, VERIFICATION_STALENESS } from "../config.js
 let currentInterval: NodeJS.Timeout | undefined;
 
 /**
- * Tient à jour un instantané du flux de vérification, un relevé par véhicule. Il ne sert pas à
- * publier mais à trancher : c'est la seule source qui porte la ligne et le sens réels du véhicule.
+ * Tient à jour un instantané du flux de vérification, un relevé par véhicule. C'est la seule source
+ * qui porte la ligne et le sens réels du véhicule, et celle dont on publie la position — jusqu'aux
+ * véhicules que le SAE a perdus (cf. `legacyOnlyVehicles`).
  */
 export async function useVerificationFeed(vehicleUrl: string) {
 	const resource = {
@@ -41,6 +42,8 @@ export type VerifiedVehicle = {
 	recordedAt: number;
 	/** Ligne préfixée comme le GTFS publié (« TCAR:92 »), pour se comparer au flux source. */
 	routeId: string;
+	/** Course préfixée comme le GTFS publié (« TCAR:7761 »), `undefined` si le flux n'en dit rien. */
+	tripId: string | undefined;
 	directionId: number;
 };
 
@@ -87,6 +90,7 @@ async function loadResource(vehicleUrl: string): Promise<Map<string, VerifiedVeh
 				},
 				recordedAt,
 				routeId: `TCAR:${vehicle.trip.routeId}`,
+				tripId: vehicle.trip.tripId ? `TCAR:${vehicle.trip.tripId}` : undefined,
 				directionId: vehicle.trip.directionId ?? 0,
 			});
 		}

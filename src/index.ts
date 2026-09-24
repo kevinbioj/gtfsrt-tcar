@@ -204,7 +204,13 @@ async function poll() {
 		return tripId === undefined ? undefined : locateOn(vehicleId, tripId, position);
 	};
 
-	for (const { vehicle } of feed.entity) {
+	// Le SAE perd des véhicules qui roulent bel et bien — et prête parfois leur course à un autre,
+	// figé — quand l'ancien GTFS-RT les voit encore. Ceux-là rejoignent le relevé tels qu'Astuce les
+	// décrit, et suivent le même chemin que les autres.
+	const legacyOnly = legacyOnlyVehicles(feed, nowSeconds);
+	const vehicles = [...feed.entity.map((entity) => entity.vehicle), ...legacyOnly];
+
+	for (const vehicle of vehicles) {
 		// « TCAR:Vehicle::6232:LOC » → « 6232 », le numéro de parc que publient aussi les deux flux
 		// de vérification.
 		const vehicleId = vehicle?.vehicle?.id?.split(":")[3];
@@ -374,7 +380,7 @@ async function poll() {
 	);
 
 	console.log(
-		`✓ ${registry.publishable(nowSeconds).size} positions (${published} verified, ${refreshed} position-only, ${deadheads} deadheading, ${preferredPositions} located by the legacy feed, ${unresolvedTrips} unresolved trips, ${staleRecords} stale records, ${unprovenVehicles} never moved, ${frozenVehicles} motionless, ${awaitedVehicles} awaiting departure, ${untrackedLines} on untracked lines, ${unknownVehicles} never published, ${unlocated} unlocated, ${forgotten} forgotten).`,
+		`✓ ${registry.publishable(nowSeconds).size} positions (${published} verified, ${refreshed} position-only, ${deadheads} deadheading, ${preferredPositions} located by the legacy feed, ${legacyOnly.length} known only to it, ${unresolvedTrips} unresolved trips, ${staleRecords} stale records, ${unprovenVehicles} never moved, ${frozenVehicles} motionless, ${awaitedVehicles} awaiting departure, ${untrackedLines} on untracked lines, ${unknownVehicles} never published, ${unlocated} unlocated, ${forgotten} forgotten).`,
 	);
 }
 
@@ -431,6 +437,34 @@ function departureOf(tripId: string, nowSeconds: number): number | undefined {
 
 	const scheduled = staticGtfs.data.tripDepartures.get(tripId);
 	return scheduled === undefined ? undefined : departureEpoch(scheduled, nowSeconds);
+}
+
+/**
+ * Les véhicules que seul le flux de vérification voit encore, mis au format du flux SAE.
+ *
+ * Seuls comptent ceux dont il a une course et une position assez fraîche pour être publiée
+ * ({@link PREFERRED_POSITION_STALENESS}) : c'est alors sa position qui l'emporte de toute façon, et
+ * sa ligne et son sens se confirment d'eux-mêmes. Le reste du traitement ne les distingue pas.
+ */
+function legacyOnlyVehicles(
+	feed: GtfsRealtime.transit_realtime.FeedMessage,
+	nowSeconds: number,
+): GtfsRealtime.transit_realtime.IVehiclePosition[] {
+	const known = new Set(feed.entity.map(({ vehicle }) => vehicle?.vehicle?.id?.split(":")[3]));
+
+	return [...verificationFeed.verifiedVehicles]
+		.filter(
+			([vehicleId, verified]) =>
+				!known.has(vehicleId) &&
+				verified.tripId !== undefined &&
+				nowSeconds - verified.recordedAt <= PREFERRED_POSITION_STALENESS,
+		)
+		.map(([vehicleId, verified]) => ({
+			trip: { tripId: verified.tripId, routeId: verified.routeId, directionId: verified.directionId },
+			vehicle: { id: `TCAR:Vehicle::${vehicleId}:LOC` },
+			position: verified.position,
+			timestamp: verified.recordedAt,
+		}));
 }
 
 /**
