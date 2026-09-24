@@ -14,7 +14,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Déviations — GTFS-RT TCAR</title>
+<title>Modifications — GTFS-RT TCAR</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
 	:root {
@@ -24,9 +24,23 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	* { box-sizing: border-box; }
 	body { margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 		background: var(--bg); color: var(--ink); }
-	header { display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+	/*
+	 * L'en-tête a une hauteur fixe : les vues carte prennent exactement le reste de l'écran (cf.
+	 * .detail), et une hauteur déduite du contenu ne se retrancherait pas au pixel près.
+	 */
+	header { display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 20px;
 		background: var(--panel); border-bottom: 1px solid var(--line); }
-	header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+	header h1 { font-size: 16px; margin: 0 12px 0 0; font-weight: 600; }
+	/* Les deux menus de l'en-tête : l'actif se souligne, sans autre décor. */
+	.nav { display: flex; gap: 4px; }
+	.nav a { padding: 6px 10px; border-radius: 6px; color: var(--muted); text-decoration: none; }
+	.nav a:hover { color: var(--ink); }
+	.nav a.active { color: var(--ink); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); border-radius: 0; }
+	/* Au-dessus du tableau : créer à gauche, ranger à droite. */
+	.toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+	.toolbar .grow { flex: 1; }
+	.toolbar select { width: auto; }
+	a.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 	header .spacer { flex: 1; }
 	button, a.button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px;
 		background: var(--panel); color: var(--ink); cursor: pointer; }
@@ -64,9 +78,6 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	td > a.cell { display: block; margin: -5px -10px; padding: 5px 10px; color: inherit;
 		text-decoration: none; overflow: hidden; text-overflow: ellipsis; }
 	td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-	/* La cellule d'action n'est pas un lien : elle agit sur la ligne au lieu d'ouvrir la déviation. */
-	td.act { text-align: right; }
-	td.act button { padding: 1px 8px; font-size: 12px; }
 	/*
 	 * Le cartouche de la ligne, tel que le réseau le dessine : c'est par lui qu'on cherche dans la
 	 * liste, et il se reconnaît plus vite qu'un numéro. Toutes les lignes n'en ont pas — le numéro en
@@ -92,7 +103,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	.badge.ok { color: var(--ok); border-color: #b4ddc0; background: #eaf7ee; }
 	.badge.warn { color: var(--warn); border-color: #e6d39a; background: #fdf6e3; }
 	.badge.off { color: var(--muted); }
-	.detail { display: flex; height: calc(100vh - 53px); }
+	.detail { display: flex; height: calc(100vh - 56px); }
 	#map { flex: 1; }
 	.panel { width: 400px; overflow-y: auto; background: var(--panel);
 		border-left: 1px solid var(--line); padding: 16px; }
@@ -164,24 +175,6 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	.picker label:last-child { border-bottom: none; }
 	.picker label:hover { background: #eef2f7; }
 	.picker input { width: auto; flex: none; }
-	/* Les lignes et sens d'une info trafic, à ouvrir ou à déclarer concernés. */
-	.scopes { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
-		padding: 12px 14px; margin-bottom: 12px; }
-	.scopes .head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-	.scopes .head .title { font-weight: 600; }
-	.scopes .head .grow { flex: 1; }
-	.scopes .dir { display: flex; align-items: center; gap: 8px; padding: 5px 0;
-		border-top: 1px solid var(--line); }
-	.scopes .dir .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
-		white-space: nowrap; }
-	/*
-	 * Le bouton d'une ligne de sens tient dans la hauteur du cartouche : la liste se parcourt à
-	 * l'œil, et un bouton pleine taille en ferait une suite de pavés.
-	 */
-	.scopes .dir button, .scopes .dir a.button { padding: 2px 9px; font-size: 12px; line-height: 18px; }
-	/* Deux classes, parce que .hidden est déclarée plus haut et ne l'emporterait pas sur ce display. */
-	.tools { display: flex; align-items: center; gap: 12px; }
-	.tools.hidden { display: none; }
 	.results .id { color: var(--muted); font-size: 12px; }
 	.results .empty { color: var(--muted); cursor: default; }
 	.gtfsname { font-weight: 600; flex: 1; }
@@ -201,6 +194,17 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		text-decoration: none; }
 	a.usage:hover { text-decoration: underline; }
 	.usage .toward { margin-left: 2px; }
+	/* Un arrêt provisoire se choisit d'un clic, au tableau ou sur la carte : sa ligne et son marqueur ressortent. */
+	#stopsBody tr { cursor: pointer; }
+	#stopsBody tr.selected td { background: #fdecee; }
+	.stopPin { background: none; border: none; }
+	/* Les boîtes de dialogue des arrêts provisoires : un titre, un contenu, les actions en bas à droite. */
+	dialog { width: 440px; max-width: calc(100vw - 32px); padding: 16px; border: 1px solid var(--line);
+		border-radius: 8px; background: var(--panel); color: var(--ink); }
+	dialog::backdrop { background: rgba(20, 24, 31, .35); }
+	dialog h2 { font-size: 15px; margin: 0 0 12px; }
+	dialog .actions { justify-content: flex-end; }
+	dialog .status:empty { display: none; }
 	/*
 	 * Le panneau d'une déviation : ce qui défile au-dessus, la barre d'enregistrement en dessous, qui
 	 * reste en vue quelle que soit la longueur du reste. Le fond gris fait ressortir les cartes — une
@@ -217,9 +221,20 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	.card h3 { font-size: 13px; font-weight: 600; margin: 14px 0 6px; padding-top: 10px;
 		border-top: 1px solid var(--line); }
 	.card h3.first { border-top: none; padding-top: 0; margin-top: 0; }
+	/*
+	 * Le cartouche et le sens à gauche, les badges empilés à droite, le tout centré sur une même
+	 * hauteur : le statut en haut, l'origine en dessous. Un sens trop long passe à la ligne sans
+	 * repousser les badges.
+	 */
 	.heading { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600;
 		margin-bottom: 6px; }
-	.heading .grow { flex: 1; }
+	.heading .toward { flex: 1; min-width: 0; margin-left: 0; color: var(--ink); }
+	.heading .badges { display: flex; flex-direction: column; align-items: flex-end; gap: 3px;
+		flex: none; font-weight: 400; }
+	.heading .badges > div { display: flex; gap: 4px; }
+	.heading .badges .badge.tag { margin-left: 0; }
+	/* La raison et la période, un champ par ligne, un peu d'air entre eux. */
+	.fields .field { margin-bottom: 8px; }
 	details > summary { cursor: pointer; color: var(--muted); font-size: 13px; margin: 4px 0; }
 	details[open] > summary { margin-bottom: 6px; }
 	/*
@@ -232,6 +247,27 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	.tabs button.active { background: var(--panel); color: var(--ink); border-color: var(--line);
 		border-bottom-color: var(--panel); font-weight: 600; position: relative; z-index: 1; }
 	.segment { border: 1px solid var(--line); border-radius: 0 6px 6px 6px; padding: 10px; }
+	/* Les onglets de phase, collés au tableau comme ceux des tronçons à leur cadre. */
+	.phases button { background: var(--bg); }
+	table.list { border-top-left-radius: 0; }
+	/* Une ligne invisible ou une suggestion se lit en retrait : elle ne publie rien. */
+	tr.muted td, tr.suggestion td { color: var(--muted); }
+	tr.suggestion td { background: #fbfcfd; }
+	tr.suggestion { cursor: default; }
+	/* La cellule d'action n'est pas un lien : elle agit sur la ligne au lieu de l'ouvrir. */
+	td.act { text-align: right; }
+	td.act button, td.act a.button { padding: 1px 8px; font-size: 12px; margin-left: 4px; }
+	.badge.tag { margin-left: 6px; }
+	/* La case de sélection : une colonne étroite, qui coche au lieu d'ouvrir. */
+	td.pick, th.pick { text-align: center; padding-left: 0; padding-right: 0; }
+	td.pick { cursor: default; }
+	.pick input, tr.group .bar input { width: auto; margin: 0; vertical-align: middle; }
+	/* Ce que l'on fait aux lignes cochées, dans la barre d'outils, tant qu'il y en a. */
+	.bulk { display: flex; align-items: center; gap: 8px; }
+	.bulk.hidden { display: none; }
+	.card h2 { font-size: 14px; margin: 0 0 8px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+	.field.top { align-items: flex-start; }
+	.field .grow { flex: 1; }
 	/* Les tracés du sens, à cocher ; le nom se clique pour montrer le tracé sur la carte. */
 	.patterns { border: 1px solid var(--line); border-radius: 6px; }
 	.patterns div { display: flex; gap: 8px; align-items: center; padding: 4px 9px;
@@ -250,44 +286,52 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 </head>
 <body>
 <header>
-	<h1 id="title">Déviations en vigueur</h1>
+	<h1>GTFS-RT TCAR</h1>
+	<nav class="nav">
+		<a id="navList" href="#/">Modifications</a>
+		<a id="navStops" href="#/stops">Base d'arrêts</a>
+	</nav>
 	<span class="spacer"></span>
-	<span id="listTools" class="tools">
-		<label class="note">grouper <select id="groupBy" style="width:auto">
-			<option value="line">par ligne</option>
-			<option value="alert">par info trafic</option>
-		</select></label>
-		<label class="note"><input type="checkbox" id="showUpcoming" style="width:auto"> afficher aussi les déviations à venir ou terminées</label>
-		<a id="openScopes" class="button" href="#/scopes">Ajouter une ligne concernée</a>
-		<a id="openNew" class="button" href="#/new">Nouvelle modification</a>
-		<a id="openStops" class="button" href="#/stops">Arrêts provisoires</a>
-	</span>
 	<a id="back" class="button hidden" href="#/">Retour à la liste</a>
 </header>
 
 <div id="listView" class="wrap">
-	<table>
+	<div class="toolbar">
+		<a class="button primary" href="#/new">Nouvelle modification</a>
+		<span id="bulkBar" class="bulk hidden">
+			<span class="note" id="bulkCount"></span>
+			<button id="bulkHide">Masquer</button>
+			<button id="bulkShow">Afficher</button>
+			<button id="bulkDiscard" class="danger"></button>
+		</span>
+		<span class="grow"></span>
+		<label class="note">grouper <select id="groupBy">
+			<option value="line">par ligne</option>
+			<option value="alert">par info trafic</option>
+		</select></label>
+		<label class="note">trier par <select id="sortBy">
+			<option value="number">n° d'info trafic</option>
+			<option value="name">nom</option>
+			<option value="chrono">chronologie</option>
+		</select></label>
+	</div>
+	<div class="tabs phases" id="phaseTabs"></div>
+	<table class="list">
 		<colgroup id="listCols"></colgroup>
 		<thead id="listHead"></thead>
 		<tbody id="listBody"></tbody>
 	</table>
-	<p id="listEmpty" class="note hidden">Aucune déviation à afficher.</p>
-</div>
-
-<div id="scopeView" class="wrap hidden">
-	<p class="note">Une info trafic n'ouvre à la déclaration que les lignes et les sens où l'analyse a
-		lu des arrêts supprimés. Déclarer un sens concerné le fait apparaître dans la liste, avec un
-		périmètre vide : il accepte alors un tracé de déviation sans qu'aucun arrêt n'y soit supprimé.</p>
-	<div id="scopeList"></div>
-	<p id="scopeEmpty" class="note hidden">Aucune info trafic au flux courant.</p>
+	<p id="listEmpty" class="note hidden">Rien à afficher.</p>
 </div>
 
 <div id="newView" class="wrap hidden">
-	<div class="scopes form">
-		<p class="note">Une modification sans info trafic : on choisit la ligne, le sens et la période
-			d'application, puis on la saisit comme les autres — arrêts supprimés, tronçons, tracé.</p>
+	<div class="card form">
+		<h2>Nouvelle modification</h2>
+		<div class="field"><label>Info trafic</label><select id="newAlert"></select></div>
 		<div class="field"><label>Ligne</label><select id="newRoute"></select></div>
 		<div class="field"><label>Sens</label><select id="newDirection"></select></div>
+		<div class="field top"><label>Tracés</label><div class="patterns grow" id="newPatterns"></div></div>
+		<div class="field"><label>Raison</label><input id="newLabel"></div>
 		<div id="newPeriod"></div>
 		<div class="actions"><button id="create" class="primary">Créer</button></div>
 		<p class="status" id="newStatus"></p>
@@ -297,33 +341,59 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 <div id="stopsView" class="detail hidden">
 	<div id="stopsMap"></div>
 	<aside class="panel wide">
-		<p class="note">Un arrêt provisoire sert à toutes les déviations qui le désignent : le renommer ou
-			le déplacer ici vaut pour chacune d'elles. Glisser un marqueur pour le déplacer. Le supprimer
-			le retire aussi de toutes les déviations qui le désignent.</p>
 		<div class="row">
 			<input id="newStopName" placeholder="Nom du nouvel arrêt" autocomplete="off">
 			<button id="placeNewStop" style="flex:none">Poser sur la carte</button>
 		</div>
+		<div class="row">
+			<input id="stopsQuery" placeholder="Rechercher un arrêt" autocomplete="off">
+			<label class="note" style="flex:none">trier par <select id="stopsSort" style="width:auto">
+				<option value="name">nom</option>
+				<option value="recent">création, récents d'abord</option>
+				<option value="usages">nombre de modifications</option>
+			</select></label>
+		</div>
 		<table>
-			<thead><tr><th>Arrêt</th><th>Désigné par</th><th style="width:90px"></th></tr></thead>
+			<thead><tr><th>Arrêt</th><th style="width:180px"></th></tr></thead>
 			<tbody id="stopsBody"></tbody>
 		</table>
-		<p id="stopsEmpty" class="note hidden">Aucun arrêt provisoire.</p>
+		<p id="stopsEmpty" class="note hidden"></p>
 		<p class="status" id="stopsStatus"></p>
 	</aside>
 </div>
+
+<dialog id="dialog">
+	<form id="dialogForm">
+		<h2 id="dialogTitle"></h2>
+		<div id="dialogBody"></div>
+		<p class="status" id="dialogStatus"></p>
+		<div class="actions">
+			<button type="button" id="dialogCancel">Annuler</button>
+			<button type="submit" id="dialogConfirm"></button>
+		</div>
+	</form>
+</dialog>
 
 <div id="detailView" class="detail hidden">
 	<div id="map"></div>
 	<aside class="panel editor">
 		<div class="scroll">
-			<section class="card" id="summary"></section>
+			<section class="card">
+				<div id="summary"></div>
+				<div class="fields">
+					<div class="field"><label>Raison</label><input id="label"></div>
+					<div id="period"></div>
+				</div>
+				<h3>Tracés concernés</h3>
+				<div class="patterns" id="patternList"></div>
+				<p class="note" id="patternNote"></p>
+			</section>
 
 			<section class="card">
-				<h2>Arrêts supprimés<span class="scopeof">— ligne et sens entiers</span></h2>
-				<p class="note" id="scopeSummary"></p>
-				<div id="scopePicker"></div>
-				<div class="row" id="scopeActions" style="margin:8px 0 0"></div>
+				<h2>Arrêts supprimés</h2>
+				<p class="note" id="removedSummary"></p>
+				<div id="removedPicker"></div>
+				<div class="row" id="removedActions" style="margin:8px 0 0"></div>
 			</section>
 
 			<section class="card">
@@ -332,11 +402,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				<div class="segment">
 					<p class="note" id="segmentNote" style="margin-top:0"></p>
 
-					<h3 class="first">Tracés concernés</h3>
-					<div class="patterns" id="patternList"></div>
-					<p class="note" id="patternNote"></p>
-
-					<h3>Bornes</h3>
+					<h3 class="first">Bornes</h3>
 					<p class="note" id="boundsNote"></p>
 					<div id="boundsWarnings"></div>
 					<div class="field" style="margin-bottom:8px"><label>Premier</label><select id="startStop"></select></div>
@@ -401,12 +467,11 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		</div>
 
 		<footer class="savebar">
-			<p class="note" id="disabledNote" style="margin:0 0 6px"></p>
 			<div class="actions">
-				<button id="save" class="primary">Enregistrer les tronçons</button>
-				<button id="toggleDisabled"></button>
+				<button id="save" class="primary">Enregistrer</button>
+				<button id="toggleVisible"></button>
 				<span class="grow"></span>
-				<button id="remove" class="danger">Supprimer la déclaration</button>
+				<button id="remove" class="danger"></button>
 			</div>
 			<p class="status" id="status"></p>
 		</footer>
@@ -420,19 +485,32 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	var state = {
 		detail: null, rows: [], alerts: [], routes: [], segments: [], active: 0, mode: "idle",
+		// L'onglet du tableau : « current », « upcoming » ou « ended ».
+		phase: "current",
+		// Les lignes cochées du tableau, par identifiant (cf. rowId).
+		selected: new Set(),
 		// La base des arrêts provisoires : sa carte, ses marqueurs par identifiant, et la pose en cours.
 		stopsMap: null, stopsLayer: null, provisionalStops: [], stopMarkersById: {}, placingStop: false,
+		// L'arrêt provisoire choisi au tableau ou sur la carte, par identifiant publié.
+		selectedStop: null,
+		// Tous les arrêts désignables, GTFS et provisoires, chargés au premier « Ajouter un arrêt » ;
+		// null tant qu'ils ne le sont pas, ou qu'un arrêt provisoire a changé depuis.
+		allStops: null, pickLayer: null,
 		// La mise en lumière d'un arrêt survolé : un seul à la fois, sur l'une ou l'autre carte.
 		highlight: null,
-		// Le périmètre en cours de saisie : la liste des arrêts cochés, ou null tant qu'on le lit.
-		scopeSelection: null,
+		// La vue d'avant le survol, où la carte revient quand il cesse ; et ce retour, s'il est en attente.
+		returnView: null, returnTimer: null,
+		// Les tracés cochés de la modification, et combien de ceux qu'elle nommait ont disparu du GTFS.
+		patterns: [], stalePatterns: 0,
+		// Les arrêts supprimés saisis, ou null pour suivre l'analyse ; et si leur liste est dépliée.
+		removed: null, removedEditing: false,
 		map: null, base: null, routeLayer: null, otherLayer: null, drawLayer: null, previewLine: null,
 		stopMarkers: [], waypointMarkers: [], legLines: [], legToggles: [], pen: "free",
 		shapes: [], shapeLayers: {}, searchTimer: null, countTimer: null,
 		// Le tracé mis en avant sur la carte, et sur lequel porte l'aperçu : null, c'est le premier que
-		// vise le tronçon actif.
+		// vise la modification.
 		focusPattern: null,
-		// Les lecteurs des champs de période : celui de la création, et celui du détail.
+		// Les lecteurs des champs de période : celui de la création, et celui de l'édition.
 		readNewPeriod: null, readPeriod: null
 	};
 
@@ -571,31 +649,24 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	// --- vues et adresses ---
 
 	/**
-	 * Une vue à la fois, et le bandeau qui va avec : chaque vue n'offre que ce qu'elle permet — on ne
-	 * groupe pas une liste qu'on ne regarde pas, et on n'ajoute pas une ligne concernée depuis l'écran
-	 * qui sert à ça.
+	 * Une vue à la fois. L'en-tête ne porte que les deux menus — les modifications, la base d'arrêts —,
+	 * et le retour à la liste quand on en est sorti.
 	 */
 	function showView(name) {
 		clearHighlight();
 		el("listView").className = name === "list" ? "wrap" : "wrap hidden";
-		el("scopeView").className = name === "scopes" ? "wrap" : "wrap hidden";
 		el("newView").className = name === "new" ? "wrap" : "wrap hidden";
 		el("detailView").className = name === "detail" ? "detail" : "detail hidden";
 		el("stopsView").className = name === "stops" ? "detail" : "detail hidden";
-		el("listTools").className = name === "list" ? "tools" : "tools hidden";
-		el("back").className = name === "list" ? "button hidden" : "button";
-		el("title").textContent = name === "scopes" ? "Ajouter une ligne concernée"
-			: name === "new" ? "Nouvelle modification"
-			: name === "stops" ? "Arrêts provisoires"
-			: name === "detail" ? "Déviation" : "Déviations en vigueur";
+		el("navList").className = name === "list" ? "active" : "";
+		el("navStops").className = name === "stops" ? "active" : "";
+		el("back").className = name === "new" || name === "detail" ? "button" : "button hidden";
 	}
 
 	/**
-	 * La vue courante vit dans l'adresse : « #/ », « #/scopes », « #/new », « #/stops »,
-	 * « #/detour/<clé> », et
-	 * « #/declare/<clé> », qui déclare le sens concerné avant d'ouvrir sa déviation. Le retour du
-	 * navigateur revient alors à l'écran précédent, et non au site d'où l'on venait — c'est le geste
-	 * qu'on fait sans y penser, et il ne doit pas faire perdre la page.
+	 * La vue courante vit dans l'adresse : « #/ », « #/new », « #/stops » et « #/modification/<uid> ».
+	 * Le retour du navigateur revient alors à l'écran précédent, et non au site d'où l'on venait —
+	 * c'est le geste qu'on fait sans y penser, et il ne doit pas faire perdre la page.
 	 */
 	function go(route) {
 		var next = "#/" + route;
@@ -606,16 +677,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	function applyRoute() {
 		var route = window.location.hash.replace(/^#\/?/, "");
 
-		if (route.indexOf("detour/") === 0) {
-			openDetail(decodeURIComponent(route.slice("detour/".length)));
-			return;
-		}
-		if (route.indexOf("declare/") === 0) {
-			declareDirection(decodeURIComponent(route.slice("declare/".length)));
-			return;
-		}
-		if (route === "scopes") {
-			openScopes();
+		if (route.indexOf("modification/") === 0) {
+			openDetail(decodeURIComponent(route.slice("modification/".length)));
 			return;
 		}
 		if (route === "new") {
@@ -637,8 +700,11 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	/** L'adresse des cartouches de ligne du réseau. */
 	var LINE_CARTRIDGE = "https://storage.googleapis.com/bus-tracker-assets/line-cartridges/astuce/";
 
+	/** Les trois onglets du tableau : ce qui court, ce qui vient, ce qui est fini. */
+	var PHASES = [["current", "En cours"], ["upcoming", "À venir"], ["ended", "Terminées"]];
+
 	/**
-	 * Les colonnes que la liste sait rendre. Chaque groupement choisit les siennes : ce qui est commun
+	 * Les colonnes que le tableau sait rendre. Chaque groupement choisit les siennes : ce qui est commun
 	 * à tout un groupe se dit une fois dans son bandeau, et n'a plus à se répéter à chaque ligne.
 	 */
 	var COLUMNS = {
@@ -648,26 +714,30 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		sens: { label: "Sens", cell: function (row) {
 			return "<span class='toward' style='margin-left:0'>" + escapeHtml(towardOf(row)) + "</span>";
 		} },
-		alert: { label: "Info trafic", cell: function (row) {
-			return perturbationRef(row) + escapeHtml(row.headerText);
+		what: { label: "Modification", cell: function (row) {
+			return perturbationRef(row) + escapeHtml(row.label) + originBadge(row);
+		} },
+		origin: { label: "Origine", cell: function (row) {
+			// La raison ne se répète que si elle diffère du titre de l'info trafic, déjà dans le bandeau.
+			return (row.alertNumber !== null && row.label !== row.alertHeader ? escapeHtml(row.label) : "") + originBadge(row);
 		} },
 		stops: { label: "Arrêts", className: "num", cell: function (row) { return String(row.removedStopCount); } },
 		period: { label: "Période", className: "note", cell: function (row) {
 			return escapeHtml(describePeriodsShort(row.periods));
 		} },
-		state: { label: "État", cell: stateBadge },
-		declaration: { label: "Déclaration", cell: declarationBadge },
-		remove: { label: "", action: true }
+		status: { label: "Déclaration", cell: statusBadges },
+		actions: { label: "", action: true },
+		select: { label: "", pick: true }
 	};
 
 	/**
-	 * Les deux façons de lire la liste. Par ligne, pour préparer une ligne entière — c'est la question
+	 * Les deux façons de lire le tableau. Par ligne, pour préparer une ligne entière — c'est la question
 	 * de l'exploitant. Par info trafic, pour traiter une perturbation de bout en bout — c'est celle de
-	 * l'agent qui saisit. Le choix se retient d'une visite à l'autre.
+	 * l'agent qui saisit. Les modifications sans info trafic s'y groupent par raison.
 	 */
 	var GROUPINGS = {
 		line: {
-			columns: [["sens", "22%"], ["alert", "30%"], ["stops", "7%"], ["period", "15%"], ["state", "9%"], ["declaration", "11%"], ["remove", "6%"]],
+			columns: [["select", "32px"], ["sens", "18%"], ["what", "32%"], ["stops", "6%"], ["period", "14%"], ["status", "14%"], ["actions", "16%"]],
 			keyOf: function (row) { return row.routeId; },
 			heading: function (rows) {
 				return lineChip(rows[0].lineCode, rows[0].line) + "<span class='title' style='margin-left:8px'>Ligne "
@@ -676,26 +746,38 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			}
 		},
 		alert: {
-			// La période et l'état appartiennent à l'info trafic, pas au sens : ils montent dans le
-			// bandeau, et les lignes n'ont plus à porter six fois la même date.
-			columns: [["lineAndSens", "50%"], ["stops", "14%"], ["declaration", "28%"], ["remove", "8%"]],
-			keyOf: function (row) { return row.alertNumber; },
-			// Le serveur classe par ligne ; une perturbation se traite de bout en bout, et celles en
-			// vigueur passent devant.
-			rank: function (rows) { return rows.some(function (row) { return row.active; }) ? 0 : 1; },
+			columns: [["select", "32px"], ["lineAndSens", "34%"], ["origin", "20%"], ["stops", "8%"], ["status", "18%"], ["actions", "20%"]],
+			keyOf: function (row) { return row.alertNumber !== null ? "A" + row.alertNumber : "R" + row.label; },
 			heading: function (rows) {
 				var row = rows[0];
 				return perturbationRef(row)
-					+ "<span class='title'>" + escapeHtml(row.headerText) + "</span><span class='grow'></span>"
+					+ "<span class='title'>" + escapeHtml(row.alertNumber !== null ? row.alertHeader : row.label) + "</span>"
+					+ "<span class='grow'></span>"
 					+ "<span class='note'>" + countLabel(rows) + "</span>"
-					+ "<span class='note'>" + escapeHtml(describePeriodsShort(row.periods)) + "</span>"
-					+ stateBadge(row);
+					+ "<span class='note'>" + escapeHtml(describePeriodsShort(row.periods)) + "</span>";
 			}
 		}
 	};
 
 	/**
-	 * Ce que fait une image de cartouche absente : laisser le numéro en clair. Le réseau n'en publie pas
+	 * Les tris : par numéro d'info trafic (les modifications sans info trafic en dernier), par nom, ou
+	 * par ordre d'arrivée — la plus récente d'abord. Ils ordonnent les groupes par info trafic, et les
+	 * lignes au sein d'un groupe par ligne.
+	 */
+	var SORTS = {
+		number: function (a, b) {
+			if ((a.alertNumber === null) !== (b.alertNumber === null)) return a.alertNumber === null ? 1 : -1;
+			if (a.alertNumber === null) return a.label.localeCompare(b.label, "fr");
+			return a.alertNumber.localeCompare(b.alertNumber, "fr", { numeric: true });
+		},
+		name: function (a, b) { return groupTitle(a).localeCompare(groupTitle(b), "fr"); },
+		chrono: function (a, b) { return b.firstSeenAt - a.firstSeenAt; }
+	};
+
+	function groupTitle(row) { return row.alertNumber !== null ? row.alertHeader : row.label; }
+
+	/**
+	 * Ce que fait une image de cartouche absente : laisser le nom en clair. Le réseau n'en publie pas
 	 * pour toutes ses lignes, et un cadre vide se verrait autant qu'une image manquante.
 	 *
 	 * Posé en attribut plutôt que branché après coup : l'image commence à charger dès que le navigateur
@@ -718,72 +800,103 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		return row.headsigns.length ? "→ " + row.headsigns.join(" / ") : "sens " + row.directionId;
 	}
 
-	/**
-	 * Ce qui rattache la déviation à sa perturbation : le numéro de l'info trafic, ou le constat qu'il
-	 * n'y en a pas. Une modification sans info trafic a bien un numéro, mais il ne dit rien à personne.
-	 */
+	/** Le numéro de l'info trafic, s'il y en a une. */
 	function perturbationRef(row) {
-		return row.standalone
-			? '<span class="badge warn" style="margin-right:8px">sans info trafic</span>'
-			: "<span class='ref'>" + escapeHtml(row.alertNumber) + "</span>";
+		return row.alertNumber !== null ? "<span class='ref'>" + escapeHtml(row.alertNumber) + "</span>" : "";
+	}
+
+	/** D'où vient la ligne : l'analyse, une saisie, ou une suggestion à trancher. Il suit ce qu'il qualifie. */
+	function originBadge(row) {
+		if (row.kind === "suggestion") return '<span class="badge off tag">suggestion</span>';
+		return row.origin === "ai" ? '<span class="badge tag">auto</span>' : '<span class="badge tag">manuelle</span>';
 	}
 
 	/**
-	 * La désactivation passe avant tout : elle dit qu'on a choisi de ne rien publier, quelle que soit la
-	 * période. Ensuite seulement vient ce que la période en dit.
+	 * Ce que la modification déclare, en un coup d'œil : ses tronçons, ses tracés si elle n'en vise
+	 * qu'une partie, et qu'elle est invisible. Une suggestion ne déclare rien encore.
 	 */
-	function stateBadge(row) {
-		if (row.disabled) return '<span class="badge warn">désactivée</span>';
-		if (row.active) return '<span class="badge ok">en vigueur</span>';
-		if (row.ended) return '<span class="badge off">terminée</span>';
-		return '<span class="badge off">à venir</span>';
-	}
+	function statusBadges(row) {
+		if (row.kind === "suggestion") return "";
 
-	function declarationBadge(row) {
-		if (!row.declared) return '<span class="badge off">non déclarée</span>';
-		if (!row.publishable) return '<span class="badge warn">incomplète</span>';
+		var badges = [];
+		if (row.disabled) badges.push('<span class="badge warn">invisible</span>');
 
-		// Ce qu'il y a de plus parlant, et rien de plus : le nombre de tronçons quand il y en a
-		// plusieurs, sinon ce que le tronçon annonce. Un tracé sans arrêt de substitution est une
-		// déclaration complète — le segment est supprimé, et l'itinéraire dit par où l'on passe.
-		var what = row.segmentCount > 1
-			? row.segmentCount + " tronçons"
-			: row.stopCount === 0 ? "tracé seul" : row.stopCount + " arrêts";
-		return '<span class="badge ok">' + what + "</span>";
+		if (row.segmentCount === 0) {
+			badges.push('<span class="badge off">sans tronçon</span>');
+		} else if (row.publishableSegments < row.segmentCount) {
+			badges.push('<span class="badge warn">incomplète</span>');
+		} else {
+			// Ce qu'il y a de plus parlant, et rien de plus : le nombre de tronçons quand il y en a
+			// plusieurs, sinon ce que le tronçon annonce.
+			var what = row.segmentCount > 1 ? row.segmentCount + " tronçons"
+				: row.stopCount === 0 ? "tracé seul" : row.stopCount + " arrêts";
+			badges.push('<span class="badge ok">' + what + "</span>");
+		}
+
+		if (row.patternCount > 0) badges.push('<span class="badge">' + row.patternCount + "/" + row.patternTotal + " tracés</span>");
+		return badges.join(" ");
 	}
 
 	function countLabel(rows) {
-		var declared = rows.filter(function (row) { return row.declared; }).length;
-		return rows.length + (rows.length > 1 ? " déviations" : " déviation")
-			+ " · " + declared + " déclarée" + (declared > 1 ? "s" : "");
+		var suggestions = rows.filter(function (row) { return row.kind === "suggestion"; }).length;
+		var modifications = rows.length - suggestions;
+		var parts = [];
+		if (modifications > 0) parts.push(modifications + (modifications > 1 ? " modifications" : " modification"));
+		if (suggestions > 0) parts.push(suggestions + (suggestions > 1 ? " suggestions" : " suggestion"));
+		return parts.join(" · ");
 	}
 
 	function loadList() {
-		request(API + "/api/detours").then(function (rows) {
-			state.rows = rows;
+		request(API + "/api/modifications").then(function (answer) {
+			state.rows = answer.modifications.concat(answer.suggestions);
 			renderList();
 		}).catch(function (error) { alert(error.message); });
 	}
 
+	/** Les onglets de phase, chacun avec ce qu'il contient. */
+	function renderPhases() {
+		var tabs = el("phaseTabs");
+		tabs.innerHTML = "";
+		PHASES.forEach(function (phase) {
+			var count = state.rows.filter(function (row) { return row.phase === phase[0]; }).length;
+			var button = document.createElement("button");
+			button.textContent = phase[1] + " (" + count + ")";
+			button.className = state.phase === phase[0] ? "active" : "";
+			button.onclick = function () {
+				state.phase = phase[0];
+				remember("modifications.phase", phase[0]);
+				renderList();
+			};
+			tabs.appendChild(button);
+		});
+	}
+
 	/**
-	 * La liste, groupée. L'ordre des groupes est celui de leur première déviation, que le serveur rend
-	 * déjà classée — les perturbations en vigueur d'abord : une Map retient l'ordre d'insertion, il
-	 * n'y a rien à trier de plus.
+	 * Le tableau, groupé et trié. Le serveur rend les lignes dans l'ordre du réseau ; les tris sont
+	 * stables, et cet ordre tient donc partout où le tri choisi ne départage pas.
 	 */
 	function renderList() {
-		var grouping = GROUPINGS[el("groupBy").value] || GROUPINGS.line;
-		var showUpcoming = el("showUpcoming").checked;
-		var visible = state.rows.filter(function (row) { return showUpcoming || row.active; });
+		renderPhases();
 
-		var cols = el("listCols");
-		cols.innerHTML = grouping.columns.map(function (column) {
+		var grouping = GROUPINGS[el("groupBy").value] || GROUPINGS.line;
+		var sort = SORTS[el("sortBy").value] || SORTS.number;
+		var visible = state.rows.filter(function (row) { return row.phase === state.phase; });
+
+		// On n'agit que sur ce qu'on voit : ce qui a quitté l'onglet, ou la liste, se décoche.
+		var shown = new Set(visible.map(rowId));
+		Array.from(state.selected).forEach(function (id) { if (!shown.has(id)) state.selected.delete(id); });
+
+		el("listCols").innerHTML = grouping.columns.map(function (column) {
 			return "<col style='width:" + column[1] + "'>";
 		}).join("");
 
 		el("listHead").innerHTML = "<tr>" + grouping.columns.map(function (column) {
 			var definition = COLUMNS[column[0]];
+			if (definition.pick) return "<th class='pick'></th>";
 			return "<th" + (definition.className === "num" ? " class='num'" : "") + ">" + definition.label + "</th>";
 		}).join("") + "</tr>";
+		var all = el("listHead").querySelector("th.pick");
+		if (visible.length > 0) all.appendChild(pickBox(visible));
 
 		var groups = new Map();
 		visible.forEach(function (row) {
@@ -793,9 +906,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			else group.push(row);
 		});
 
-		// Le tri est stable : à rang égal, l'ordre du serveur tient.
 		var ordered = Array.from(groups.values());
-		if (grouping.rank) ordered.sort(function (a, b) { return grouping.rank(a) - grouping.rank(b); });
+		if (grouping === GROUPINGS.alert) ordered.sort(function (a, b) { return sort(a[0], b[0]); });
+		else ordered.forEach(function (rows) { rows.sort(sort); });
 
 		var body = el("listBody");
 		body.innerHTML = "";
@@ -805,51 +918,192 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			head.className = "group";
 			head.innerHTML = "<td colspan='" + grouping.columns.length + "'><div class='bar'>"
 				+ grouping.heading(rows) + "</div></td>";
+			var bar = head.querySelector(".bar");
+			bar.insertBefore(pickBox(rows), bar.firstChild);
 			body.appendChild(head);
 
-			rows.forEach(function (row) {
-				var tr = document.createElement("tr");
-				var href = "#/detour/" + encodeURIComponent(row.key);
-
-				// Ce que la ligne abrège se relit en entier au survol : la destination comme le texte de
-				// l'info trafic dépassent volontiers la largeur d'une colonne.
-				tr.title = row.line + " " + towardOf(row) + "\n"
-					+ (row.standalone ? "Sans info trafic" : row.alertNumber) + " — " + row.headerText + "\n"
-					+ describePeriods(row.periods);
-
-				tr.innerHTML = grouping.columns.map(function (column) {
-					var definition = COLUMNS[column[0]];
-					if (definition.action) return "<td class='act'><button class='del danger'>Supprimer</button></td>";
-					return "<td" + (definition.className ? " class='" + definition.className + "'" : "") + ">"
-						+ "<a class='cell' href='" + href + "'>" + definition.cell(row) + "</a></td>";
-				}).join("");
-				tr.querySelector(".del").onclick = function () { dismissRow(row); };
-				body.appendChild(tr);
-			});
+			rows.forEach(function (row) { body.appendChild(listRow(row, grouping)); });
 		});
 
 		el("listEmpty").className = visible.length === 0 ? "note" : "note hidden";
+		renderBulk();
+	}
+
+	/** L'identifiant d'une ligne du tableau, pour la sélection. */
+	function rowId(row) {
+		return row.kind === "suggestion" ? "s:" + row.key : "m:" + row.uid;
 	}
 
 	/**
-	 * Retire une entrée de la liste : l'info trafic ne concerne pas cette ligne dans ce sens. Ce qui a
-	 * été déclaré part avec, et la confirmation le dit. Une modification sans info trafic, elle, est
-	 * effacée : rien ne la ferait revenir.
+	 * Une case qui coche ou décoche d'un coup toutes ces lignes : une seule, un groupe, ou l'onglet
+	 * entier. Cochée si toutes le sont, à moitié si quelques-unes.
 	 */
-	function dismissRow(row) {
-		var what = row.line + " " + towardOf(row);
-		var question = row.standalone
-			? "Supprimer la modification sans info trafic sur " + what + ", avec sa période et ses tronçons ?"
-			: "Retirer " + what + " de l'info trafic " + row.alertNumber + " ?\n\n"
-				+ "L'entrée disparaît de la liste"
-				+ (row.declared ? ", avec ses tronçons déclarés" : "")
-				+ (row.manualScope ? " et son périmètre saisi" : "")
-				+ ". Elle se rétablit depuis « Ajouter une ligne concernée ».";
-		if (!confirm(question)) return;
+	function pickBox(rows) {
+		var ids = rows.map(rowId);
+		var count = ids.filter(function (id) { return state.selected.has(id); }).length;
+		var box = document.createElement("input");
+		box.type = "checkbox";
+		box.checked = count === ids.length;
+		box.indeterminate = count > 0 && count < ids.length;
+		box.onclick = function (event) {
+			event.stopPropagation();
+			ids.forEach(function (id) {
+				if (box.checked) state.selected.add(id);
+				else state.selected.delete(id);
+			});
+			renderList();
+		};
+		return box;
+	}
 
-		request(API + "/api/dismissed/" + encodeURIComponent(row.key), { method: "PUT" })
+	/** Les lignes cochées, telles que le tableau les connaît. */
+	function selectedRows() {
+		return state.rows.filter(function (row) { return state.selected.has(rowId(row)); });
+	}
+
+	/**
+	 * La barre des actions de masse. Chaque bouton dit ce qu'il fera à la sélection : masquer ce qui est
+	 * visible, afficher ce qui est masqué, supprimer les modifications — de l'IA ou saisies — et
+	 * ignorer les suggestions.
+	 */
+	function renderBulk() {
+		var rows = selectedRows();
+		el("bulkBar").className = rows.length > 0 ? "bulk" : "bulk hidden";
+		if (rows.length === 0) return;
+
+		var modifications = rows.filter(function (row) { return row.kind === "modification"; });
+		var hidden = modifications.filter(function (row) { return row.disabled; }).length;
+
+		el("bulkCount").textContent = rows.length + (rows.length > 1 ? " cochées" : " cochée");
+		el("bulkHide").disabled = modifications.length - hidden === 0;
+		el("bulkShow").disabled = hidden === 0;
+		el("bulkDiscard").textContent = modifications.length === 0 ? "Ignorer"
+			: modifications.length === rows.length ? "Supprimer" : "Ignorer / supprimer";
+	}
+
+	/** Applique une action de masse aux lignes cochées, puis relit le tableau. */
+	function bulk(action) {
+		var rows = selectedRows();
+		var modifications = rows.filter(function (row) { return row.kind === "modification"; });
+
+		if (action === "discard") {
+			var removed = modifications.length;
+			var ignored = rows.length - removed;
+			var parts = [];
+			if (removed > 0) parts.push("supprimer " + removed + (removed > 1 ? " modifications" : " modification"));
+			if (ignored > 0) parts.push("ignorer " + ignored + (ignored > 1 ? " suggestions" : " suggestion"));
+			var fromAi = ignored + modifications.filter(function (row) { return row.origin === "ai"; }).length;
+			var question = parts.join(" et ") + " ?";
+			question = question.charAt(0).toUpperCase() + question.slice(1);
+			if (fromAi > 0) question += "\n\nC'est définitif : l'IA ne recréera ni ne proposera ce qui vient d'elle.";
+			if (!confirm(question)) return;
+		}
+
+		request(API + "/api/bulk", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				action: action,
+				uids: modifications.map(function (row) { return row.uid; }),
+				suggestions: rows.filter(function (row) { return row.kind === "suggestion"; }).map(function (row) { return row.key; })
+			})
+		}).then(function () {
+			state.selected.clear();
+			loadList();
+		}).catch(function (error) { alert(error.message); });
+	}
+
+	/**
+	 * Une ligne du tableau. Une modification s'ouvre d'un clic n'importe où sur la ligne — chaque
+	 * cellule est un lien, qui s'ouvre aussi bien dans un autre onglet. Une suggestion n'a rien à
+	 * ouvrir : elle s'accepte ou s'ignore. La première cellule coche la ligne, pour les actions de masse.
+	 */
+	function listRow(row, grouping) {
+		var tr = document.createElement("tr");
+		var href = row.kind === "modification" ? "#/modification/" + row.uid : null;
+		tr.className = row.kind === "suggestion" ? "suggestion" : row.disabled ? "muted" : "";
+
+		tr.innerHTML = grouping.columns.map(function (column) {
+			var definition = COLUMNS[column[0]];
+			if (definition.action) return "<td class='act'></td>";
+			if (definition.pick) return "<td class='pick'></td>";
+			var content = definition.cell(row);
+			return "<td" + (definition.className ? " class='" + definition.className + "'" : "") + ">"
+				+ (href === null ? content : "<a class='cell' href='" + href + "'>" + content + "</a>") + "</td>";
+		}).join("");
+
+		// Toute la cellule coche : la case seule est une cible bien petite.
+		var pick = tr.querySelector("td.pick");
+		var box = pickBox([row]);
+		pick.appendChild(box);
+		pick.onclick = function (event) { if (event.target !== box) box.click(); };
+
+		var cell = tr.querySelector("td.act");
+		if (row.kind === "suggestion") {
+			cell.appendChild(actionButton("Accepter", "", function () { acceptSuggestion(row); }));
+			cell.appendChild(actionButton("Ignorer", "danger", function () { dismissSuggestion(row); }));
+		} else {
+			var edit = document.createElement("a");
+			edit.className = "button";
+			edit.href = href;
+			edit.textContent = "Éditer";
+			cell.appendChild(edit);
+			cell.appendChild(actionButton(row.disabled ? "Afficher" : "Masquer", "", function () {
+				setVisible(row.uid, row.disabled).then(loadList).catch(function (error) { alert(error.message); });
+			}));
+			cell.appendChild(actionButton("Supprimer", "danger", function () {
+				removeModification(row).then(function (done) { if (done) loadList(); });
+			}));
+		}
+
+		return tr;
+	}
+
+	function actionButton(text, className, onclick) {
+		var button = document.createElement("button");
+		button.textContent = text;
+		button.className = className;
+		button.onclick = onclick;
+		return button;
+	}
+
+	/** Accepte une suggestion, et ouvre la modification qu'elle devient. */
+	function acceptSuggestion(row) {
+		request(API + "/api/suggestions/" + encodeURIComponent(row.key) + "/accept", { method: "POST" })
+			.then(function (created) { go("modification/" + created.uid); })
+			.catch(function (error) { alert(error.message); });
+	}
+
+	function dismissSuggestion(row) {
+		if (!confirm("Ignorer la suggestion " + row.line + " " + towardOf(row) + " de l'info trafic "
+			+ row.alertNumber + " ?\n\nC'est définitif : l'IA ne la proposera plus.")) return;
+		request(API + "/api/suggestions/" + encodeURIComponent(row.key) + "/dismiss", { method: "POST" })
 			.then(loadList)
 			.catch(function (error) { alert(error.message); });
+	}
+
+	/** Rend une modification visible ou invisible. */
+	function setVisible(uid, visible) {
+		return request(API + "/api/modifications/" + uid + "/visible", {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ visible: visible })
+		});
+	}
+
+	/**
+	 * Supprime une modification, et tout ce qui y a été saisi. Celle de l'IA ne sera pas recréée.
+	 * Résout à vrai si c'est fait.
+	 */
+	function removeModification(row) {
+		var what = row.line + " " + towardOf(row);
+		var question = "Supprimer la modification " + what + " et tout ce qui y a été saisi ?"
+			+ (row.origin === "ai" ? "\n\nC'est définitif : l'IA ne la recréera pas." : "");
+		if (!confirm(question)) return Promise.resolve(false);
+
+		return request(API + "/api/modifications/" + row.uid, { method: "DELETE" })
+			.then(function () { return true; })
+			.catch(function (error) { alert(error.message); return false; });
 	}
 
 	function escapeHtml(text) {
@@ -857,117 +1111,13 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 	}
 
-	// --- périmètre : déclarer une ligne et un sens concernés ---
-
-	/**
-	 * Les infos trafic du flux, avec les lignes qu'elles citent et l'état de chaque sens. C'est la
-	 * seule vue qui montre un sens dont l'analyse n'a rien tiré — et c'est précisément celui qu'on
-	 * vient y déclarer concerné.
-	 */
-	function openScopes() {
-		request(API + "/api/alerts").then(function (alerts) {
-			state.alerts = alerts;
-			state.detail = null;
-			showView("scopes");
-			renderScopes();
-		}).catch(function (error) { alert(error.message); go(""); });
+	/** Retient un réglage d'affichage d'une visite à l'autre — sans en dépendre : le stockage peut manquer. */
+	function remember(key, value) {
+		try { window.localStorage.setItem(key, value); } catch (error) { /* rien à retenir */ }
 	}
 
-	function renderScopes() {
-		var list = el("scopeList");
-		list.innerHTML = "";
-
-		state.alerts.forEach(function (alert) {
-			var block = document.createElement("div");
-			block.className = "scopes";
-
-			var head = document.createElement("div");
-			head.className = "head";
-			head.innerHTML = "<span class='ref'>" + escapeHtml(alert.alertNumber) + "</span>"
-				+ "<span class='title'>" + escapeHtml(alert.headerText) + "</span><span class='grow'></span>"
-				+ "<span class='note'>" + escapeHtml(describePeriodsShort(alert.periods)) + "</span>"
-				+ stateBadge(alert);
-			block.appendChild(head);
-
-			alert.routes.forEach(function (route) {
-				route.directions.forEach(function (direction) {
-					block.appendChild(directionRow(route, direction));
-				});
-			});
-
-			list.appendChild(block);
-		});
-
-		el("scopeEmpty").className = state.alerts.length === 0 ? "note" : "note hidden";
-	}
-
-	/** Un sens d'une ligne citée par l'info trafic : ce qu'on en sait, et ce qu'on peut en faire. */
-	function directionRow(route, direction) {
-		var row = document.createElement("div");
-		row.className = "dir";
-
-		var what = direction.dismissed
-			? '<span class="badge off">retirée</span>'
-			: direction.manual
-			? '<span class="badge warn">périmètre saisi</span>'
-			: direction.scoped
-				? '<span class="badge ok">' + direction.removedStopCount + " supprimés</span>"
-				: '<span class="badge off">hors périmètre</span>';
-
-		row.innerHTML = lineChip(route.lineCode, route.line) + "<span class='grow'><span class='toward'>"
-			+ escapeHtml(direction.headsigns.length ? "→ " + direction.headsigns.join(" / ") : "sens " + direction.directionId)
-			+ "</span></span>" + what
-			+ (direction.declared ? ' <span class="badge ok">déclarée</span>' : "");
-
-		// Une entrée retirée se rétablit telle que l'analyse la voit ; la déclarer concernée la
-		// rétablirait aussi, mais avec un périmètre vide à la place de ce que l'analyse y lisait.
-		if (direction.dismissed) {
-			var restore = document.createElement("button");
-			restore.textContent = "Rétablir";
-			restore.onclick = function () {
-				request(API + "/api/dismissed/" + encodeURIComponent(direction.key), { method: "DELETE" })
-					.then(openScopes)
-					.catch(function (error) { alert(error.message); });
-			};
-			row.appendChild(restore);
-			return row;
-		}
-
-		var action = document.createElement("a");
-		action.className = "button";
-		action.href = "#/" + (direction.scoped ? "detour/" : "declare/") + encodeURIComponent(direction.key);
-		action.textContent = direction.scoped ? "Ouvrir" : "Déclarer concernée";
-		row.appendChild(action);
-
-		return row;
-	}
-
-	/**
-	 * Déclare un sens concerné : un périmètre saisi, sans aucun arrêt supprimé. La déviation devient
-	 * déclarable sur-le-champ — c'est là qu'on lui donne son tracé.
-	 *
-	 * C'est une adresse, pour s'ouvrir dans un autre onglet comme n'importe quel lien — et une adresse
-	 * se rouvre : onglet rechargé, lien recopié. Un sens déjà concerné n'est donc pas redéclaré, ce qui
-	 * viderait le périmètre qu'on lui a saisi depuis ; on ouvre simplement sa déviation.
-	 *
-	 * L'adresse de la déclaration est REMPLACÉE par celle de la déviation : le retour du navigateur
-	 * ramène à la liste des infos trafic, et non à une déclaration qu'il rejouerait.
-	 */
-	function declareDirection(key) {
-		var detour = "#/detour/" + encodeURIComponent(key);
-
-		request(API + "/api/detours/" + encodeURIComponent(key)).then(function () {
-			window.location.replace(detour);
-		}, function () {
-			return request(API + "/api/scopes/" + encodeURIComponent(key), {
-				method: "PUT",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ removedStopIds: [] })
-			}).then(function () { window.location.replace(detour); });
-		}).catch(function (error) {
-			alert(error.message);
-			window.location.replace("#/scopes");
-		});
+	function recall(key) {
+		try { return window.localStorage.getItem(key); } catch (error) { return null; }
 	}
 
 	// --- arrêts provisoires ---
@@ -1019,51 +1169,88 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		if (stop.usages.length === 0) return "<span class='note'>aucune</span>";
 
 		return stop.usages.map(function (usage) {
-			var what = lineChip(usage.lineCode, usage.line) + "<span class='toward'>" + escapeHtml(towardOf(usage)) + "</span>";
-			var title = (usage.standalone ? "Sans info trafic" : "Info trafic " + usage.alertNumber)
-				+ (usage.headerText ? " — " + usage.headerText : "");
-			// Les attributs entre guillemets doubles : ce sont eux qu'échappe escapeHtml, et les intitulés
-			// français regorgent d'apostrophes.
+			// La raison suit la ligne en clair : rien ne se lit au survol.
+			var what = lineChip(usage.lineCode, usage.line) + "<span class='toward'>" + escapeHtml(towardOf(usage)) + "</span>"
+				+ (usage.label ? "<span class='note' style='margin-left:6px'>" + escapeHtml(usage.label) + "</span>" : "");
 			return usage.open
-				? '<a class="usage" title="' + escapeHtml(title) + '" href="#/detour/' + encodeURIComponent(usage.key) + '">' + what + "</a>"
-				: '<span class="usage" title="' + escapeHtml(title + " (plus au flux)") + '">' + what + "</span>";
+				? '<a class="usage" href="#/modification/' + usage.uid + '">' + what + "</a>"
+				: '<span class="usage">' + what + "<span class='note' style='margin-left:6px'>(info trafic retombée)</span></span>";
 		}).join("");
 	}
 
+	/** Minuscules et sans accents : « champ de mars » trouve « Champ-de-Mars (provisoire) ». */
+	function searchable(text) {
+		return String(text).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+	}
+
+	/** Les tris du tableau des arrêts. Le numéro d'un arrêt provisoire suit l'ordre de création. */
+	var STOP_SORTS = {
+		name: function (a, b) { return a.name.localeCompare(b.name, "fr"); },
+		recent: function (a, b) { return stopNumber(b) - stopNumber(a); },
+		usages: function (a, b) { return b.usages.length - a.usages.length || a.name.localeCompare(b.name, "fr"); }
+	};
+
+	function stopNumber(stop) { return parseInt(stop.stopId.split(":").pop(), 10) || 0; }
+
+	/** Le tableau des arrêts : ceux que la recherche retient, dans l'ordre choisi. */
 	function renderStopsTable() {
 		var body = el("stopsBody");
 		body.innerHTML = "";
 
-		state.provisionalStops.forEach(function (stop) {
+		var query = searchable(el("stopsQuery").value.trim());
+		var stops = state.provisionalStops.filter(function (stop) {
+			return query === "" || searchable(stop.name).indexOf(query) !== -1 || searchable(stop.stopId).indexOf(query) !== -1;
+		}).sort(STOP_SORTS[el("stopsSort").value] || STOP_SORTS.name);
+
+		stops.forEach(function (stop) {
 			var tr = document.createElement("tr");
+			tr.className = stop.stopId === state.selectedStop ? "selected" : "";
 			tr.innerHTML =
-				'<td><input class="name" value="' + escapeHtml(stop.name) + '">'
+				"<td>" + escapeHtml(stop.name)
 					+ "<div class='note' style='font-size:12px'>" + escapeHtml(stop.stopId) + "</div></td>" +
-				"<td>" + describeUsages(stop) + "</td>" +
-				"<td><button class='del danger'>Supprimer</button></td>";
+				"<td class='act'></td>";
 
-			var input = tr.querySelector(".name");
-			input.onchange = function () {
-				var name = input.value.trim();
-				if (name.length === 0) { input.value = stop.name; return; }
-				updateProvisional(stop, { name: name, latitude: stop.latitude, longitude: stop.longitude });
-			};
+			var cell = tr.querySelector("td.act");
+			cell.appendChild(actionButton("Modifier", "", function () { editProvisional(stop); }));
+			cell.appendChild(actionButton("Supprimer", "danger", function () { deleteProvisional(stop); }));
 
-			var remove = tr.querySelector(".del");
-			remove.onclick = function () { deleteProvisional(stop); };
-
-			// Survoler une ligne montre l'arrêt ; la cliquer y centre la carte.
-			tr.onmouseenter = function () { highlightStop(state.stopsMap, stop); };
-			tr.onmouseleave = clearHighlight;
+			// Cliquer la ligne choisit l'arrêt : son marqueur passe au rouge, et la carte s'y centre.
 			tr.onclick = function (event) {
-				if (event.target.tagName === "INPUT" || event.target.tagName === "BUTTON") return;
+				if (event.target.tagName === "BUTTON") return;
+				selectStop(stop);
 				state.stopsMap.setView([stop.latitude, stop.longitude], Math.max(state.stopsMap.getZoom(), 17));
 			};
 
 			body.appendChild(tr);
 		});
 
-		el("stopsEmpty").className = state.provisionalStops.length === 0 ? "note" : "note hidden";
+		var empty = el("stopsEmpty");
+		empty.textContent = state.provisionalStops.length === 0 ? "Aucun arrêt provisoire." : "Aucun arrêt ne correspond.";
+		empty.className = stops.length === 0 ? "note" : "note hidden";
+	}
+
+	/** Le marqueur d'un arrêt provisoire : une épingle bleue, rouge pour l'arrêt choisi. */
+	function stopPin(selected) {
+		var color = selected ? "#d1242f" : "#1f6feb";
+		return L.divIcon({
+			className: "stopPin",
+			html: '<svg width="24" height="36" viewBox="0 0 24 36"><path d="M12 1C5.9 1 1 5.9 1 12c0 8.3 11 23 11 23s11-14.7 11-23C23 5.9 18.1 1 12 1z" fill="'
+				+ color + '" stroke="#fff" stroke-width="1.5"/><circle cx="12" cy="12" r="4.5" fill="#fff"/></svg>',
+			iconSize: [24, 36],
+			iconAnchor: [12, 35],
+			tooltipAnchor: [12, -22]
+		});
+	}
+
+	/** Choisit un arrêt : sa ligne ressort au tableau, son marqueur passe au rouge et au premier plan. */
+	function selectStop(stop) {
+		state.selectedStop = stop.stopId;
+		Object.keys(state.stopMarkersById).forEach(function (stopId) {
+			var marker = state.stopMarkersById[stopId];
+			marker.setIcon(stopPin(stopId === stop.stopId));
+			marker.setZIndexOffset(stopId === stop.stopId ? 1000 : 0);
+		});
+		renderStopsTable();
 	}
 
 	/**
@@ -1076,13 +1263,18 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 		var bounds = [];
 		state.provisionalStops.forEach(function (stop) {
-			var marker = L.marker([stop.latitude, stop.longitude], { draggable: true })
+			var selected = stop.stopId === state.selectedStop;
+			var marker = L.marker([stop.latitude, stop.longitude], {
+				draggable: true, icon: stopPin(selected), zIndexOffset: selected ? 1000 : 0
+			})
 				.bindTooltip(stop.name)
 				.addTo(state.stopsLayer);
 
+			marker.on("click", function () { selectStop(stop); });
 			marker.on("dragend", function () {
 				var position = marker.getLatLng();
-				updateProvisional(stop, { name: stop.name, latitude: position.lat, longitude: position.lng });
+				updateProvisional(stop, { name: stop.name, latitude: position.lat, longitude: position.lng })
+					.catch(function (error) { setStopsStatus(error.message, "error"); });
 			});
 
 			state.stopMarkersById[stop.stopId] = marker;
@@ -1094,8 +1286,12 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		else state.stopsMap.setView([49.443, 1.099], 12);
 	}
 
+	/**
+	 * Enregistre le nom ou la position d'un arrêt. En cas d'échec, la carte revient à ce que la base
+	 * retient, et l'erreur remonte à qui l'a demandé.
+	 */
 	function updateProvisional(stop, change) {
-		request(API + "/api/provisional-stops/" + encodeURIComponent(stop.stopId), {
+		return request(API + "/api/provisional-stops/" + encodeURIComponent(stop.stopId), {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(change)
@@ -1105,37 +1301,87 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				? "Arrêt mis à jour."
 				: "Arrêt mis à jour, pour " + count + (count > 1 ? " déviations." : " déviation."));
 		}).catch(function (error) {
-			setStopsStatus(error.message, "error");
-			// Le marqueur ou le champ ont déjà bougé : on les ramène à ce que la base retient.
+			// Le marqueur a déjà bougé : on le ramène à ce que la base retient.
 			reloadStops();
+			throw error;
 		});
 	}
 
 	/**
-	 * Supprime l'arrêt, et le retire de toutes les déviations qui le désignent. La confirmation les
+	 * La boîte de dialogue, remplie pour l'occasion. Son « confirm » agit et renvoie une promesse : la boîte
+	 * se ferme quand elle aboutit, et affiche l'erreur sinon — ce qui a été saisi reste là.
+	 */
+	function openDialog(options) {
+		var dialog = el("dialog");
+		el("dialogTitle").textContent = options.title;
+		el("dialogBody").innerHTML = options.body;
+		el("dialogStatus").textContent = "";
+		el("dialogConfirm").textContent = options.confirmText;
+		el("dialogConfirm").className = options.danger ? "danger" : "primary";
+		el("dialogConfirm").disabled = false;
+
+		el("dialogForm").onsubmit = function (event) {
+			event.preventDefault();
+			el("dialogConfirm").disabled = true;
+			options.confirm().then(function () {
+				dialog.close();
+			}).catch(function (error) {
+				el("dialogConfirm").disabled = false;
+				el("dialogStatus").textContent = error.message;
+				el("dialogStatus").style.color = "var(--danger)";
+			});
+		};
+
+		dialog.showModal();
+		var first = el("dialogBody").querySelector("input");
+		if (first) first.select();
+	}
+
+	/** Les modifications qui désignent l'arrêt, telles que les dialogues les listent. */
+	function usagesBlock(stop, intro) {
+		if (stop.usages.length === 0) return "<p class='note'>Aucune modification ne le désigne.</p>";
+		return "<p class='note' style='margin-bottom:4px'>" + intro + "</p>" + describeUsages(stop);
+	}
+
+	/**
+	 * Renomme l'arrêt. Le nouveau nom vaut pour toutes les modifications qui le désignent ; la position
+	 * se change en glissant le marqueur.
+	 */
+	function editProvisional(stop) {
+		openDialog({
+			title: "Modifier l'arrêt provisoire",
+			body: "<div class='field'><label>Nom</label><input id='dialogName' autocomplete='off' value='"
+				+ escapeHtml(stop.name).replace(/'/g, "&#39;") + "'></div>"
+				+ usagesBlock(stop, "Le nouveau nom vaudra pour :"),
+			confirmText: "Enregistrer",
+			confirm: function () {
+				var name = el("dialogName").value.trim();
+				if (name.length === 0) return Promise.reject(new Error("Le nom de l'arrêt est obligatoire."));
+				return updateProvisional(stop, { name: name, latitude: stop.latitude, longitude: stop.longitude });
+			}
+		});
+	}
+
+	/**
+	 * Supprime l'arrêt, et le retire de toutes les déviations qui le désignent. Le dialogue les
 	 * nomme : c'est le moment de voir qu'on s'apprête à toucher à une déviation publiée.
 	 */
 	function deleteProvisional(stop) {
-		var question = "Supprimer l'arrêt provisoire « " + stop.name + " » ?";
-		if (stop.usages.length > 0) {
-			question += "\n\nIl sera retiré de " + stop.usages.length
-				+ (stop.usages.length > 1 ? " déviations qui le désignent :\n" : " déviation qui le désigne :\n")
-				+ stop.usages.map(function (usage) {
-					return "· " + usage.line + " " + towardOf(usage)
-						+ (usage.standalone ? " (sans info trafic)" : " (info trafic " + usage.alertNumber + ")");
-				}).join("\n");
-		}
-		if (!confirm(question)) return;
-
-		clearHighlight();
-		request(API + "/api/provisional-stops/" + encodeURIComponent(stop.stopId), { method: "DELETE" })
-			.then(function (answer) {
-				return reloadStops(answer.withdrawn > 0
-					? "Arrêt supprimé, et retiré de " + answer.withdrawn
-						+ (answer.withdrawn > 1 ? " déviations." : " déviation.")
-					: "Arrêt supprimé.");
-			})
-			.catch(function (error) { setStopsStatus(error.message, "error"); });
+		openDialog({
+			title: "Supprimer « " + stop.name + " » ?",
+			body: usagesBlock(stop, "Il sera retiré de :"),
+			confirmText: "Supprimer",
+			danger: true,
+			confirm: function () {
+				return request(API + "/api/provisional-stops/" + encodeURIComponent(stop.stopId), { method: "DELETE" })
+					.then(function (answer) {
+						return reloadStops(answer.withdrawn > 0
+							? "Arrêt supprimé, et retiré de " + answer.withdrawn
+								+ (answer.withdrawn > 1 ? " déviations." : " déviation.")
+							: "Arrêt supprimé.");
+					});
+			}
+		});
 	}
 
 	/** La pose d'un nouvel arrêt : le nom d'abord, puis un clic sur la carte pour sa position. */
@@ -1144,7 +1390,6 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		el("placeNewStop").className = placing ? "active" : "";
 		el("placeNewStop").textContent = placing ? "Annuler la pose" : "Poser sur la carte";
 		if (state.stopsMap) state.stopsMap.getContainer().style.cursor = placing ? "crosshair" : "";
-		if (placing) setStopsStatus("Cliquer sa position sur la carte.");
 	}
 
 	function onStopsMapClick(event) {
@@ -1162,33 +1407,46 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		}).catch(function (error) { setStopsStatus(error.message, "error"); });
 	}
 
-	// --- modification sans info trafic ---
+	// --- création ---
 
 	/**
-	 * Les champs d'une période d'application, et l'intitulé qui l'accompagne : la création et le détail
-	 * les partagent. Renvoie de quoi les relire, dans la forme que le serveur attend.
-	 *
-	 * Le début a sa date obligatoire, la fin non — sans elle, la période reste ouverte. L'heure est
-	 * toujours facultative : sans elle, le début vaut minuit et la fin couvre la journée entière. Une
-	 * heure de fin sans date de fin ne voudrait rien dire, et son champ reste grisé tant qu'il en manque.
+	 * Les champs d'une période : une date de début, une date de fin, et leurs heures, toutes
+	 * facultatives dans la saisie — c'est le serveur qui exige le début quand il n'y a pas d'info
+	 * trafic à suivre. Une heure de fin sans date de fin ne voudrait rien dire, et son champ reste
+	 * grisé tant qu'il en manque. Renvoie de quoi les relire, dans la forme que le serveur attend.
 	 */
-	function periodFields(container, period) {
+	function periodFields(container, period, hint, inherited) {
 		container.innerHTML =
-			'<div class="field"><label>Intitulé</label><input class="label" placeholder="facultatif"></div>' +
-			'<div class="field"><label>Début</label><input type="date" class="startDate" required>' +
+			'<div class="field"><label>Début</label><input type="date" class="startDate">' +
 				'<input type="time" class="startTime"></div>' +
 			'<div class="field"><label>Fin</label><input type="date" class="endDate">' +
 				'<input type="time" class="endTime"></div>' +
-			'<p class="note">Heures facultatives. Sans fin, la modification reste en vigueur jusqu\'à ce ' +
-				"qu'on la désactive ou la supprime.</p>";
+			'<p class="note hint"></p>';
 
 		function field(name) { return container.querySelector("." + name); }
 
-		field("label").value = period && period.label ? period.label : "";
 		field("startDate").value = period ? period.start.date : "";
 		field("startTime").value = period && period.start.time ? period.start.time : "";
 		field("endDate").value = period && period.end ? period.end.date : "";
 		field("endTime").value = period && period.end && period.end.time ? period.end.time : "";
+		field("hint").textContent = hint;
+
+		// Ce que la période suit quand on la laisse vide, en indication dans les champs — jamais en valeur.
+		// Un champ de date n'affiche pas d'indication : vide, il se fait champ de texte, et redevient
+		// champ de date dès qu'on y entre.
+		if (inherited) {
+			[["startDate", inherited.start.date], ["startTime", inherited.start.time],
+				["endDate", inherited.end.date], ["endTime", inherited.end.time]].forEach(function (entry) {
+				var input = field(entry[0]);
+				var type = input.type;
+				if (!entry[1]) return;
+				input.placeholder = entry[1];
+				var sync = function () { input.type = input.value === "" && document.activeElement !== input ? "text" : type; };
+				input.addEventListener("focus", sync);
+				input.addEventListener("blur", sync);
+				sync();
+			});
+		}
 
 		function syncEnd() {
 			field("endTime").disabled = field("endDate").value === "";
@@ -1199,34 +1457,71 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 		return function () {
 			return {
-				label: field("label").value,
-				start: { date: field("startDate").value, time: field("startTime").value },
+				start: field("startDate").value === "" ? null : { date: field("startDate").value, time: field("startTime").value },
 				end: field("endDate").value === "" ? null : { date: field("endDate").value, time: field("endTime").value }
 			};
 		};
 	}
 
-	/** Le formulaire de création : la ligne, le sens, la période. Le reste se saisit dans le détail. */
+	/**
+	 * Les bornes que suit une période laissée vide, telles que les champs les affichent : le début de
+	 * la première période de l'info trafic, la fin de la dernière.
+	 */
+	function inheritedBounds(periods) {
+		function split(value) {
+			var match = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}:\d{2}))?/.exec(value || "");
+			return match === null ? { date: null, time: null }
+				: { date: match[3] + "/" + match[2] + "/" + match[1], time: match[4] || null };
+		}
+		var first = periods[0], last = periods[periods.length - 1];
+		return { start: split(first && first.start), end: split(last && last.end) };
+	}
+
+	/** Ce que la période devient quand on ne la saisit pas. */
+	function periodHint(attached) {
+		return attached
+			? "Laisser vide pour suivre les dates de l'info trafic. Heures facultatives."
+			: "Date de début obligatoire. Heures facultatives ; sans fin, la période reste ouverte.";
+	}
+
+	/**
+	 * Le formulaire de création : l'info trafic de rattachement s'il y en a une, la ligne, le sens, les
+	 * tracés, la raison et la période. Les arrêts supprimés et les tronçons se saisissent ensuite.
+	 */
 	function openNew() {
-		request(API + "/api/routes").then(function (routes) {
-			state.routes = routes;
+		Promise.all([request(API + "/api/routes"), request(API + "/api/alerts")]).then(function (answers) {
+			state.routes = answers[0];
+			state.alerts = answers[1];
 			state.detail = null;
 			showView("new");
 
-			var select = el("newRoute");
-			select.innerHTML = "";
-			routes.forEach(function (route, index) {
-				var option = document.createElement("option");
-				option.value = String(index);
-				option.textContent = "Ligne " + route.line;
-				select.appendChild(option);
-			});
-			select.onchange = renderNewDirections;
-			renderNewDirections();
+			var alerts = el("newAlert");
+			alerts.innerHTML = "<option value=''>— aucune —</option>" + state.alerts.map(function (alert) {
+				return "<option value='" + escapeHtml(alert.alertNumber) + "'>" + escapeHtml(alert.alertNumber + " — " + alert.headerText) + "</option>";
+			}).join("");
+			alerts.onchange = renderNewAlert;
 
-			state.readNewPeriod = periodFields(el("newPeriod"), null);
+			var routes = el("newRoute");
+			routes.innerHTML = state.routes.map(function (route, index) {
+				return "<option value='" + index + "'>Ligne " + escapeHtml(route.line) + "</option>";
+			}).join("");
+			routes.onchange = renderNewDirections;
+
+			el("newLabel").value = "";
+			state.readNewPeriod = periodFields(el("newPeriod"), null, periodHint(false));
+			renderNewAlert();
+			renderNewDirections();
 			el("newStatus").textContent = "";
 		}).catch(function (error) { alert(error.message); go(""); });
+	}
+
+	/** Rattachée à une info trafic, la raison et la période s'en héritent : les champs le disent. */
+	function renderNewAlert() {
+		var number = el("newAlert").value;
+		var attached = state.alerts.filter(function (alert) { return alert.alertNumber === number; })[0];
+		el("newLabel").placeholder = attached ? attached.headerText : "obligatoire";
+		el("newPeriod").querySelector(".hint").textContent = periodHint(attached !== undefined)
+			+ (attached ? " Info trafic : " + describePeriods(attached.periods) + "." : "");
 	}
 
 	function renderNewDirections() {
@@ -1239,37 +1534,70 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			option.textContent = towardOf(direction);
 			select.appendChild(option);
 		});
+		select.onchange = renderNewPatterns;
+		renderNewPatterns();
+	}
+
+	/** Les tracés du sens choisi, tous cochés : c'est le cas courant, et le seul qui survit à un GTFS neuf. */
+	function renderNewPatterns() {
+		var direction = newDirection();
+		el("newPatterns").innerHTML = (direction ? direction.patterns : []).map(function (pattern) {
+			return "<div><input type='checkbox' checked value='" + escapeHtml(pattern.patternId) + "'>"
+				+ "<span class='name'>" + escapeHtml(pattern.label) + "</span></div>";
+		}).join("");
+	}
+
+	function newDirection() {
+		var route = state.routes[parseInt(el("newRoute").value, 10)];
+		var directionId = parseInt(el("newDirection").value, 10);
+		return route ? route.directions.filter(function (direction) { return direction.directionId === directionId; })[0] : undefined;
 	}
 
 	/**
-	 * Crée la modification, puis ouvre sa déviation. L'adresse de création est REMPLACÉE : le retour du
+	 * Crée la modification, puis ouvre son édition. L'adresse de création est REMPLACÉE : le retour du
 	 * navigateur ramène à la liste, et non à un formulaire qui en créerait une seconde.
 	 */
 	function createModification() {
 		var route = state.routes[parseInt(el("newRoute").value, 10)];
-		if (!route) return;
+		var direction = newDirection();
+		if (!route || !direction) return;
 
+		var checked = Array.prototype.map.call(el("newPatterns").querySelectorAll("input:checked"), function (input) {
+			return input.value;
+		});
 		var status = el("newStatus");
+		if (checked.length === 0) {
+			status.textContent = "Cocher au moins un tracé.";
+			status.style.color = "var(--danger)";
+			return;
+		}
+
+		var period = state.readNewPeriod();
+		var body = {
+			alertNumber: el("newAlert").value || null,
+			routeId: route.routeId,
+			directionId: direction.directionId,
+			patternIds: checked.length === direction.patterns.length ? [] : checked,
+			label: el("newLabel").value,
+			start: period.start,
+			end: period.end
+		};
+
 		status.textContent = "Création…";
 		status.style.color = "var(--muted)";
-
-		var body = state.readNewPeriod();
-		body.routeId = route.routeId;
-		body.directionId = parseInt(el("newDirection").value, 10);
-
 		request(API + "/api/modifications", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(body)
 		}).then(function (created) {
-			window.location.replace("#/detour/" + encodeURIComponent(created.key));
+			window.location.replace("#/modification/" + created.uid);
 		}).catch(function (error) {
 			status.textContent = error.message;
 			status.style.color = "var(--danger)";
 		});
 	}
 
-	// --- détail ---
+	// --- édition ---
 
 	/** Un arrêt tel que le serveur le rend, ramené à ce que l'éditeur manipule. */
 	function adoptStop(stop) {
@@ -1281,15 +1609,11 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	/**
 	 * Un tronçon tel que le serveur le rend, ramené à ce que l'éditeur manipule. Le serveur en propose
-	 * toujours au moins un : à défaut de déclaration, les suites d'arrêts supprimés en dessinent autant
-	 * qu'il y a d'interruptions sur l'itinéraire.
+	 * toujours au moins un : à défaut de tronçon enregistré, les suites d'arrêts supprimés en dessinent
+	 * autant qu'il y a d'interruptions sur l'itinéraire.
 	 */
 	function adoptSegment(segment) {
-		var patterns = checkedPatterns(segment.patternIds);
 		var adopted = {
-			patterns: patterns,
-			// Des tracés nommés que le GTFS ne connaît plus : on le dit, et on ne les coche pas.
-			stalePatterns: segment.patternIds.length === 0 ? 0 : segment.patternIds.length - patterns.length,
 			startStopId: segment.startStopId, endStopId: segment.endStopId,
 			propagatedDelay: segment.propagatedDelay,
 			stops: segment.stops.map(adoptStop),
@@ -1362,19 +1686,21 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		}
 	}
 
-	function openDetail(key) {
-		request(API + "/api/detours/" + encodeURIComponent(key)).then(function (detail) {
+	function openDetail(uid) {
+		request(API + "/api/modifications/" + encodeURIComponent(uid)).then(function (detail) {
 			state.active = 0;
+			// La base provisoire a pu changer ailleurs depuis : elle se relira au prochain ajout.
+			state.allStops = null;
 			state.focusPattern = null;
 			// L'accrochage aux rues est ce qu'on veut presque toujours ; le dessin libre reste à un clic.
 			state.pen = detail.roadRouting ? "route" : "free";
 
 			showView("detail");
-			adoptDetail(detail);
+			adoptDetail(detail, true);
 			setStatus("");
 		}).catch(function (error) {
-			// Une adresse qui ne désigne plus rien — déviation effacée, périmètre rendu à l'analyse,
-			// lien d'hier : on le dit, et on repart de la liste plutôt que de laisser un écran vide.
+			// Une adresse qui ne désigne plus rien — modification supprimée, info trafic retombée, lien
+			// d'hier : on le dit, et on repart de la liste plutôt que de laisser un écran vide.
 			// L'adresse fautive est REMPLACÉE, sans quoi le retour du navigateur y ramènerait aussitôt.
 			alert(error.message);
 			window.location.replace("#/");
@@ -1382,29 +1708,31 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	}
 
 	/**
-	 * Prend pour état courant le détail que le serveur rend. Tout ce qui s'affiche en dépend — le
-	 * périmètre comme les tronçons —, et un périmètre ressaisi change les deux : les arrêts marqués
-	 * supprimés sur l'itinéraire, et les bornes que l'on propose.
+	 * Prend pour état courant le détail que le serveur rend. Tout ce qui s'affiche en dépend. La carte
+	 * ne se recadre qu'à l'ouverture : après un enregistrement, on reste où l'on regardait.
 	 */
-	function adoptDetail(detail) {
+	function adoptDetail(detail, fit) {
 		state.detail = detail;
+		state.patterns = checkedPatterns(detail.patternIds);
+		// Des tracés nommés que le GTFS ne connaît plus : on le dit, et on ne les coche pas.
+		state.stalePatterns = detail.patternIds.length === 0 ? 0 : detail.patternIds.length - state.patterns.length;
+		state.removed = detail.removedFromAnalysis ? null : detail.removedStopIds.slice();
+		state.removedEditing = false;
 		state.segments = detail.segments.map(adoptSegment);
 		if (state.segments.length === 0) state.segments = [emptySegment()];
 		state.active = Math.max(0, Math.min(state.active, state.segments.length - 1));
-		state.scopeSelection = null;
 
-		renderSummary();
-		renderScope();
+		applyRemoved();
+		renderHeading();
+		renderHeader();
+		renderRemoved();
 		renderPublication();
-		// La carte est refaite à chaque adoption, et pas seulement à l'ouverture : un périmètre
-		// ressaisi change les arrêts marqués supprimés, qu'elle dessine en rouge.
-		setupMap();
+		setupMap(fit);
 		renderSegment();
 	}
 
 	function emptySegment() {
 		return {
-			patterns: checkedPatterns([]), stalePatterns: 0,
 			startStopId: null, endStopId: null, propagatedDelay: 0, stops: [],
 			waypoints: [], legs: [], path: [], tripsByPattern: {}
 		};
@@ -1413,8 +1741,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	// --- tracés empruntés ---
 
 	/**
-	 * Les tracés cochés d'un tronçon, d'après ce que le serveur en retient : aucun tracé nommé veut
-	 * dire tous. L'éditeur, lui, tient toujours la liste explicite — c'est ce que montrent les cases.
+	 * Les tracés cochés, d'après ce que le serveur en retient : aucun tracé nommé veut dire tous.
+	 * L'éditeur, lui, tient toujours la liste explicite — c'est ce que montrent les cases.
 	 */
 	function checkedPatterns(patternIds) {
 		var known = state.detail.patterns.map(function (pattern) { return pattern.patternId; });
@@ -1422,32 +1750,31 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		return patternIds.filter(function (patternId) { return known.indexOf(patternId) !== -1; });
 	}
 
-	/** Les tracés que vise un tronçon, dans l'ordre du serveur — les plus longs d'abord. */
-	function segmentPatterns(segment) {
+	/** Les tracés que vise la modification, dans l'ordre du serveur — les plus longs d'abord. */
+	function modPatterns() {
 		return state.detail.patterns.filter(function (pattern) {
-			return segment.patterns.indexOf(pattern.patternId) !== -1;
+			return state.patterns.indexOf(pattern.patternId) !== -1;
 		});
-	}
-
-	/** Deux tronçons peuvent-ils se retrouver sur la même course ? Seulement s'ils visent un même tracé. */
-	function sharePattern(a, b) {
-		return a.patterns.some(function (patternId) { return b.patterns.indexOf(patternId) !== -1; });
 	}
 
 	/** Les courses que le tronçon modifierait : celles des tracés cochés qui desservent ses bornes. */
 	function matchingTrips(segment) {
-		return segment.patterns.reduce(function (total, patternId) {
+		return state.patterns.reduce(function (total, patternId) {
 			return total + (segment.tripsByPattern[patternId] || 0);
 		}, 0);
 	}
 
-	/** Le tracé mis en avant : celui qu'on a cliqué, sinon le premier que vise le tronçon actif. */
+	/** Le tracé mis en avant : celui qu'on a cliqué, sinon le premier que vise la modification. */
 	function focusedPattern() {
 		var patterns = state.detail.patterns;
 		var clicked = patterns.filter(function (pattern) { return pattern.patternId === state.focusPattern; })[0];
-		return clicked || segmentPatterns(seg())[0] || patterns[0] || null;
+		return clicked || modPatterns()[0] || patterns[0] || null;
 	}
 
+	/**
+	 * Les tracés du sens, à cocher. Le nom se clique pour mettre le tracé en avant sur la carte ; le
+	 * compte dit combien de courses de chacun les bornes du tronçon actif désignent.
+	 */
 	function renderPatterns() {
 		var segment = seg();
 		var list = el("patternList");
@@ -1460,17 +1787,16 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 			var input = document.createElement("input");
 			input.type = "checkbox";
-			input.checked = segment.patterns.indexOf(pattern.patternId) !== -1;
+			input.checked = state.patterns.indexOf(pattern.patternId) !== -1;
 			input.onchange = function () {
-				var index = segment.patterns.indexOf(pattern.patternId);
-				if (input.checked && index === -1) segment.patterns.push(pattern.patternId);
-				if (!input.checked && index !== -1) segment.patterns.splice(index, 1);
+				var chosen = state.patterns.filter(function (patternId) { return patternId !== pattern.patternId; });
+				if (input.checked) chosen.push(pattern.patternId);
 				// L'ordre des cases, pas celui des clics : c'est lui qui départage les tracés ensuite.
-				var chosen = segment.patterns;
-				segment.patterns = state.detail.patterns
+				state.patterns = state.detail.patterns
 					.map(function (candidate) { return candidate.patternId; })
 					.filter(function (patternId) { return chosen.indexOf(patternId) !== -1; });
-				segment.stalePatterns = 0;
+				state.stalePatterns = 0;
+				renderRemoved();
 				renderSegment();
 			};
 
@@ -1496,24 +1822,25 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		});
 
 		var note = el("patternNote");
-		if (segment.stalePatterns > 0) {
-			note.textContent = segment.stalePatterns + " tracé(s) visé(s) ont disparu du GTFS : cocher ceux que le tronçon vise.";
+		if (state.stalePatterns > 0) {
+			note.textContent = state.stalePatterns + " tracé(s) visé(s) ont disparu du GTFS : cocher ceux que la modification vise.";
 			note.style.color = "var(--warn)";
-		} else if (segment.patterns.length === 0) {
-			note.textContent = "Aucun tracé coché : le tronçon ne vise aucune course.";
+		} else if (state.patterns.length === 0) {
+			note.textContent = "Aucun tracé coché : la modification ne vise aucune course.";
 			note.style.color = "var(--danger)";
 		} else {
-			note.textContent = "";
+			note.textContent = bounded ? "Courses d'ici la fin du service entre les bornes du tronçon " + (state.active + 1) + "." : "";
+			note.style.color = "var(--muted)";
 		}
 	}
 
 	/**
-	 * Les itinéraires d'origine sur la carte : ceux que vise le tronçon actif en avant, les autres en
+	 * Les itinéraires d'origine sur la carte : ceux que vise la modification en avant, les autres en
 	 * retrait, et le tracé mis en avant plus épais — c'est sur lui que porte l'aperçu.
 	 */
 	function styleShapes() {
 		var targeted = {};
-		segmentPatterns(seg()).forEach(function (pattern) { targeted[pattern.shapeId] = true; });
+		modPatterns().forEach(function (pattern) { targeted[pattern.shapeId] = true; });
 		var focused = focusedPattern();
 
 		Object.keys(state.shapeLayers).forEach(function (shapeId) {
@@ -1552,7 +1879,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		if (state.detail.removedStopIds.length === 0) return false;
 
 		var removed = false;
-		segmentPatterns(segment).forEach(function (pattern) {
+		modPatterns().forEach(function (pattern) {
 			var sequence = pattern.sequence;
 			var start = -1, end = -1;
 			sequence.forEach(function (stop, index) {
@@ -1576,10 +1903,6 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			var what = segment.stops.length > 0 ? segment.stops.length + " arrêts"
 				: segment.path.length >= 2 ? (removesStops(segment) ? "tracé seul" : "chemin")
 				: "vide";
-			// Un tronçon qui ne vise qu'une partie des tracés le dit dès l'onglet : c'est ce qui distingue
-			// deux tronçons aux mêmes bornes.
-			var total = state.detail.patterns.length;
-			if (segment.patterns.length < total) what += " · " + segment.patterns.length + "/" + total + " tracés";
 			button.textContent = "Tronçon " + (index + 1) + " · " + what;
 			button.className = index === state.active ? "active" : "";
 			button.onclick = function () { selectSegment(index); };
@@ -1609,10 +1932,6 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		renderSegment();
 	}
 
-	function backToList() {
-		go("");
-	}
-
 	/**
 	 * Le nombre de courses que les bornes retenues modifieraient. À zéro, rien ne sortira dans le feed
 	 * — pas même les arrêts de substitution : c'est le signe que les bornes ne figurent sur l'horaire
@@ -1623,7 +1942,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var note = el("tripCount");
 		note.textContent = count > 0
 			? count + " courses concernées d'ici la fin du service."
-			: seg().patterns.length === 0
+			: state.patterns.length === 0
 				? "Aucun tracé coché : ce tronçon ne sera pas publié."
 				: "Aucune course des tracés cochés ne dessert ces bornes : ce tronçon ne sera pas publié.";
 		note.style.color = count === 0 ? "var(--danger)" : "var(--muted)";
@@ -1644,7 +1963,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 		clearTimeout(state.countTimer);
 		state.countTimer = setTimeout(function () {
-			var url = API + "/api/detours/" + encodeURIComponent(state.detail.key) + "/trip-count"
+			var url = API + "/api/modifications/" + state.detail.uid + "/trip-count"
 				+ "?start=" + encodeURIComponent(segment.startStopId) + "&end=" + encodeURIComponent(segment.endStopId);
 			// Le compte revient par tracé, qu'il soit coché ou non : cocher ou décocher n'a alors plus
 			// rien à redemander, et chaque case dit si son tracé dessert ces bornes.
@@ -1657,9 +1976,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		}, 150);
 	}
 
-	// --- périmètre du sens ---
+	// --- arrêts supprimés ---
 
-	/** Le libellé d'un arrêt de la ligne, d'après les itinéraires que le détail porte. */
+	/** Le libellé d'un arrêt de la ligne, d'après les tracés que le détail porte. */
 	function stopNameOf(stopId) {
 		var found = stopId;
 		state.detail.patterns.forEach(function (pattern) {
@@ -1668,197 +1987,155 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		return found;
 	}
 
+	/** Les arrêts supprimés tels que l'éditeur les tient : saisis, ou, à défaut, ceux de l'analyse. */
+	function currentRemoved() {
+		return state.removed !== null ? state.removed : state.detail.analysisStopIds;
+	}
+
 	/**
-	 * Ce que l'info trafic supprime dans ce sens — et d'où on le tient. L'analyse ne lit que le texte,
-	 * et le texte ne dit pas tout : la liste se reprend à la main, et c'est elle qui fait foi ensuite,
-	 * y compris vide — « concernée, mais sans suppression ».
+	 * Reporte les arrêts supprimés sur les tracés du détail : la carte les dessine en rouge, les listes
+	 * de bornes les marquent, et c'est d'eux que se lit ce que supprime un tronçon.
 	 */
-	function renderScope() {
+	function applyRemoved() {
+		var removed = {};
+		currentRemoved().forEach(function (stopId) { removed[stopId] = true; });
+		state.detail.patterns.forEach(function (pattern) {
+			pattern.sequence.forEach(function (stop) { stop.removed = removed[stop.stopId] === true; });
+		});
+		state.detail.removedStopIds = currentRemoved().slice();
+	}
+
+	/**
+	 * Les arrêts que la modification supprime. Rattachée à une info trafic, elle suit l'analyse tant
+	 * qu'on ne les saisit pas ; la saisie fait foi ensuite, y compris vide — et se rend à l'analyse
+	 * d'un clic. Sans info trafic, ils sont toujours saisis.
+	 */
+	function renderRemoved() {
 		var detail = state.detail;
-		var summary = el("scopeSummary");
-		var picker = el("scopePicker");
-		var actions = el("scopeActions");
+		var attached = detail.alertNumber !== null;
+		var summary = el("removedSummary");
+		var picker = el("removedPicker");
+		var actions = el("removedActions");
 		picker.innerHTML = "";
 		actions.innerHTML = "";
 
-		if (state.scopeSelection === null) {
-			var names = detail.removedStopIds.map(stopNameOf);
-			// Sans info trafic, il n'y a pas d'analyse : le périmètre est toujours saisi, et le dire
-			// n'apprendrait rien.
-			summary.innerHTML = (detail.standalone ? ""
-				: detail.manualScope ? '<span class="badge warn">saisi à la main</span> '
-				: '<span class="badge ok">analyse du texte</span> ')
-				+ (names.length === 0
-					? "Aucun arrêt supprimé dans ce sens : seul le chemin peut changer."
-					: names.length + (names.length > 1 ? " arrêts supprimés : " : " arrêt supprimé : ")
-						+ escapeHtml(names.join(", ")) + ".");
+		// Seuls comptent les arrêts que desservent les tracés visés : l'analyse porte tous les quais d'un
+		// nom, y compris ceux d'autres lignes ou de l'autre sens, qui ne suppriment rien ici.
+		var onCourse = {};
+		routeStops(modPatterns()).forEach(function (stop) { onCourse[stop.stopId] = true; });
+		var names = currentRemoved()
+			.filter(function (stopId) { return onCourse[stopId] === true; })
+			.map(stopNameOf);
+		summary.innerHTML = (!attached ? ""
+			: state.removed === null ? '<span class="badge ok">selon l\'analyse</span> '
+			: '<span class="badge warn">saisis</span> ')
+			+ (names.length === 0
+				? "Aucun arrêt supprimé : seul le chemin peut changer."
+				: names.length + (names.length > 1 ? " arrêts supprimés : " : " arrêt supprimé : ")
+					+ escapeHtml(names.join(", ")) + ".");
 
-			var edit = document.createElement("button");
-			edit.textContent = detail.manualScope ? "Reprendre la saisie" : "Saisir le périmètre";
-			edit.onclick = function () {
-				state.scopeSelection = detail.removedStopIds.slice();
-				renderScope();
-			};
-			actions.appendChild(edit);
-
-			if (detail.manualScope && !detail.standalone) {
-				var revert = document.createElement("button");
-				revert.className = "danger";
-				revert.textContent = "Rendre à l'analyse";
-				revert.onclick = revertScope;
-				actions.appendChild(revert);
-			}
-			return;
+		if (attached && !state.removedEditing) {
+			actions.appendChild(actionButton("Modifier", "", function () {
+				if (state.removed === null) state.removed = detail.analysisStopIds.slice();
+				state.removedEditing = true;
+				onRemovedChanged();
+			}));
+		} else {
+			var box = document.createElement("div");
+			box.className = "picker";
+			routeStops().forEach(function (stop) {
+				var label = document.createElement("label");
+				var input = document.createElement("input");
+				input.type = "checkbox";
+				input.checked = state.removed.indexOf(stop.stopId) !== -1;
+				input.onchange = function () {
+					state.removed = state.removed.filter(function (stopId) { return stopId !== stop.stopId; });
+					if (input.checked) state.removed.push(stop.stopId);
+					onRemovedChanged();
+				};
+				label.appendChild(input);
+				label.appendChild(document.createTextNode(stop.name));
+				box.appendChild(label);
+			});
+			picker.appendChild(box);
 		}
 
-		summary.innerHTML = detail.standalone
-			? "Cocher les arrêts que la modification supprime dans ce sens — aucun arrêt coché veut dire "
-				+ "que seul le chemin change."
-			: "Cocher les arrêts que l'info trafic supprime dans ce sens. La liste "
-				+ "remplacera ce que l'analyse en dit — aucun arrêt coché veut dire que la ligne est "
-				+ "concernée sans perdre d'arrêt.";
-
-		var box = document.createElement("div");
-		box.className = "picker";
-		routeStops().forEach(function (stop) {
-			var label = document.createElement("label");
-			var input = document.createElement("input");
-			input.type = "checkbox";
-			input.checked = state.scopeSelection.indexOf(stop.stopId) !== -1;
-			input.onchange = function () {
-				var index = state.scopeSelection.indexOf(stop.stopId);
-				if (input.checked && index === -1) state.scopeSelection.push(stop.stopId);
-				if (!input.checked && index !== -1) state.scopeSelection.splice(index, 1);
-			};
-			label.appendChild(input);
-			label.appendChild(document.createTextNode(stop.name));
-			box.appendChild(label);
-		});
-		picker.appendChild(box);
-
-		var save = document.createElement("button");
-		save.className = "primary";
-		save.textContent = "Enregistrer le périmètre";
-		save.onclick = saveScope;
-		actions.appendChild(save);
-
-		var cancel = document.createElement("button");
-		cancel.textContent = "Annuler";
-		cancel.onclick = function () { state.scopeSelection = null; renderScope(); };
-		actions.appendChild(cancel);
+		if (attached && state.removed !== null) {
+			actions.appendChild(actionButton("Suivre l'analyse", "", function () {
+				state.removed = null;
+				state.removedEditing = false;
+				onRemovedChanged();
+			}));
+		}
 	}
 
-	function saveScope() {
-		// Le périmètre s'enregistre à part, et le serveur rend le détail entier : ce qui n'a pas été
-		// enregistré des tronçons repartirait avec. Mieux vaut le dire que le faire disparaître.
-		var drawn = state.segments.some(function (segment) { return segment.path.length >= 2; });
-		if (drawn && !confirm("Les tronçons non enregistrés seront perdus. Enregistrer le périmètre ?")) return;
-
-		setStatus("Enregistrement du périmètre…");
-		request(API + "/api/scopes/" + encodeURIComponent(state.detail.key), {
-			method: "PUT",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ removedStopIds: state.scopeSelection })
-		}).then(function (detail) {
-			adoptDetail(detail);
-			setStatus("Périmètre enregistré.", "ok");
-		}).catch(function (error) { setStatus(error.message, "error"); });
+	/** Un arrêt coché ou décoché : la carte et le tronçon actif se relisent aussitôt. */
+	function onRemovedChanged() {
+		applyRemoved();
+		renderRemoved();
+		drawRouteStops();
+		renderSegment();
 	}
 
-	function revertScope() {
-		if (!confirm("Rendre le périmètre à l'analyse du texte ?")) return;
-		request(API + "/api/scopes/" + encodeURIComponent(state.detail.key), { method: "DELETE" })
-			.then(function () {
-				// Le périmètre rendu à l'analyse peut ne plus rien porter du tout : la déviation disparaît
-				// alors de la liste, et il n'y a plus de détail à relire.
-				return request(API + "/api/detours/" + encodeURIComponent(state.detail.key))
-					.then(adoptDetail)
-					.catch(backToList);
-			})
-			.catch(function (error) { setStatus(error.message, "error"); });
+	// --- en-tête et publication ---
+
+	/** Où en est la période : ce qui court, ce qui vient, ce qui est fini. */
+	function phaseBadge(row) {
+		if (row.phase === "current") return '<span class="badge ok">en cours</span>';
+		if (row.phase === "ended") return '<span class="badge off">terminée</span>';
+		return '<span class="badge off">à venir</span>';
 	}
 
-	function renderSummary() {
+	/** La ligne, le sens, l'origine, l'état — et l'info trafic de rattachement, son texte replié. */
+	function renderHeading() {
 		var detail = state.detail;
 		var heading = "<div class='heading'>" + lineChip(detail.lineCode, detail.line)
-			+ "<span>" + escapeHtml(detail.line + " " + towardOf(detail)) + "</span><span class='grow'></span>"
-			+ stateBadge(detail) + "</div>";
+			+ "<span class='toward'>" + escapeHtml(towardOf(detail)) + "</span>"
+			+ "<span class='badges'><div>" + (detail.disabled ? '<span class="badge warn">invisible</span>' : "")
+			+ phaseBadge(detail) + "</div><div>" + originBadge(detail) + "</div></span></div>";
 
-		if (!detail.standalone) {
-			// Le texte de l'info trafic est long, plans compris : il se déplie à la demande, et ne
-			// repousse pas les tronçons hors de vue à chaque ouverture.
-			el("summary").innerHTML = heading +
-				"<p style='margin:0 0 4px'><span class='ref'>" + escapeHtml(detail.alertNumber) + "</span>"
-					+ "<strong>" + escapeHtml(detail.headerText) + "</strong></p>" +
-				"<p class='note' style='margin:0'>" + escapeHtml(describePeriods(detail.periods)) + "</p>" +
-				"<details><summary>Texte de l'info trafic</summary><div class='richtext'>" + detail.descriptionHtml + "</div></details>";
-			state.readPeriod = null;
-			return;
-		}
-
-		// Sans info trafic, c'est ici que vivent l'intitulé et la période : ils se reprennent sur place.
-		el("summary").innerHTML = heading +
-			"<p style='margin:0'>" + perturbationRef(detail) + "<strong>" + escapeHtml(detail.headerText) + "</strong></p>" +
-			"<h3>Période d'application</h3><div class='form' id='periodEditor'></div>" +
-			"<div class='row'><button id='savePeriod'>Enregistrer la période</button></div>";
-
-		state.readPeriod = periodFields(el("periodEditor"), detail.period);
-		el("savePeriod").onclick = savePeriod;
+		// Le texte de l'info trafic est long, plans compris : il se déplie à la demande.
+		el("summary").innerHTML = heading + (detail.alertNumber === null
+			? "<p class='note' style='margin:0 0 8px'>Sans info trafic.</p>"
+			: "<p style='margin:0 0 4px'>" + perturbationRef(detail) + "<strong>" + escapeHtml(detail.alertHeader) + "</strong></p>"
+				+ "<details><summary>Texte de l'info trafic</summary><div class='richtext'>" + detail.alertDescriptionHtml + "</div></details>");
 	}
 
-	/**
-	 * La période s'enregistre à part, comme le périmètre. Elle ne touche pas aux tronçons : on n'en
-	 * reprend que ce qu'elle change — l'intitulé, les dates, l'état —, et ce qui est en cours de
-	 * saisie sur la carte reste où il est.
-	 */
-	function savePeriod() {
-		setStatus("Enregistrement de la période…");
-		request(API + "/api/modifications/" + encodeURIComponent(state.detail.alertNumber), {
-			method: "PUT",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(state.readPeriod())
-		}).then(function (detail) {
-			adoptState(detail);
-			renderSummary();
-			setStatus("Période enregistrée.", "ok");
-		}).catch(function (error) { setStatus(error.message, "error"); });
+	/** La raison et la période : saisies, ou héritées de l'info trafic — ce que disent les champs vides. */
+	function renderHeader() {
+		var detail = state.detail;
+		var attached = detail.alertNumber !== null;
+		el("label").value = detail.labelInput || "";
+		el("label").placeholder = attached ? detail.alertHeader : "obligatoire";
+		state.readPeriod = periodFields(el("period"), detail.periodInput, periodHint(attached)
+			+ (attached ? " Info trafic : " + describePeriods(detail.alertPeriods) + "." : ""),
+			attached ? inheritedBounds(detail.alertPeriods) : null);
+		renderPatterns();
 	}
 
-	/** Reprend du détail rendu ce qui ne tient pas aux tronçons : la période, l'intitulé, l'état. */
-	function adoptState(detail) {
-		["headerText", "period", "periods", "active", "ended", "disabled"].forEach(function (name) {
-			state.detail[name] = detail[name];
-		});
-	}
-
-	/**
-	 * La désactivation, et ce qu'elle fait. Elle vaut pour toute modification : désactivée, rien ne
-	 * sort — ni la modification, ni les arrêts que son périmètre supprime.
-	 */
+	/** Les deux actions qui ne passent pas par l'enregistrement : la visibilité, et la suppression. */
 	function renderPublication() {
 		var detail = state.detail;
-		el("toggleDisabled").textContent = detail.disabled ? "Réactiver" : "Désactiver";
-		el("remove").textContent = detail.standalone ? "Supprimer la modification" : "Supprimer la déclaration";
-
-		var note = el("disabledNote");
-		note.textContent = detail.disabled
-			? "Désactivée : rien n'est publié, ni la modification ni ses arrêts supprimés."
-			: "";
-		note.style.color = "var(--warn)";
+		el("toggleVisible").textContent = detail.disabled ? "Afficher" : "Masquer";
+		el("remove").textContent = "Supprimer";
 	}
 
-	function toggleDisabled() {
-		var disabled = !state.detail.disabled;
-		request(API + "/api/detours/" + encodeURIComponent(state.detail.key) + "/disabled", {
-			method: "PUT",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ disabled: disabled })
-		}).then(function (detail) {
-			adoptState(detail);
-			renderSummary();
+	/**
+	 * La visibilité s'applique tout de suite, sans enregistrer le reste : ce qui est en cours de saisie
+	 * reste où il est.
+	 */
+	function toggleVisible() {
+		var visible = state.detail.disabled;
+		setVisible(state.detail.uid, visible).then(function () {
+			state.detail.disabled = !visible;
+			renderHeading();
 			renderPublication();
-			setStatus(disabled ? "Désactivée." : "Réactivée.", "ok");
+			setStatus(visible ? "Visible : publiée pendant sa période." : "Invisible : plus rien n'est publié.", "ok");
 		}).catch(function (error) { setStatus(error.message, "error"); });
+	}
+
+	function remove() {
+		removeModification(state.detail).then(function (done) { if (done) go(""); });
 	}
 
 	/**
@@ -1885,7 +2162,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	function referenceOf(segment) {
 		var startStopId = segment.startStopId;
 		var found = null;
-		segmentPatterns(segment).forEach(function (pattern) {
+		modPatterns().forEach(function (pattern) {
 			var sequence = pattern.sequence;
 			if (found !== null) return;
 			for (var index = 0; index < sequence.length; index += 1) {
@@ -1899,7 +2176,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	function renderBounds() {
 		var segment = seg();
-		var stops = routeStops(segmentPatterns(segment));
+		var stops = routeStops(modPatterns());
 
 		// Les bornes désignent les courses dans tous les cas — celles dont l'horaire porte les deux, dans
 		// l'ordre. Ce qu'elles disent de plus dépend du périmètre : des arrêts supprimés, ou les deux
@@ -2010,10 +2287,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			var reference = referenceOf(current);
 			if (!reference) return found;
 
-			// Seul un tronçon qui court sur les mêmes courses peut en absorber un autre.
 			var index = -1;
 			state.segments.forEach(function (other, rank) {
-				if (other !== current && other.endStopId === reference.stopId && sharePattern(other, current)) index = rank;
+				if (other !== current && other.endStopId === reference.stopId) index = rank;
 			});
 			if (index === -1) return found;
 
@@ -2038,8 +2314,15 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	/**
 	 * Met un arrêt en lumière : un large anneau autour de lui, et son nom, au centre de la carte. Le
 	 * zoom ne bouge pas : on voit l'arrêt au milieu de ce qu'on regardait, et non en bordure.
+	 *
+	 * La vue d'avant est retenue, pour y revenir quand le survol cesse (cf. endHighlight). D'un arrêt
+	 * survolé au suivant, c'est toujours celle d'avant le premier.
 	 */
 	function highlightStop(map, stop) {
+		clearTimeout(state.returnTimer);
+		if (state.returnView === null || state.returnView.map !== map) {
+			state.returnView = { map: map, center: map.getCenter(), zoom: map.getZoom() };
+		}
 		clearHighlight();
 		if (stop.latitude === null || stop.longitude === null) return;
 
@@ -2058,10 +2341,35 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		state.highlight = null;
 	}
 
-	function setupMap() {
+	/**
+	 * Le survol cesse : l'arrêt s'éteint, et la carte revient où elle était. Un instant après seulement,
+	 * pour ne pas faire l'aller-retour en passant d'un arrêt survolé au suivant.
+	 */
+	function endHighlight() {
+		clearHighlight();
+		clearTimeout(state.returnTimer);
+		state.returnTimer = setTimeout(function () {
+			var view = state.returnView;
+			state.returnView = null;
+			if (view !== null) view.map.setView(view.center, view.zoom);
+		}, 150);
+	}
+
+	/** L'arrêt survolé est choisi : la carte reste où le survol l'a menée. */
+	function keepView() {
+		clearTimeout(state.returnTimer);
+		state.returnView = null;
+	}
+
+	/**
+	 * La carte d'une modification : les itinéraires d'origine et les arrêts de la ligne. Elle ne se
+	 * recadre que sur demande — à l'ouverture, pas après un enregistrement.
+	 */
+	function setupMap(fit) {
 		if (state.map === null) {
 			state.map = createMap("map");
 			state.base = L.layerGroup().addTo(state.map);
+			state.pickLayer = L.layerGroup().addTo(state.map);
 			state.routeLayer = L.layerGroup().addTo(state.map);
 			// Les autres tronçons passent sous celui qu'on édite : ils se voient, ils ne gênent pas.
 			state.otherLayer = L.layerGroup().addTo(state.map);
@@ -2070,7 +2378,6 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		}
 
 		state.base.clearLayers();
-		state.routeLayer.clearLayers();
 		state.shapes = [];
 		state.shapeLayers = {};
 
@@ -2085,6 +2392,24 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			state.shapeLayers[shape.shapeId] = L.polyline(points, { color: "#8b949e", weight: 4, opacity: .7 }).addTo(state.base);
 			bounds = bounds.concat(points);
 		});
+
+		drawRouteStops();
+
+		if (fit) {
+			routeStops().forEach(function (stop) {
+				if (stop.latitude !== null && stop.longitude !== null) bounds.push([stop.latitude, stop.longitude]);
+			});
+			if (bounds.length > 0) state.map.fitBounds(L.latLngBounds(bounds).pad(.05));
+			else state.map.setView([49.443, 1.099], 12);
+		}
+
+		// La carte est révélée après coup : Leaflet a mesuré un conteneur encore caché.
+		setTimeout(function () { state.map.invalidateSize(); }, 0);
+	}
+
+	/** Les arrêts de la ligne, les supprimés en rouge. Redessinés dès qu'on coche ou décoche. */
+	function drawRouteStops() {
+		state.routeLayer.clearLayers();
 
 		routeStops().forEach(function (stop) {
 			if (stop.latitude === null || stop.longitude === null) return;
@@ -2103,14 +2428,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				addStop({ stopId: stop.stopId, provisional: false, name: stop.name,
 					latitude: stop.latitude, longitude: stop.longitude });
 			});
-			bounds.push([stop.latitude, stop.longitude]);
 		});
-
-		if (bounds.length > 0) state.map.fitBounds(L.latLngBounds(bounds).pad(.05));
-		else state.map.setView([49.443, 1.099], 12);
-
-		// La carte est révélée après coup : Leaflet a mesuré un conteneur encore caché.
-		setTimeout(function () { state.map.invalidateSize(); }, 0);
 	}
 
 	function setMode(mode) {
@@ -2121,6 +2439,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		el("draw").className = mode === "draw" ? "grow active" : "grow";
 		el("draw").textContent = mode === "draw" ? "Terminer le tracé" : "Dessiner";
 		el("stopSearch").className = searching ? "" : "hidden";
+		showPickableStops(searching);
 		// Seuls la pose d'un arrêt et le tracé se prennent sur la carte ; la recherche, au clavier.
 		state.map.getContainer().style.cursor = mode === "place" || mode === "draw" ? "crosshair" : "";
 		if (mode === "search") el("stopQuery").focus();
@@ -2145,6 +2464,45 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	// --- recherche d'arrêts ---
 
 	/**
+	 * Les arrêts désignables sur la carte, le temps d'ajouter un arrêt : ceux du GTFS en bleu, les
+	 * provisoires en ocre, chacun ajouté d'un clic. Les arrêts de la ligne, déjà dessinés et déjà
+	 * cliquables, n'y sont pas repris. Ils passent sous tout le reste de la carte.
+	 */
+	function showPickableStops(show) {
+		state.pickLayer.clearLayers();
+		if (!show) return;
+
+		if (state.allStops === null) {
+			request(API + "/api/stops/all").then(function (stops) {
+				state.allStops = stops;
+				if (state.mode === "search" || state.mode === "place") showPickableStops(true);
+			}).catch(function (error) { setStatus(error.message, "error"); });
+			return;
+		}
+
+		var onRoute = {};
+		routeStops().forEach(function (stop) { onRoute[stop.stopId] = true; });
+
+		state.allStops.forEach(function (entry) {
+			var stop = { stopId: entry[0], name: entry[1], latitude: entry[2], longitude: entry[3], provisional: entry[4] };
+			if (onRoute[stop.stopId]) return;
+
+			var color = stop.provisional ? "#9a6700" : "#1f6feb";
+			var marker = L.circleMarker([stop.latitude, stop.longitude], {
+				radius: 4, color: color, weight: 2, fillColor: "#fff", fillOpacity: 1
+			}).bindTooltip(stop.name).addTo(state.pickLayer);
+			marker.bringToBack();
+
+			// En pose d'un nouvel arrêt, le clic revient à la carte : c'est une position qu'on donne.
+			marker.on("click", function (event) {
+				if (state.mode !== "search") return;
+				L.DomEvent.stopPropagation(event);
+				addStop(stop);
+			});
+		});
+	}
+
+	/**
 	 * Désigne un arrêt, du GTFS ou de la base provisoire. La déviation ne retient que son identifiant
 	 * et le temps pour l'atteindre : ce qu'il est se lit ailleurs, et suit ses propres modifications.
 	 */
@@ -2167,8 +2525,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	}
 
 	function searchStops() {
-		// Les résultats vont être refaits : celui qu'on survolait n'existera plus pour signaler qu'on le quitte.
-		clearHighlight();
+		// Les résultats vont être refaits : celui qu'on survolait n'existera plus pour signaler qu'on le
+		// quitte. C'en est la fin, et la carte revient où elle était.
+		if (state.highlight !== null) endHighlight();
 		var query = el("stopQuery").value.trim();
 		var results = el("stopResults");
 		var hint = el("searchHint");
@@ -2189,8 +2548,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				// Plusieurs arrêts portent souvent le même nom — deux quais, deux communes : c'est la carte
 				// qui les départage, et le survol les y montre avant qu'on choisisse.
 				row.onmouseenter = function () { highlightStop(state.map, stop); };
-				row.onmouseleave = clearHighlight;
+				row.onmouseleave = endHighlight;
 				row.onclick = function () {
+					keepView();
 					clearHighlight();
 					addStop(stop);
 					state.map.panTo([stop.latitude, stop.longitude]);
@@ -2220,6 +2580,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ name: name, latitude: latlng.lat, longitude: latlng.lng })
 		}).then(function (stop) {
+			state.allStops = null;
 			el("stopQuery").value = "";
 			el("stopResults").innerHTML = "";
 			addStop({ stopId: stop.stopId, provisional: true, name: stop.name,
@@ -2234,6 +2595,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ name: stop.name, latitude: stop.latitude, longitude: stop.longitude })
 		}).then(function () {
+			state.allStops = null;
 			setStatus("Arrêt mis à jour, pour toutes les déviations qui le désignent.", "ok");
 		}).catch(function (error) { setStatus(error.message, "error"); });
 	}
@@ -2732,7 +3094,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var drawn = [];
 		state.segments.forEach(function (segment) {
 			if (segment.path.length < 2) return;
-			if (pattern !== null && segment.patterns.indexOf(pattern.patternId) === -1) return;
+			if (pattern !== null && state.patterns.indexOf(pattern.patternId) === -1) return;
 			var from = nearestIndex(shape.points, segment.path[0]);
 			var to = nearestIndex(shape.points, segment.path[segment.path.length - 1]);
 			// Reprend-on l'itinéraire ? Seulement si le tracé y ramène : cf. spliceShape, côté serveur.
@@ -2781,20 +3143,31 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		status.style.color = kind === "error" ? "var(--danger)" : kind === "ok" ? "var(--ok)" : "var(--muted)";
 	}
 
+	/** Un tronçon sans arrêt de substitution ni tracé n'annonce rien : il n'est pas enregistré. */
+	function hasContent(segment) {
+		return segment.stops.length > 0 || segment.path.length >= 2;
+	}
+
+	/** Tout part d'un bloc : raison, période, tracés, arrêts supprimés, tronçons. */
 	function save() {
 		// Aucun tracé coché s'enverrait comme une liste vide, que le serveur lit « tous » : c'est le
 		// seul cas qu'on refuse avant d'envoyer.
-		var unchecked = state.segments.map(function (segment) { return segment.patterns.length === 0; }).indexOf(true);
-		if (unchecked !== -1) {
-			setStatus("Tronçon " + (unchecked + 1) + " : cocher au moins un tracé.", "error");
+		if (state.patterns.length === 0) {
+			setStatus("Cocher au moins un tracé.", "error");
 			return;
 		}
 
-		var total = state.detail.patterns.length;
+		var period = state.readPeriod();
+		var kept = state.segments.filter(hasContent);
+		var dropped = state.segments.length - kept.length;
 		var payload = {
-			segments: state.segments.map(function (segment) {
+			label: el("label").value,
+			start: period.start,
+			end: period.end,
+			patternIds: state.patterns.length === state.detail.patterns.length ? [] : state.patterns,
+			removedStopIds: state.removed,
+			segments: kept.map(function (segment) {
 				return {
-					patternIds: segment.patterns.length === total ? [] : segment.patterns,
 					startStopId: segment.startStopId,
 					endStopId: segment.endStopId,
 					propagatedDelay: segment.propagatedDelay,
@@ -2810,27 +3183,23 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		};
 
 		setStatus("Enregistrement…");
-		request(API + "/api/detours/" + encodeURIComponent(state.detail.key), {
+		request(API + "/api/modifications/" + state.detail.uid, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(payload)
 		}).then(function (detail) {
-			state.detail = detail;
-			state.segments = detail.segments.map(adoptSegment);
-			state.active = Math.min(state.active, state.segments.length - 1);
-			renderSegment();
-			renderPublication();
+			adoptDetail(detail, false);
 
 			// Le compte rendu porte sur le premier tronçon qui coince : c'est celui-là qu'il faut reprendre,
-			// et le nommer évite de les passer tous en revue.
+			// et le nommer évite de les passer tous en revue. Seuls comptent les tronçons enregistrés.
 			var blocking = -1;
-			state.segments.forEach(function (segment, index) {
+			state.segments.slice(0, detail.segmentCount).forEach(function (segment, index) {
 				if (blocking === -1 && (!segment.publishable || matchingTrips(segment) === 0)) blocking = index;
 			});
 
 			var message;
 			if (blocking === -1) {
-				message = "Enregistré et publié.";
+				message = detail.segmentCount === 0 ? "Enregistré, sans tronçon." : "Enregistré.";
 			} else {
 				var segment = state.segments[blocking];
 				var why = segment.startStopId === null || segment.endStopId === null
@@ -2840,29 +3209,28 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 					: "tracé manquant.";
 				message = "Enregistré. Tronçon " + (blocking + 1) + " : " + why;
 			}
+			if (dropped > 0) message += " " + dropped + " tronçon(s) sans arrêt ni tracé laissé(s) de côté.";
 			setStatus(message, blocking === -1 ? "ok" : "error");
 		}).catch(function (error) { setStatus(error.message, "error"); });
 	}
 
-	function remove() {
-		if (!confirm(state.detail.standalone
-			? "Supprimer cette modification, sa période et son périmètre ?"
-			: "Effacer cette déclaration ?")) return;
-		request(API + "/api/detours/" + encodeURIComponent(state.detail.key), { method: "DELETE" })
-			.then(backToList)
-			.catch(function (error) { setStatus(error.message, "error"); });
-	}
-
 	// --- branchements ---
 
-	// Le groupement ne tient qu'à l'affichage : rien à redemander au serveur. Il se retient d'une visite
-	// à l'autre — c'est une façon de travailler, pas un réglage qu'on repose chaque matin.
-	el("groupBy").value = window.localStorage.getItem("detours.groupBy") === "alert" ? "alert" : "line";
+	// Le groupement, le tri et l'onglet ne tiennent qu'à l'affichage : rien à redemander au serveur. Ils
+	// se retiennent d'une visite à l'autre — c'est une façon de travailler, pas un réglage qu'on repose
+	// chaque matin.
+	el("groupBy").value = recall("modifications.groupBy") === "alert" ? "alert" : "line";
+	el("sortBy").value = SORTS[recall("modifications.sortBy")] ? recall("modifications.sortBy") : "number";
+	state.phase = PHASES.some(function (phase) { return phase[0] === recall("modifications.phase"); })
+		? recall("modifications.phase") : "current";
 	el("groupBy").onchange = function (event) {
-		window.localStorage.setItem("detours.groupBy", event.target.value);
+		remember("modifications.groupBy", event.target.value);
 		renderList();
 	};
-	el("showUpcoming").onchange = renderList;
+	el("sortBy").onchange = function (event) {
+		remember("modifications.sortBy", event.target.value);
+		renderList();
+	};
 	el("addStop").onclick = function () {
 		setMode(state.mode === "search" || state.mode === "place" ? "idle" : "search");
 	};
@@ -2888,7 +3256,17 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		state.segments.splice(state.active, 1);
 		selectSegment(Math.min(state.active, state.segments.length - 1));
 	};
-	el("toggleDisabled").onclick = toggleDisabled;
+	el("toggleVisible").onclick = toggleVisible;
+	el("dialogCancel").onclick = function () { el("dialog").close(); };
+	el("stopsSort").value = STOP_SORTS[recall("stops.sortBy")] ? recall("stops.sortBy") : "name";
+	el("stopsSort").onchange = function (event) {
+		remember("stops.sortBy", event.target.value);
+		renderStopsTable();
+	};
+	el("stopsQuery").oninput = renderStopsTable;
+	el("bulkHide").onclick = function () { bulk("hide"); };
+	el("bulkShow").onclick = function () { bulk("show"); };
+	el("bulkDiscard").onclick = function () { bulk("discard"); };
 	el("remove").onclick = remove;
 	el("create").onclick = createModification;
 	el("placeNewStop").onclick = function () {
@@ -2908,6 +3286,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		}
 	});
 
+	// Un lien suivi depuis un dialogue — une modification qui désigne l'arrêt — change de vue : le
+	// dialogue n'a plus rien à y faire.
+	window.addEventListener("hashchange", function () { if (el("dialog").open) el("dialog").close(); });
 	window.addEventListener("hashchange", applyRoute);
 	applyRoute();
 })();

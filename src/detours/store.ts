@@ -16,323 +16,125 @@ import type { Coordinates } from "../utils/geometry.js";
  */
 const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 	`
-	-- Une déviation déclarée, à la maille de l'info trafic : une ligne, un sens.
-	CREATE TABLE detours (
-		alert_number     TEXT    NOT NULL,
-		route_id         TEXT    NOT NULL,
-		direction_id     INTEGER NOT NULL,
-		-- Bornes de la modification : le premier et le dernier arrêt SUPPRIMÉ. NULL tant qu'elles
-		-- n'ont pas été arrêtées — la déviation n'est alors pas publiable.
-		start_stop_id    TEXT,
-		end_stop_id      TEXT,
-		propagated_delay INTEGER NOT NULL DEFAULT 0,
-		-- Prochain identifiant d'arrêt provisoire à attribuer. Jamais décrémenté, jamais réutilisé.
-		next_stop_uid    INTEGER NOT NULL DEFAULT 1,
-		updated_at       INTEGER NOT NULL,
-		PRIMARY KEY (alert_number, route_id, direction_id)
+	-- Une modification : une ligne, un sens, éventuellement des tracés précis, une période, une raison,
+	-- des arrêts supprimés et des tronçons. Elle est créée par l'IA quand l'analyse d'une info trafic
+	-- permet de l'appliquer, ou à la main — rattachée à une info trafic ou non.
+	--
+	-- Un champ laissé NULL d'une modification rattachée suit son info trafic : la raison est son titre,
+	-- la période les siennes, les arrêts supprimés ce qu'en lit l'analyse.
+	--
+	-- L'IA en crée une par LECTURE des arrêts supprimés (cf. readAnalysis) : il peut donc y en
+	-- avoir plusieurs par info trafic, ligne et sens, une par groupe de tracés.
+	CREATE TABLE modifications (
+		uid                INTEGER PRIMARY KEY AUTOINCREMENT,
+		-- « ai » : créée par l'analyse. « manual » : saisie. L'une comme l'autre se supprime.
+		origin             TEXT    NOT NULL CHECK (origin IN ('ai', 'manual')),
+		-- NULL : sans info trafic. La raison et la période sont alors obligatoires.
+		alert_number       TEXT,
+		route_id           TEXT    NOT NULL,
+		direction_id       INTEGER NOT NULL,
+		label              TEXT,
+		-- AAAA-MM-JJ et HH:MM. NULL au début : la période est celle de l'info trafic.
+		start_date         TEXT,
+		start_time         TEXT,
+		end_date           TEXT,
+		end_time           TEXT,
+		-- 1 : les arrêts supprimés sont ceux de modification_removed_stops, fût-ce aucun.
+		removed_overridden INTEGER NOT NULL DEFAULT 0,
+		-- Invisible : ni publiée, ni ses arrêts sautés.
+		disabled           INTEGER NOT NULL DEFAULT 0,
+		created_at         INTEGER NOT NULL,
+		-- Le last_modified_time publié.
+		updated_at         INTEGER NOT NULL
 	) STRICT;
 
-	-- Les arrêts de substitution, dans l'ordre où la déviation les dessert.
-	CREATE TABLE detour_stops (
-		alert_number TEXT    NOT NULL,
-		route_id     TEXT    NOT NULL,
-		direction_id INTEGER NOT NULL,
-		-- Identité stable de l'arrêt publié, indépendante de son rang (cf. next_stop_uid).
-		stop_uid     INTEGER NOT NULL,
-		position     INTEGER NOT NULL,
-		name         TEXT    NOT NULL,
-		latitude     REAL    NOT NULL,
-		longitude    REAL    NOT NULL,
-		-- Secondes depuis l'arrivée à l'arrêt de référence (cf. DetourStop.travelTime).
-		travel_time  INTEGER NOT NULL,
-		PRIMARY KEY (alert_number, route_id, direction_id, stop_uid),
-		FOREIGN KEY (alert_number, route_id, direction_id)
-			REFERENCES detours (alert_number, route_id, direction_id) ON DELETE CASCADE
+	-- Les tracés visés, par leur empreinte (cf. RoutePattern). Aucun : tous.
+	CREATE TABLE modification_patterns (
+		uid        INTEGER NOT NULL REFERENCES modifications (uid) ON DELETE CASCADE,
+		pattern_id TEXT    NOT NULL,
+		PRIMARY KEY (uid, pattern_id)
 	) STRICT;
 
-	-- Le tracé dessiné, point par point.
-	CREATE TABLE detour_path (
-		alert_number TEXT    NOT NULL,
-		route_id     TEXT    NOT NULL,
-		direction_id INTEGER NOT NULL,
-		position     INTEGER NOT NULL,
-		latitude     REAL    NOT NULL,
-		longitude    REAL    NOT NULL,
-		PRIMARY KEY (alert_number, route_id, direction_id, position),
-		FOREIGN KEY (alert_number, route_id, direction_id)
-			REFERENCES detours (alert_number, route_id, direction_id) ON DELETE CASCADE
-	) STRICT;
-	`,
-	`
-	-- Un arrêt de substitution peut être un arrêt du GTFS plutôt qu'un point posé sur la carte : le
-	-- GTFS-RT admet les deux. La colonne porte alors son identifiant, et le nom comme les coordonnées
-	-- ne sont plus qu'un instantané d'affichage — c'est le GTFS qui fait foi.
-	ALTER TABLE detour_stops ADD COLUMN gtfs_stop_id TEXT;
-	`,
-	`
-	-- Un arrêt de substitution peut aussi renvoyer à un arrêt provisoire déjà créé par une AUTRE
-	-- déviation : un terminus de rebroussement sert aux deux sens, et le dédoubler donnerait deux
-	-- arrêts au même endroit, à entretenir séparément. La colonne porte alors son identifiant publié.
-	ALTER TABLE detour_stops ADD COLUMN shared_stop_id TEXT;
-	`,
-	// Les arrêts provisoires deviennent une base à part, et non plus la propriété de la déviation qui
-	// les a saisis. C'est ce qu'ils sont : un arrêt de report existe sur le terrain, il sert souvent à
-	// plusieurs déviations — les deux sens d'un rebroussement, deux infos trafic successives sur le
-	// même chantier — et le rattacher à l'une d'elles obligeait à distinguer celle qui le possède de
-	// celles qui l'empruntent. Une déviation ne fait plus que désigner des arrêts, du GTFS ou d'ici.
-	(db) => {
-		db.exec(`
-			CREATE TABLE provisional_stops (
-				stop_uid   INTEGER PRIMARY KEY AUTOINCREMENT,
-				name       TEXT    NOT NULL,
-				latitude   REAL    NOT NULL,
-				longitude  REAL    NOT NULL,
-				created_at INTEGER NOT NULL
-			) STRICT;
-
-			CREATE TABLE detour_stops_next (
-				alert_number TEXT    NOT NULL,
-				route_id     TEXT    NOT NULL,
-				direction_id INTEGER NOT NULL,
-				position     INTEGER NOT NULL,
-				-- L'identifiant publié : un quai du GTFS, ou « TCAR:DEV:<stop_uid> ».
-				stop_id      TEXT    NOT NULL,
-				travel_time  INTEGER NOT NULL,
-				PRIMARY KEY (alert_number, route_id, direction_id, position),
-				FOREIGN KEY (alert_number, route_id, direction_id)
-					REFERENCES detours (alert_number, route_id, direction_id) ON DELETE CASCADE
-			) STRICT;
-		`);
-
-		// Les arrêts que les déviations possédaient passent dans la nouvelle base, et l'ancien
-		// identifiant publié — qui portait le numéro d'info trafic — est rattaché au nouveau, pour que
-		// les renvois d'une déviation à l'autre continuent de désigner le même arrêt.
-		const migrated = new Map<string, string>();
-		const createStop = db.prepare(
-			"INSERT INTO provisional_stops (name, latitude, longitude, created_at) VALUES (?, ?, ?, ?)",
-		);
-		const now = Math.floor(Date.now() / 1000);
-
-		const legacy = db
-			.prepare("SELECT * FROM detour_stops ORDER BY alert_number, route_id, direction_id, position")
-			.all() as LegacyStopRow[];
-
-		for (const row of legacy) {
-			if (row.gtfs_stop_id !== null || row.shared_stop_id !== null) continue;
-			const { lastInsertRowid } = createStop.run(row.name, row.latitude, row.longitude, now);
-			migrated.set(`TCAR:DEV:${row.alert_number}:${row.stop_uid}`, `TCAR:DEV:${lastInsertRowid}`);
-		}
-
-		const insert = db.prepare(
-			"INSERT INTO detour_stops_next (alert_number, route_id, direction_id, position, stop_id, travel_time) VALUES (?, ?, ?, ?, ?, ?)",
-		);
-		for (const row of legacy) {
-			const legacyId = `TCAR:DEV:${row.alert_number}:${row.stop_uid}`;
-			const stopId = row.gtfs_stop_id ?? migrated.get(row.shared_stop_id ?? legacyId);
-			// Un renvoi devenu orphelin avant la migration n'a rien à reprendre : l'arrêt est simplement
-			// retiré de la déviation, qui se signalera incomplète.
-			if (stopId === undefined) continue;
-			insert.run(row.alert_number, row.route_id, row.direction_id, row.position, stopId, row.travel_time);
-		}
-
-		db.exec(`
-			DROP TABLE detour_stops;
-			ALTER TABLE detour_stops_next RENAME TO detour_stops;
-			ALTER TABLE detours DROP COLUMN next_stop_uid;
-		`);
-	},
-	// Une info trafic peut dévier une ligne en PLUSIEURS endroits disjoints : deux chantiers sur le
-	// même axe, ou un détour suivi d'un terminus provisoire. La spécification l'exprime déjà — une
-	// `TripModifications` porte autant de `Modification` qu'il y a de tronçons —, et la déclaration
-	// s'y range enfin : elle se décompose en segments, chacun avec ses bornes, ses arrêts de
-	// substitution, son tracé et son délai propagé. Ce qui était une déclaration devient son
-	// premier segment, et ce que `detours` portait de géographie passe à `detour_segments`.
-	(db) => {
-		db.exec(`
-			CREATE TABLE detour_segments (
-				alert_number     TEXT    NOT NULL,
-				route_id         TEXT    NOT NULL,
-				direction_id     INTEGER NOT NULL,
-				-- Le rang du segment dans la déclaration, et rien de plus : \`save\` réécrit la
-				-- déclaration entière, et rien au dehors ne désigne un segment en particulier.
-				segment          INTEGER NOT NULL,
-				start_stop_id    TEXT,
-				end_stop_id      TEXT,
-				propagated_delay INTEGER NOT NULL DEFAULT 0,
-				PRIMARY KEY (alert_number, route_id, direction_id, segment),
-				FOREIGN KEY (alert_number, route_id, direction_id)
-					REFERENCES detours (alert_number, route_id, direction_id) ON DELETE CASCADE
-			) STRICT;
-
-			INSERT INTO detour_segments
-				(alert_number, route_id, direction_id, segment, start_stop_id, end_stop_id, propagated_delay)
-			SELECT alert_number, route_id, direction_id, 0, start_stop_id, end_stop_id, propagated_delay
-			FROM detours;
-
-			CREATE TABLE detour_stops_next (
-				alert_number TEXT    NOT NULL,
-				route_id     TEXT    NOT NULL,
-				direction_id INTEGER NOT NULL,
-				segment      INTEGER NOT NULL,
-				position     INTEGER NOT NULL,
-				stop_id      TEXT    NOT NULL,
-				travel_time  INTEGER NOT NULL,
-				PRIMARY KEY (alert_number, route_id, direction_id, segment, position),
-				FOREIGN KEY (alert_number, route_id, direction_id, segment)
-					REFERENCES detour_segments (alert_number, route_id, direction_id, segment) ON DELETE CASCADE
-			) STRICT;
-
-			INSERT INTO detour_stops_next
-			SELECT alert_number, route_id, direction_id, 0, position, stop_id, travel_time FROM detour_stops;
-			DROP TABLE detour_stops;
-			ALTER TABLE detour_stops_next RENAME TO detour_stops;
-
-			CREATE TABLE detour_path_next (
-				alert_number TEXT    NOT NULL,
-				route_id     TEXT    NOT NULL,
-				direction_id INTEGER NOT NULL,
-				segment      INTEGER NOT NULL,
-				position     INTEGER NOT NULL,
-				latitude     REAL    NOT NULL,
-				longitude    REAL    NOT NULL,
-				PRIMARY KEY (alert_number, route_id, direction_id, segment, position),
-				FOREIGN KEY (alert_number, route_id, direction_id, segment)
-					REFERENCES detour_segments (alert_number, route_id, direction_id, segment) ON DELETE CASCADE
-			) STRICT;
-
-			INSERT INTO detour_path_next
-			SELECT alert_number, route_id, direction_id, 0, position, latitude, longitude FROM detour_path;
-			DROP TABLE detour_path;
-			ALTER TABLE detour_path_next RENAME TO detour_path;
-
-			ALTER TABLE detours DROP COLUMN start_stop_id;
-			ALTER TABLE detours DROP COLUMN end_stop_id;
-			ALTER TABLE detours DROP COLUMN propagated_delay;
-		`);
-	},
-	// Un tracé cesse d'être une simple suite de points pour devenir une suite de POINTS DE PASSAGE,
-	// chacun disant le mode de la jambe qui le suit : accrochée aux rues d'OpenStreetMap, ou tirée
-	// droit comme auparavant. Le tracé lui-même — `detour_path` — ne change pas d'un iota : c'est lui
-	// qui est publié, et lui seul que la recouture des shapes regarde.
-	`
-	CREATE TABLE detour_waypoints (
-		alert_number TEXT    NOT NULL,
-		route_id     TEXT    NOT NULL,
-		direction_id INTEGER NOT NULL,
-		segment      INTEGER NOT NULL,
-		position     INTEGER NOT NULL,
-		latitude     REAL    NOT NULL,
-		longitude    REAL    NOT NULL,
-		-- Le mode de la jambe qui SUIT ce point : « route » ou « free ». Sans objet pour le dernier.
-		mode         TEXT    NOT NULL,
-		PRIMARY KEY (alert_number, route_id, direction_id, segment, position),
-		FOREIGN KEY (alert_number, route_id, direction_id, segment)
-			REFERENCES detour_segments (alert_number, route_id, direction_id, segment) ON DELETE CASCADE
+	CREATE TABLE modification_removed_stops (
+		uid     INTEGER NOT NULL REFERENCES modifications (uid) ON DELETE CASCADE,
+		stop_id TEXT    NOT NULL,
+		PRIMARY KEY (uid, stop_id)
 	) STRICT;
 
-	-- Un tracé dessiné à la main EST une suite de points de passage dont chaque jambe est droite : la
-	-- reprise est exacte et non approchée, et rien n'est à deviner au chargement. L'invariant « des
-	-- points de passage existent dès qu'il y a un tracé » tient ainsi dans la base elle-même.
-	INSERT INTO detour_waypoints
-	SELECT alert_number, route_id, direction_id, segment, position, latitude, longitude, 'free'
-	FROM detour_path;
-	`,
-	// Le périmètre d'une info trafic — quelles lignes, quels sens, quels arrêts supprimés — cesse
-	// d'être le dernier mot de l'analyse IA. Elle ne voit que ce que le texte dit, et le texte ne dit
-	// pas tout : une ligne déviée dans les deux sens n'y perd parfois d'arrêts que dans un seul, et le
-	// sens muet n'existait alors nulle part — ni comme déviation à déclarer, ni comme tracé à publier.
-	//
-	// Une surcharge REMPLACE l'analyse pour ce couple ligne/sens, elle ne la corrige pas : ce qui est
-	// saisi ici fait foi, y compris une liste d'arrêts vide — « cette ligne est bien concernée dans ce
-	// sens, mais elle n'y perd aucun arrêt ». C'est la seule règle à retenir, et elle vaut pour les
-	// suppressions publiées comme pour le périmètre offert à la déclaration.
-	`
-	CREATE TABLE scope_overrides (
-		alert_number TEXT    NOT NULL,
-		route_id     TEXT    NOT NULL,
-		direction_id INTEGER NOT NULL,
-		updated_at   INTEGER NOT NULL,
-		PRIMARY KEY (alert_number, route_id, direction_id)
-	) STRICT;
-
-	CREATE TABLE scope_override_stops (
-		alert_number TEXT    NOT NULL,
-		route_id     TEXT    NOT NULL,
-		direction_id INTEGER NOT NULL,
-		stop_id      TEXT    NOT NULL,
-		PRIMARY KEY (alert_number, route_id, direction_id, stop_id),
-		FOREIGN KEY (alert_number, route_id, direction_id)
-			REFERENCES scope_overrides (alert_number, route_id, direction_id) ON DELETE CASCADE
-	) STRICT;
-	`,
-	// Un tronçon a porté un instant la nature de ce qu'il fait — supprimer des arrêts, ou seulement
-	// changer le chemin entre eux. Elle n'avait rien à faire là : elle se LIT du périmètre et des
-	// bornes, déjà saisis (cf. `removesStops`). Une plage sans aucun arrêt supprimé ne supprime rien,
-	// et c'est tout ce qu'il y a à savoir — un réglage de plus n'aurait pu que les contredire.
-	`
-	ALTER TABLE detour_segments ADD COLUMN kind TEXT NOT NULL DEFAULT 'removal';
-	`,
-	`
-	ALTER TABLE detour_segments DROP COLUMN kind;
-	`,
-	// Une modification peut se déclarer sans qu'aucune info trafic ne la porte : un chantier que
-	// l'exploitant n'a pas annoncé, une déviation d'un soir. Elle tient alors lieu d'info trafic —
-	// une période, une ligne, un sens, un intitulé — et reçoit un numéro à elle, « M<uid> », qui prend
-	// la place du numéro d'info trafic dans toutes les tables : déclarations, tronçons, périmètre.
-	//
-	// La désactivation, elle, vaut pour N'IMPORTE QUELLE modification, et se range à part : elle
-	// s'applique à un couple ligne/sens déclaré ou non, et survit à l'effacement de la déclaration.
-	`
-	CREATE TABLE standalone_modifications (
-		uid          INTEGER PRIMARY KEY AUTOINCREMENT,
-		route_id     TEXT    NOT NULL,
-		direction_id INTEGER NOT NULL,
-		-- NULL : pas d'intitulé, la liste en affiche un par défaut.
-		label        TEXT,
-		-- AAAA-MM-JJ. L'heure est facultative : sans elle, la période commence à minuit.
-		start_date   TEXT    NOT NULL,
-		start_time   TEXT,
-		-- NULL : période ouverte. Sans heure, la fin couvre toute la journée.
-		end_date     TEXT,
-		end_time     TEXT,
-		created_at   INTEGER NOT NULL
-	) STRICT;
-
-	CREATE TABLE disabled_modifications (
-		alert_number TEXT    NOT NULL,
-		route_id     TEXT    NOT NULL,
-		direction_id INTEGER NOT NULL,
-		disabled_at  INTEGER NOT NULL,
-		PRIMARY KEY (alert_number, route_id, direction_id)
-	) STRICT;
-	`,
-	// Un même sens peut porter des tracés incompatibles : la 305 file vers l'Hôtel de Ville ou vers le
-	// Lycée Flaubert, et un détour autour de l'un ne se dessine pas comme autour de l'autre. Un tronçon
-	// peut donc nommer les tracés qu'il vise ; sans aucun, il les vise tous — ce qui est le cas de tous
-	// les tronçons déjà saisis, et n'a rien à reprendre.
-	`
-	CREATE TABLE detour_segment_patterns (
-		alert_number TEXT    NOT NULL,
-		route_id     TEXT    NOT NULL,
-		direction_id INTEGER NOT NULL,
-		segment      INTEGER NOT NULL,
-		-- L'empreinte de la suite de quais du tracé (cf. RoutePattern).
-		pattern_id   TEXT    NOT NULL,
-		PRIMARY KEY (alert_number, route_id, direction_id, segment, pattern_id),
-		FOREIGN KEY (alert_number, route_id, direction_id, segment)
-			REFERENCES detour_segments (alert_number, route_id, direction_id, segment) ON DELETE CASCADE
-	) STRICT;
-	`,
-	// L'analyse IA voit parfois une ligne ou un sens que l'info trafic ne concerne pas. Un périmètre
-	// saisi vide ne l'efface pas — il dit « concernée, sans arrêt supprimé ». Il faut donc pouvoir dire
-	// « pas concernée du tout » : l'entrée est retirée, et l'analyse n'y revient pas au relevé suivant.
-	`
+	-- Les trios info trafic × ligne × sens ignorés : l'IA n'y crée ni n'y suggère plus rien.
 	CREATE TABLE dismissed_scopes (
 		alert_number TEXT    NOT NULL,
 		route_id     TEXT    NOT NULL,
 		direction_id INTEGER NOT NULL,
 		dismissed_at INTEGER NOT NULL,
 		PRIMARY KEY (alert_number, route_id, direction_id)
+	) STRICT;
+
+	-- Le premier relevé où chaque info trafic a été vue : c'est l'ordre chronologique de la liste.
+	CREATE TABLE alert_first_seen (
+		alert_number  TEXT    PRIMARY KEY,
+		first_seen_at INTEGER NOT NULL
+	) STRICT;
+
+	-- Les tronçons déviés d'une modification. Le rang ne sert qu'à les ordonner : save les réécrit
+	-- tous, et rien au dehors ne désigne un tronçon en particulier.
+	CREATE TABLE segments (
+		uid              INTEGER NOT NULL REFERENCES modifications (uid) ON DELETE CASCADE,
+		segment          INTEGER NOT NULL,
+		-- Bornes du tronçon, incluses. NULL tant qu'elles n'ont pas été choisies : il n'est pas publiable.
+		start_stop_id    TEXT,
+		end_stop_id      TEXT,
+		propagated_delay INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (uid, segment)
+	) STRICT;
+
+	-- Les arrêts de substitution, dans l'ordre de desserte.
+	CREATE TABLE segment_stops (
+		uid         INTEGER NOT NULL,
+		segment     INTEGER NOT NULL,
+		position    INTEGER NOT NULL,
+		-- Un quai du GTFS, ou « TCAR:DEV:<stop_uid> » : le tronçon ne fait que désigner.
+		stop_id     TEXT    NOT NULL,
+		-- Secondes depuis l'arrivée à l'arrêt de référence (cf. DetourStop.travelTime).
+		travel_time INTEGER NOT NULL,
+		PRIMARY KEY (uid, segment, position),
+		FOREIGN KEY (uid, segment) REFERENCES segments (uid, segment) ON DELETE CASCADE
+	) STRICT;
+
+	-- Le tracé publié, point par point.
+	CREATE TABLE segment_path (
+		uid       INTEGER NOT NULL,
+		segment   INTEGER NOT NULL,
+		position  INTEGER NOT NULL,
+		latitude  REAL    NOT NULL,
+		longitude REAL    NOT NULL,
+		PRIMARY KEY (uid, segment, position),
+		FOREIGN KEY (uid, segment) REFERENCES segments (uid, segment) ON DELETE CASCADE
+	) STRICT;
+
+	-- Les points de passage cliqués, de quoi reprendre le tracé.
+	CREATE TABLE segment_waypoints (
+		uid       INTEGER NOT NULL,
+		segment   INTEGER NOT NULL,
+		position  INTEGER NOT NULL,
+		latitude  REAL    NOT NULL,
+		longitude REAL    NOT NULL,
+		-- Le mode de la jambe qui SUIT ce point : « route » ou « free ». Sans objet pour le dernier.
+		mode      TEXT    NOT NULL,
+		PRIMARY KEY (uid, segment, position),
+		FOREIGN KEY (uid, segment) REFERENCES segments (uid, segment) ON DELETE CASCADE
+	) STRICT;
+
+	-- Les arrêts provisoires : des points de report qui n'existent dans aucun GTFS. Ils n'appartiennent
+	-- à aucune modification — un arrêt de report sert souvent à plusieurs : les deux sens d'un
+	-- rebroussement, deux infos trafic successives sur le même chantier.
+	CREATE TABLE provisional_stops (
+		-- AUTOINCREMENT : un identifiant publié ne se réattribue jamais.
+		stop_uid   INTEGER PRIMARY KEY AUTOINCREMENT,
+		name       TEXT    NOT NULL,
+		latitude   REAL    NOT NULL,
+		longitude  REAL    NOT NULL,
+		created_at INTEGER NOT NULL
 	) STRICT;
 	`,
 ];
@@ -372,18 +174,11 @@ export type DetourStop = {
 
 /**
  * Un tronçon dévié : les arrêts qu'il supprime, ceux qu'il dessert à la place, et par où le véhicule
- * passe. C'est très exactement une `Modification` du GTFS-RT, et une déclaration en porte autant que
- * l'info trafic dévie la ligne en d'endroits distincts — deux chantiers sur le même axe ne font pas
- * un seul détour.
+ * passe. C'est très exactement une `Modification` du GTFS-RT, et une modification en porte autant
+ * qu'elle dévie la ligne en d'endroits distincts — deux chantiers sur le même axe ne font pas un
+ * seul détour.
  */
 export type DetourSegment = {
-	/**
-	 * Les tracés empruntés que le tronçon vise (cf. `RoutePattern`), ou aucun pour les viser tous. Il
-	 * s'applique aux courses qui desservent ses bornes, et, s'il en nomme, à celles de ces tracés
-	 * seulement : c'est ce qui permet de dessiner autrement un même détour pour deux services d'un
-	 * même sens qui n'y arrivent pas par le même chemin.
-	 */
-	patternIds: string[];
 	/**
 	 * Premier arrêt de la plage, borne comprise. Publié comme `start_stop_selector` lorsque la plage
 	 * supprime des arrêts ; sinon il ne sert qu'à désigner les courses (cf. `removesStops`).
@@ -413,71 +208,76 @@ export type DetourWaypoint = Coordinates & { mode: DetourLegMode };
 /** Accrochée aux rues d'OpenStreetMap, ou tirée droit d'un point de passage au suivant. */
 export type DetourLegMode = "route" | "free";
 
-/** Tout ce qui a été déclaré pour une déviation. */
-export type DetourRecord = {
-	alertNumber: string;
+/** Créée par l'analyse d'une info trafic, ou saisie. */
+export type ModificationOrigin = "ai" | "manual";
+
+/**
+ * La période saisie d'une modification, bornes au format « AAAA-MM-JJ » ou « AAAA-MM-JJTHH:MM » —
+ * celui des périodes d'info trafic, qui se jaugent de la même façon (cf. `isActive`). Sans fin, elle
+ * est ouverte.
+ */
+export type ModificationPeriod = { start: string; end: string | null };
+
+/**
+ * Une modification, telle qu'elle a été saisie. Les champs `null` d'une modification rattachée à une
+ * info trafic suivent celle-ci ; c'est l'indexation qui les résout (cf. `indexModifications`).
+ */
+export type Modification = {
+	uid: number;
+	origin: ModificationOrigin;
+	/** L'info trafic à laquelle elle se rattache, ou `null`. */
+	alertNumber: string | null;
 	routeId: string;
 	directionId: number;
+	/** `null` : le titre de l'info trafic. */
+	label: string | null;
+	/** `null` : les périodes de l'info trafic. */
+	period: ModificationPeriod | null;
+	/**
+	 * Les tracés empruntés visés (cf. `RoutePattern`), ou aucun pour les viser tous. La modification
+	 * ne touche que les courses de ces tracés — ses tronçons comme ses arrêts supprimés.
+	 */
+	patternIds: string[];
+	/** `null` : ce que l'analyse lit pour sa ligne et son sens. Sinon les quais supprimés, fût-ce aucun. */
+	removedStopIds: string[] | null;
+	/** Invisible : ni publiée, ni ses arrêts sautés. */
+	disabled: boolean;
+	createdAt: number;
 	/** Date du dernier enregistrement, en secondes epoch — c'est le `last_modified_time` publié. */
 	updatedAt: number;
 	/** Les tronçons déviés, dans l'ordre où la course les rencontre. */
 	segments: DetourSegment[];
 };
 
-/**
- * Le périmètre d'une info trafic sur une ligne et un sens, tel qu'il a été SAISI À LA MAIN.
- *
- * Il remplace en bloc ce que l'analyse IA donne pour ce couple : ses arrêts sont les arrêts
- * supprimés, point final. Une liste vide dit « concernée, mais sans suppression » — c'est ce qui
- * ouvre la déclaration d'une déviation dont la desserte ne change pas.
- */
-export type ScopeOverride = {
-	alertNumber: string;
-	routeId: string;
-	directionId: number;
-	/** Les quais supprimés, dans l'ordre où ils ont été saisis. */
-	removedStopIds: string[];
-	updatedAt: number;
-};
+/** Ce qu'un enregistrement porte : tout ce qui se saisit, d'un bloc. */
+export type ModificationInput = Pick<Modification, "label" | "period" | "patternIds" | "removedStopIds" | "segments">;
 
-/**
- * Une modification déclarée sans info trafic. Elle en tient lieu en tout point : son numéro remplace
- * celui de l'info trafic dans la clé de la déviation, sa période décide seule de sa mise en vigueur.
- */
-export type StandaloneModification = {
-	/** Le numéro qui tient lieu de numéro d'info trafic, « M<uid> » (cf. {@link standaloneNumber}). */
-	alertNumber: string;
-	uid: number;
-	routeId: string;
-	directionId: number;
-	label: string | null;
-	period: StandalonePeriod;
-};
-
-/**
- * La période d'application, bornes au format « AAAA-MM-JJ » ou « AAAA-MM-JJTHH:MM » — celui des
- * périodes d'info trafic, qui se jaugent de la même façon (cf. `isActive`). Sans fin, elle est ouverte.
- */
-export type StandalonePeriod = { start: string; end: string | null };
-
-/** Ce qu'une déclaration porte de modifiable : le reste — identité, horodatage — est calculé. */
-export type DetourInput = {
-	segments: DetourSegment[];
-};
+/** Ce qu'il faut pour créer une modification à la main. Le reste se saisit ensuite. */
+export type ManualInput = Pick<
+	Modification,
+	"alertNumber" | "routeId" | "directionId" | "label" | "period" | "patternIds"
+>;
 
 export type DetourStore = ReturnType<typeof useDetourStore>;
 
-/** La clé d'une déviation : une info trafic, une ligne, un sens. */
-export function detourKey(alertNumber: string, routeId: string, directionId: number): string {
+/** Un trio info trafic × ligne × sens. */
+export type Scope = { alertNumber: string; routeId: string; directionId: number };
+
+/** Une modification que l'IA crée d'elle-même : un trio, et les tracés visés — aucun pour tous. */
+export type Proposal = Scope & { patternIds: string[] };
+
+/** La clé d'un trio info trafic × ligne × sens : c'est à cette maille que l'IA crée, suggère, et qu'on ignore. */
+export function scopeKey(alertNumber: string, routeId: string, directionId: number): string {
 	return `${alertNumber}:${routeId}:${directionId}`;
 }
 
 /**
- * Les déviations déclarées, telles qu'elles sont retenues d'un démarrage à l'autre.
+ * Les modifications, telles qu'elles sont retenues d'un démarrage à l'autre, et la base des arrêts
+ * provisoires.
  *
  * Tout est relu en mémoire à l'ouverture, puis après chaque écriture : la boucle de publication lit
  * ainsi un instantané, sans toucher à SQLite vingt fois par minute ni avoir de cache à invalider. Le
- * volume s'y prête — quelques dizaines de déviations, quelques centaines de points.
+ * volume s'y prête — quelques dizaines de modifications, quelques centaines de points.
  *
  * `DatabaseSync` est synchrone, et c'est ce qui rend la chose sûre : deux requêtes HTTP ne peuvent
  * pas s'entrelacer au milieu d'une transaction, la première tient la boucle d'événements le temps de
@@ -496,66 +296,70 @@ export function useDetourStore(path: string) {
 
 	migrate(db);
 
-	const records = new Map<string, DetourRecord>();
+	const modifications = new Map<number, Modification>();
 	const provisional = new Map<string, ProvisionalStop>();
-	const overrides = new Map<string, ScopeOverride>();
-	const standalone = new Map<string, StandaloneModification>();
-	const disabled = new Set<string>();
 	const dismissed = new Set<string>();
+	const firstSeen = new Map<string, number>();
 
 	const reload = () => {
-		records.clear();
+		modifications.clear();
 		provisional.clear();
-		overrides.clear();
-		standalone.clear();
-		disabled.clear();
 		dismissed.clear();
-
-		for (const row of db.prepare("SELECT * FROM standalone_modifications ORDER BY uid").all() as StandaloneRow[]) {
-			const alertNumber = standaloneNumber(row.uid);
-			standalone.set(alertNumber, {
-				alertNumber,
-				uid: row.uid,
-				routeId: row.route_id,
-				directionId: row.direction_id,
-				label: row.label,
-				period: {
-					start: joinBound(row.start_date, row.start_time),
-					end: row.end_date === null ? null : joinBound(row.end_date, row.end_time),
-				},
-			});
-		}
-
-		for (const row of db.prepare("SELECT * FROM disabled_modifications").all() as DisabledRow[]) {
-			disabled.add(detourKey(row.alert_number, row.route_id, row.direction_id));
-		}
-
-		for (const row of db.prepare("SELECT * FROM dismissed_scopes").all() as DisabledRow[]) {
-			dismissed.add(detourKey(row.alert_number, row.route_id, row.direction_id));
-		}
+		firstSeen.clear();
 
 		for (const row of db.prepare("SELECT * FROM provisional_stops ORDER BY stop_uid").all() as ProvisionalRow[]) {
 			const stopId = provisionalStopId(row.stop_uid);
 			provisional.set(stopId, { stopId, name: row.name, latitude: row.latitude, longitude: row.longitude });
 		}
 
-		for (const row of db.prepare("SELECT * FROM detours").all() as DetourRow[]) {
-			records.set(detourKey(row.alert_number, row.route_id, row.direction_id), {
+		for (const row of db.prepare("SELECT * FROM dismissed_scopes").all() as DismissedRow[]) {
+			dismissed.add(scopeKey(row.alert_number, row.route_id, row.direction_id));
+		}
+
+		for (const row of db.prepare("SELECT * FROM alert_first_seen").all() as FirstSeenRow[]) {
+			firstSeen.set(row.alert_number, row.first_seen_at);
+		}
+
+		for (const row of db.prepare("SELECT * FROM modifications ORDER BY uid").all() as ModificationRow[]) {
+			modifications.set(row.uid, {
+				uid: row.uid,
+				origin: row.origin === "ai" ? "ai" : "manual",
 				alertNumber: row.alert_number,
 				routeId: row.route_id,
 				directionId: row.direction_id,
+				label: row.label,
+				period:
+					row.start_date === null
+						? null
+						: {
+								start: joinBound(row.start_date, row.start_time),
+								end: row.end_date === null ? null : joinBound(row.end_date, row.end_time),
+							},
+				patternIds: [],
+				removedStopIds: row.removed_overridden === 1 ? [] : null,
+				disabled: row.disabled === 1,
+				createdAt: row.created_at,
 				updatedAt: row.updated_at,
 				segments: [],
 			});
 		}
 
+		for (const row of db
+			.prepare("SELECT * FROM modification_patterns ORDER BY uid, pattern_id")
+			.all() as PatternRow[]) {
+			modifications.get(row.uid)?.patternIds.push(row.pattern_id);
+		}
+
+		for (const row of db
+			.prepare("SELECT * FROM modification_removed_stops ORDER BY uid, stop_id")
+			.all() as RemovedRow[]) {
+			modifications.get(row.uid)?.removedStopIds?.push(row.stop_id);
+		}
+
 		// Les segments d'abord, arrêts et points ensuite : les uns se rangent dans les autres par leur
 		// rang, que l'écriture garde contigu depuis zéro.
-		for (const row of db
-			.prepare("SELECT * FROM detour_segments ORDER BY alert_number, route_id, direction_id, segment")
-			.all() as SegmentRow[]) {
-			records.get(detourKey(row.alert_number, row.route_id, row.direction_id))?.segments.push({
-				patternIds: [],
+		for (const row of db.prepare("SELECT * FROM segments ORDER BY uid, segment").all() as SegmentRow[]) {
+			modifications.get(row.uid)?.segments.push({
 				startStopId: row.start_stop_id,
 				endStopId: row.end_stop_id,
 				propagatedDelay: row.propagated_delay,
@@ -565,363 +369,236 @@ export function useDetourStore(path: string) {
 			});
 		}
 
-		for (const row of db
-			.prepare("SELECT * FROM detour_stops ORDER BY alert_number, route_id, direction_id, segment, position")
-			.all() as StopRow[]) {
-			records
-				.get(detourKey(row.alert_number, row.route_id, row.direction_id))
+		for (const row of db.prepare("SELECT * FROM segment_stops ORDER BY uid, segment, position").all() as StopRow[]) {
+			modifications
+				.get(row.uid)
 				?.segments[row.segment]?.stops.push({ stopId: row.stop_id, travelTime: row.travel_time });
 		}
 
-		for (const row of db
-			.prepare("SELECT * FROM detour_path ORDER BY alert_number, route_id, direction_id, segment, position")
-			.all() as PathRow[]) {
-			records
-				.get(detourKey(row.alert_number, row.route_id, row.direction_id))
+		for (const row of db.prepare("SELECT * FROM segment_path ORDER BY uid, segment, position").all() as PathRow[]) {
+			modifications
+				.get(row.uid)
 				?.segments[row.segment]?.path.push({ latitude: row.latitude, longitude: row.longitude });
 		}
 
 		for (const row of db
-			.prepare("SELECT * FROM detour_waypoints ORDER BY alert_number, route_id, direction_id, segment, position")
+			.prepare("SELECT * FROM segment_waypoints ORDER BY uid, segment, position")
 			.all() as WaypointRow[]) {
-			records.get(detourKey(row.alert_number, row.route_id, row.direction_id))?.segments[row.segment]?.waypoints.push({
+			modifications.get(row.uid)?.segments[row.segment]?.waypoints.push({
 				latitude: row.latitude,
 				longitude: row.longitude,
 				mode: row.mode === "route" ? "route" : "free",
 			});
 		}
+	};
 
-		for (const row of db
-			.prepare(
-				"SELECT * FROM detour_segment_patterns ORDER BY alert_number, route_id, direction_id, segment, pattern_id",
-			)
-			.all() as SegmentPatternRow[]) {
-			records
-				.get(detourKey(row.alert_number, row.route_id, row.direction_id))
-				?.segments[row.segment]?.patternIds.push(row.pattern_id);
+	/** Exécute `work` dans une transaction : tout ou rien, puis relit l'instantané. */
+	const transaction = <T>(work: () => T): T => {
+		db.exec("BEGIN");
+		let result: T;
+		try {
+			result = work();
+			db.exec("COMMIT");
+		} catch (cause) {
+			db.exec("ROLLBACK");
+			throw cause;
 		}
+		reload();
+		return result;
+	};
 
-		for (const row of db.prepare("SELECT * FROM scope_overrides").all() as OverrideRow[]) {
-			overrides.set(detourKey(row.alert_number, row.route_id, row.direction_id), {
-				alertNumber: row.alert_number,
-				routeId: row.route_id,
-				directionId: row.direction_id,
-				removedStopIds: [],
-				updatedAt: row.updated_at,
+	const writePatterns = (uid: number, patternIds: readonly string[]) => {
+		db.prepare("DELETE FROM modification_patterns WHERE uid = ?").run(uid);
+		const insert = db.prepare("INSERT INTO modification_patterns (uid, pattern_id) VALUES (?, ?)");
+		for (const patternId of new Set(patternIds)) insert.run(uid, patternId);
+	};
+
+	/** Les arrêts supprimés saisis, ou `null` pour suivre l'analyse. */
+	const writeRemoved = (uid: number, removedStopIds: readonly string[] | null) => {
+		db.prepare("UPDATE modifications SET removed_overridden = ? WHERE uid = ?").run(
+			removedStopIds === null ? 0 : 1,
+			uid,
+		);
+		db.prepare("DELETE FROM modification_removed_stops WHERE uid = ?").run(uid);
+		const insert = db.prepare("INSERT INTO modification_removed_stops (uid, stop_id) VALUES (?, ?)");
+		for (const stopId of new Set(removedStopIds ?? [])) insert.run(uid, stopId);
+	};
+
+	/**
+	 * Remplace les tronçons en entier plutôt que de les rapprocher un à un — la liste est courte, et
+	 * l'interface renvoie de toute façon son état complet. Effacer les segments emporte leurs arrêts
+	 * et leurs points, par cascade.
+	 */
+	const writeSegments = (uid: number, segments: readonly DetourSegment[]) => {
+		db.prepare("DELETE FROM segments WHERE uid = ?").run(uid);
+		const insertSegment = db.prepare(
+			"INSERT INTO segments (uid, segment, start_stop_id, end_stop_id, propagated_delay) VALUES (?, ?, ?, ?, ?)",
+		);
+		const insertStop = db.prepare(
+			"INSERT INTO segment_stops (uid, segment, position, stop_id, travel_time) VALUES (?, ?, ?, ?, ?)",
+		);
+		const insertPoint = db.prepare(
+			"INSERT INTO segment_path (uid, segment, position, latitude, longitude) VALUES (?, ?, ?, ?, ?)",
+		);
+		const insertWaypoint = db.prepare(
+			"INSERT INTO segment_waypoints (uid, segment, position, latitude, longitude, mode) VALUES (?, ?, ?, ?, ?, ?)",
+		);
+
+		segments.forEach((segment, rank) => {
+			insertSegment.run(uid, rank, segment.startStopId, segment.endStopId, segment.propagatedDelay);
+			segment.stops.forEach((stop, position) => {
+				insertStop.run(uid, rank, position, stop.stopId, stop.travelTime);
 			});
-		}
-
-		for (const row of db
-			.prepare("SELECT * FROM scope_override_stops ORDER BY alert_number, route_id, direction_id, stop_id")
-			.all() as OverrideStopRow[]) {
-			overrides.get(detourKey(row.alert_number, row.route_id, row.direction_id))?.removedStopIds.push(row.stop_id);
-		}
+			segment.path.forEach((point, position) => {
+				insertPoint.run(uid, rank, position, point.latitude, point.longitude);
+			});
+			segment.waypoints.forEach((waypoint, position) => {
+				insertWaypoint.run(uid, rank, position, waypoint.latitude, waypoint.longitude, waypoint.mode);
+			});
+		});
 	};
 
 	reload();
-	console.log(`✓ ${records.size} declared detours restored from ${path}.`);
+	console.log(`✓ ${modifications.size} modifications restored from ${path}.`);
 
 	return {
-		/** L'instantané des déclarations, par {@link detourKey}. */
-		records: records as ReadonlyMap<string, DetourRecord>,
+		/** L'instantané des modifications, par uid. */
+		modifications: modifications as ReadonlyMap<number, Modification>,
 
 		/** La base des arrêts provisoires, par identifiant publié. */
 		provisionalStops: provisional as ReadonlyMap<string, ProvisionalStop>,
 
-		/** Les périmètres saisis à la main, par {@link detourKey}. */
-		scopeOverrides: overrides as ReadonlyMap<string, ScopeOverride>,
-
-		/** Les modifications déclarées sans info trafic, par numéro (« M<uid> »). */
-		standaloneModifications: standalone as ReadonlyMap<string, StandaloneModification>,
-
-		/** Les modifications désactivées, par {@link detourKey} — qu'une info trafic les porte ou non. */
-		disabledModifications: disabled as ReadonlySet<string>,
-
-		/** Les couples ligne/sens retirés d'une info trafic, par {@link detourKey} (cf. {@link dismiss}). */
+		/** Les trios info trafic × ligne × sens écartés, par {@link scopeKey} : l'IA n'y revient plus. */
 		dismissedScopes: dismissed as ReadonlySet<string>,
 
+		/** Numéro d'info trafic → premier relevé où elle a été vue, en secondes epoch. */
+		alertFirstSeen: firstSeen as ReadonlyMap<string, number>,
+
 		/**
-		 * Retire une ligne et un sens d'une info trafic : ils ne sont pas concernés, quoi qu'en dise
-		 * l'analyse. Ce qui s'y rattachait part avec — déclaration, périmètre saisi, désactivation :
-		 * rien de tout cela ne désigne plus une perturbation.
+		 * Retient la première apparition des infos trafic du flux. Une info trafic déjà vue garde sa
+		 * date : c'est l'ordre dans lequel elles sont arrivées, pas celui de leur dernier passage.
 		 */
-		dismiss(alertNumber: string, routeId: string, directionId: number, nowSeconds: number) {
-			const where = "WHERE alert_number = ? AND route_id = ? AND direction_id = ?";
-			db.exec("BEGIN");
-			try {
-				db.prepare(`DELETE FROM detours ${where}`).run(alertNumber, routeId, directionId);
-				db.prepare(`DELETE FROM scope_overrides ${where}`).run(alertNumber, routeId, directionId);
-				db.prepare(`DELETE FROM disabled_modifications ${where}`).run(alertNumber, routeId, directionId);
+		recordAlerts(alertNumbers: Iterable<string>, nowSeconds: number) {
+			const insert = db.prepare(
+				"INSERT INTO alert_first_seen (alert_number, first_seen_at) VALUES (?, ?) ON CONFLICT DO NOTHING",
+			);
+			for (const alertNumber of alertNumbers) {
+				if (firstSeen.has(alertNumber)) continue;
+				insert.run(alertNumber, nowSeconds);
+				firstSeen.set(alertNumber, nowSeconds);
+			}
+		},
+
+		/**
+		 * Crée les modifications que l'IA propose, sauf sur un trio écarté ou qui porte déjà une
+		 * modification — de l'IA, ou saisie à la place d'une suggestion : ce qu'une lecture a créé, ou ce
+		 * que la main y a mis, n'est jamais complété en douce. Renvoie le nombre de créations.
+		 */
+		syncAi(proposals: Iterable<Proposal>, nowSeconds: number) {
+			const taken = new Set<string>();
+			for (const modification of modifications.values()) {
+				if (modification.alertNumber === null) continue;
+				taken.add(scopeKey(modification.alertNumber, modification.routeId, modification.directionId));
+			}
+
+			const fresh = [...proposals].filter((proposal) => {
+				const key = scopeKey(proposal.alertNumber, proposal.routeId, proposal.directionId);
+				return !taken.has(key) && !dismissed.has(key);
+			});
+			if (fresh.length === 0) return 0;
+
+			return transaction(() => {
+				const insert = db.prepare(
+					`INSERT INTO modifications (origin, alert_number, route_id, direction_id, created_at, updated_at)
+					 VALUES ('ai', ?, ?, ?, ?, ?)`,
+				);
+				for (const { alertNumber, routeId, directionId, patternIds } of fresh) {
+					const { lastInsertRowid } = insert.run(alertNumber, routeId, directionId, nowSeconds, nowSeconds);
+					writePatterns(Number(lastInsertRowid), patternIds);
+				}
+				return fresh.length;
+			});
+		},
+
+		/**
+		 * Crée une modification à la main, rattachée à une info trafic ou non. Sans info trafic, il n'y
+		 * a pas d'analyse à suivre : ses arrêts supprimés sont saisis — aucun, pour commencer.
+		 */
+		createManual(input: ManualInput, nowSeconds: number): Modification {
+			const bounds = periodColumns(input.period);
+
+			const uid = transaction(() => {
+				const { lastInsertRowid } = db
+					.prepare(
+						`INSERT INTO modifications
+							(origin, alert_number, route_id, direction_id, label, start_date, start_time, end_date, end_time,
+							 created_at, updated_at)
+						 VALUES ('manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					)
+					.run(input.alertNumber, input.routeId, input.directionId, input.label, ...bounds, nowSeconds, nowSeconds);
+				const uid = Number(lastInsertRowid);
+
+				writePatterns(uid, input.patternIds);
+				if (input.alertNumber === null) writeRemoved(uid, []);
+				return uid;
+			});
+
+			return modifications.get(uid) as Modification;
+		},
+
+		/**
+		 * Enregistre une modification, d'un bloc : la boucle de publication ne peut jamais en lire une
+		 * dont les tronçons auraient été effacés mais pas encore réécrits.
+		 */
+		save(uid: number, input: ModificationInput, nowSeconds: number): Modification | undefined {
+			if (!modifications.has(uid)) return undefined;
+
+			transaction(() => {
 				db.prepare(
+					`UPDATE modifications
+					 SET label = ?, start_date = ?, start_time = ?, end_date = ?, end_time = ?, updated_at = ?
+					 WHERE uid = ?`,
+				).run(input.label, ...periodColumns(input.period), nowSeconds, uid);
+				writePatterns(uid, input.patternIds);
+				writeRemoved(uid, input.removedStopIds);
+				writeSegments(uid, input.segments);
+			});
+
+			return modifications.get(uid);
+		},
+
+		/** Rend des modifications visibles ou invisibles. Invisible, rien de ce qu'elle déclare ne sort. */
+		setDisabled(uids: Iterable<number>, disabled: boolean): number {
+			return transaction(() => {
+				const update = db.prepare("UPDATE modifications SET disabled = ? WHERE uid = ?");
+				let changes = 0;
+				for (const uid of uids) changes += Number(update.run(disabled ? 1 : 0, uid).changes);
+				return changes;
+			});
+		},
+
+		/**
+		 * Efface des modifications — et tout ce qu'elles portent, par cascade — et écarte des trios pour
+		 * de bon : l'IA ne les crée plus ni ne les suggère. D'un bloc, pour qu'une modification de l'IA
+		 * ne puisse pas disparaître sans que son trio soit écarté, et renaître au relevé suivant.
+		 *
+		 * Écarter un trio ne touche pas aux modifications qui le portent encore : les autres lectures
+		 * d'une même info trafic, ou ce qui a été saisi à la main.
+		 */
+		discard(uids: Iterable<number>, scopes: Iterable<Scope>, nowSeconds: number) {
+			transaction(() => {
+				const remove = db.prepare("DELETE FROM modifications WHERE uid = ?");
+				for (const uid of uids) remove.run(uid);
+
+				const dismiss = db.prepare(
 					`INSERT INTO dismissed_scopes (alert_number, route_id, direction_id, dismissed_at)
 					 VALUES (?, ?, ?, ?)
-					 ON CONFLICT (alert_number, route_id, direction_id) DO NOTHING`,
-				).run(alertNumber, routeId, directionId, nowSeconds);
-				db.exec("COMMIT");
-			} catch (cause) {
-				db.exec("ROLLBACK");
-				throw cause;
-			}
-
-			reload();
-		},
-
-		/** Rétablit un couple retiré : l'analyse en redit ce qu'elle en voit. */
-		restore(alertNumber: string, routeId: string, directionId: number): boolean {
-			const { changes } = db
-				.prepare("DELETE FROM dismissed_scopes WHERE alert_number = ? AND route_id = ? AND direction_id = ?")
-				.run(alertNumber, routeId, directionId);
-
-			reload();
-			return changes > 0;
-		},
-
-		/** Déclare une modification sans info trafic. Sa déviation se saisit ensuite comme les autres. */
-		createStandalone(
-			routeId: string,
-			directionId: number,
-			label: string | null,
-			period: StandalonePeriod,
-			nowSeconds: number,
-		): StandaloneModification {
-			const [startDate, startTime] = splitBound(period.start);
-			const [endDate, endTime] = period.end === null ? [null, null] : splitBound(period.end);
-
-			const { lastInsertRowid } = db
-				.prepare(
-					`INSERT INTO standalone_modifications
-						(route_id, direction_id, label, start_date, start_time, end_date, end_time, created_at)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				)
-				.run(routeId, directionId, label, startDate, startTime, endDate, endTime, nowSeconds);
-
-			reload();
-			return standalone.get(standaloneNumber(Number(lastInsertRowid))) as StandaloneModification;
-		},
-
-		/** Reprend l'intitulé ou la période. La ligne et le sens, eux, font partie de la clé et ne bougent pas. */
-		updateStandalone(uid: number, label: string | null, period: StandalonePeriod): boolean {
-			const [startDate, startTime] = splitBound(period.start);
-			const [endDate, endTime] = period.end === null ? [null, null] : splitBound(period.end);
-
-			const { changes } = db
-				.prepare(
-					`UPDATE standalone_modifications
-					 SET label = ?, start_date = ?, start_time = ?, end_date = ?, end_time = ?
-					 WHERE uid = ?`,
-				)
-				.run(label, startDate, startTime, endDate, endTime, uid);
-
-			reload();
-			return changes > 0;
-		},
-
-		/**
-		 * Efface une modification sans info trafic, et tout ce qui s'y rattache : sa déclaration, son
-		 * périmètre, sa désactivation. Sans elle, rien de tout cela ne désigne plus rien.
-		 */
-		removeStandalone(uid: number): boolean {
-			const alertNumber = standaloneNumber(uid);
-			let changes = 0;
-
-			db.exec("BEGIN");
-			try {
-				db.prepare("DELETE FROM detours WHERE alert_number = ?").run(alertNumber);
-				db.prepare("DELETE FROM scope_overrides WHERE alert_number = ?").run(alertNumber);
-				db.prepare("DELETE FROM disabled_modifications WHERE alert_number = ?").run(alertNumber);
-				changes = Number(db.prepare("DELETE FROM standalone_modifications WHERE uid = ?").run(uid).changes);
-				db.exec("COMMIT");
-			} catch (cause) {
-				db.exec("ROLLBACK");
-				throw cause;
-			}
-
-			reload();
-			return changes > 0;
-		},
-
-		/**
-		 * Désactive ou réactive une modification. Désactivée, elle est tenue pour hors période : ni sa
-		 * modification ni les arrêts que son périmètre supprime ne sortent dans le feed.
-		 */
-		setDisabled(alertNumber: string, routeId: string, directionId: number, value: boolean, nowSeconds: number) {
-			if (value) {
-				db.prepare(
-					`INSERT INTO disabled_modifications (alert_number, route_id, direction_id, disabled_at)
-					 VALUES (?, ?, ?, ?)
-					 ON CONFLICT (alert_number, route_id, direction_id) DO NOTHING`,
-				).run(alertNumber, routeId, directionId, nowSeconds);
-			} else {
-				db.prepare(
-					"DELETE FROM disabled_modifications WHERE alert_number = ? AND route_id = ? AND direction_id = ?",
-				).run(alertNumber, routeId, directionId);
-			}
-
-			reload();
-		},
-
-		/**
-		 * Saisit — ou ressaisit — le périmètre d'une info trafic sur une ligne et un sens. La liste
-		 * d'arrêts remplace celle de l'analyse : elle peut être vide, et c'est même le cas qui motive
-		 * tout ceci — une ligne déviée sans qu'aucun arrêt n'y soit supprimé.
-		 */
-		saveScopeOverride(
-			alertNumber: string,
-			routeId: string,
-			directionId: number,
-			stopIds: readonly string[],
-			nowSeconds: number,
-		): ScopeOverride {
-			db.exec("BEGIN");
-			try {
-				// Saisir un périmètre, c'est dire le couple concerné : il cesse d'être retiré.
-				db.prepare("DELETE FROM dismissed_scopes WHERE alert_number = ? AND route_id = ? AND direction_id = ?").run(
-					alertNumber,
-					routeId,
-					directionId,
+					 ON CONFLICT DO NOTHING`,
 				);
-
-				db.prepare(
-					`INSERT INTO scope_overrides (alert_number, route_id, direction_id, updated_at)
-					 VALUES (?, ?, ?, ?)
-					 ON CONFLICT (alert_number, route_id, direction_id) DO UPDATE SET
-						 updated_at = excluded.updated_at`,
-				).run(alertNumber, routeId, directionId, nowSeconds);
-
-				db.prepare("DELETE FROM scope_override_stops WHERE alert_number = ? AND route_id = ? AND direction_id = ?").run(
-					alertNumber,
-					routeId,
-					directionId,
-				);
-
-				const insert = db.prepare(
-					`INSERT INTO scope_override_stops (alert_number, route_id, direction_id, stop_id)
-					 VALUES (?, ?, ?, ?)`,
-				);
-				for (const stopId of new Set(stopIds)) insert.run(alertNumber, routeId, directionId, stopId);
-
-				db.exec("COMMIT");
-			} catch (cause) {
-				db.exec("ROLLBACK");
-				throw cause;
-			}
-
-			reload();
-			return overrides.get(detourKey(alertNumber, routeId, directionId)) as ScopeOverride;
-		},
-
-		/**
-		 * Rend la main à l'analyse IA pour ce couple. La déclaration de déviation, elle, reste : elle ne
-		 * tient pas au périmètre, et l'effacer ferait perdre un tracé pour une reprise de saisie.
-		 */
-		removeScopeOverride(alertNumber: string, routeId: string, directionId: number): boolean {
-			const { changes } = db
-				.prepare("DELETE FROM scope_overrides WHERE alert_number = ? AND route_id = ? AND direction_id = ?")
-				.run(alertNumber, routeId, directionId);
-
-			reload();
-			return changes > 0;
-		},
-
-		/**
-		 * Enregistre une déclaration, d'un bloc : la boucle de publication ne peut jamais lire une
-		 * déviation dont les segments auraient été effacés mais pas encore réécrits.
-		 *
-		 * Les segments sont remplacés en entier plutôt que rapprochés un à un — la liste est courte, et
-		 * l'interface renvoie de toute façon son état complet. Les effacer emporte leurs arrêts et leurs
-		 * points, par cascade. Un arrêt de substitution n'est que désigné : ce qu'il est se lit ailleurs,
-		 * dans le GTFS ou dans la base des arrêts provisoires.
-		 */
-		save(alertNumber: string, routeId: string, directionId: number, input: DetourInput, nowSeconds: number) {
-			db.exec("BEGIN");
-			try {
-				db.prepare(
-					`INSERT INTO detours (alert_number, route_id, direction_id, updated_at)
-					 VALUES (?, ?, ?, ?)
-					 ON CONFLICT (alert_number, route_id, direction_id) DO UPDATE SET
-						 updated_at = excluded.updated_at`,
-				).run(alertNumber, routeId, directionId, nowSeconds);
-
-				db.prepare("DELETE FROM detour_segments WHERE alert_number = ? AND route_id = ? AND direction_id = ?").run(
-					alertNumber,
-					routeId,
-					directionId,
-				);
-
-				const insertSegment = db.prepare(
-					`INSERT INTO detour_segments
-						(alert_number, route_id, direction_id, segment, start_stop_id, end_stop_id, propagated_delay)
-					 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				);
-				const insertStop = db.prepare(
-					`INSERT INTO detour_stops (alert_number, route_id, direction_id, segment, position, stop_id, travel_time)
-					 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				);
-				const insertPoint = db.prepare(
-					`INSERT INTO detour_path (alert_number, route_id, direction_id, segment, position, latitude, longitude)
-					 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				);
-				const insertPattern = db.prepare(
-					`INSERT INTO detour_segment_patterns (alert_number, route_id, direction_id, segment, pattern_id)
-					 VALUES (?, ?, ?, ?, ?)`,
-				);
-				const insertWaypoint = db.prepare(
-					`INSERT INTO detour_waypoints
-						(alert_number, route_id, direction_id, segment, position, latitude, longitude, mode)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				);
-
-				input.segments.forEach((segment, rank) => {
-					insertSegment.run(
-						alertNumber,
-						routeId,
-						directionId,
-						rank,
-						segment.startStopId,
-						segment.endStopId,
-						segment.propagatedDelay,
-					);
-					for (const patternId of new Set(segment.patternIds)) {
-						insertPattern.run(alertNumber, routeId, directionId, rank, patternId);
-					}
-					segment.stops.forEach((stop, position) => {
-						insertStop.run(alertNumber, routeId, directionId, rank, position, stop.stopId, stop.travelTime);
-					});
-					segment.path.forEach((point, position) => {
-						insertPoint.run(alertNumber, routeId, directionId, rank, position, point.latitude, point.longitude);
-					});
-					segment.waypoints.forEach((waypoint, position) => {
-						insertWaypoint.run(
-							alertNumber,
-							routeId,
-							directionId,
-							rank,
-							position,
-							waypoint.latitude,
-							waypoint.longitude,
-							waypoint.mode,
-						);
-					});
-				});
-
-				db.exec("COMMIT");
-			} catch (cause) {
-				db.exec("ROLLBACK");
-				throw cause;
-			}
-
-			reload();
-			return records.get(detourKey(alertNumber, routeId, directionId));
-		},
-
-		/** Efface une déclaration — ses segments, leurs arrêts et leurs tracés partent avec elle, par cascade. */
-		remove(alertNumber: string, routeId: string, directionId: number) {
-			db.prepare("DELETE FROM detours WHERE alert_number = ? AND route_id = ? AND direction_id = ?").run(
-				alertNumber,
-				routeId,
-				directionId,
-			);
-			reload();
+				for (const { alertNumber, routeId, directionId } of scopes) {
+					dismiss.run(alertNumber, routeId, directionId, nowSeconds);
+				}
+			});
 		},
 
 		/** Verse un arrêt provisoire dans la base. Il est aussitôt désignable par toutes les déviations. */
@@ -951,43 +628,32 @@ export function useDetourStore(path: string) {
 		},
 
 		/**
-		 * Retire un arrêt provisoire de la base, et de toutes les déviations qui le désignent : le garder
-		 * dans l'une d'elles laisserait dans le feed des `replacement_stops` pointant vers un arrêt que
-		 * rien ne définit. Les temps de parcours des arrêts restants n'ont pas à être repris — une suite
-		 * strictement croissante le reste une fois un terme ôté.
+		 * Retire un arrêt provisoire de la base, et de toutes les modifications qui le désignent : le
+		 * garder dans l'une d'elles laisserait dans le feed des `replacement_stops` pointant vers un
+		 * arrêt que rien ne définit. Les temps de parcours des arrêts restants n'ont pas à être repris —
+		 * une suite strictement croissante le reste une fois un terme ôté.
 		 *
-		 * Les déclarations touchées sont réhorodatées : c'est leur `last_modified_time`, et elles viennent
-		 * de changer. Renvoie leur nombre, ou `undefined` pour un arrêt inconnu.
+		 * Les modifications touchées sont réhorodatées : c'est leur `last_modified_time`, et elles
+		 * viennent de changer. Renvoie leur nombre, ou `undefined` pour un arrêt inconnu.
 		 */
 		deleteProvisionalStop(stopId: string, nowSeconds: number): number | undefined {
 			const uid = provisionalStopUid(stopId);
 			if (uid === undefined || !provisional.has(stopId)) return undefined;
 
-			const designating = [...records.values()].filter((record) =>
-				record.segments.some((segment) => segment.stops.some((stop) => stop.stopId === stopId)),
+			const designating = [...modifications.values()].filter((modification) =>
+				modification.segments.some((segment) => segment.stops.some((stop) => stop.stopId === stopId)),
 			);
 
-			db.exec("BEGIN");
-			try {
-				const touch = db.prepare(
-					"UPDATE detours SET updated_at = ? WHERE alert_number = ? AND route_id = ? AND direction_id = ?",
-				);
-				for (const record of designating) {
-					touch.run(nowSeconds, record.alertNumber, record.routeId, record.directionId);
-				}
+			return transaction(() => {
+				const touch = db.prepare("UPDATE modifications SET updated_at = ? WHERE uid = ?");
+				for (const modification of designating) touch.run(nowSeconds, modification.uid);
 
 				// Les rangs des arrêts restants gardent un trou là où il était : ils ne servent qu'à ordonner,
-				// et le prochain enregistrement de la déviation les réécrit de toute façon.
-				db.prepare("DELETE FROM detour_stops WHERE stop_id = ?").run(stopId);
+				// et le prochain enregistrement de la modification les réécrit de toute façon.
+				db.prepare("DELETE FROM segment_stops WHERE stop_id = ?").run(stopId);
 				db.prepare("DELETE FROM provisional_stops WHERE stop_uid = ?").run(uid);
-				db.exec("COMMIT");
-			} catch (cause) {
-				db.exec("ROLLBACK");
-				throw cause;
-			}
-
-			reload();
-			return designating.length;
+				return designating.length;
+			});
 		},
 	};
 }
@@ -1003,17 +669,6 @@ export function provisionalStopUid(stopId: string): number | undefined {
 	return match === null ? undefined : Number(match[1]);
 }
 
-/** Le numéro qui tient lieu de numéro d'info trafic à une modification déclarée sans elle. */
-export function standaloneNumber(uid: number): string {
-	return `M${uid}`;
-}
-
-/** L'uid d'une modification sans info trafic d'après son numéro, ou `undefined` si ce n'en est pas une. */
-export function standaloneUid(alertNumber: string): number | undefined {
-	const match = /^M(\d+)$/.exec(alertNumber);
-	return match === null ? undefined : Number(match[1]);
-}
-
 /** « 2026-09-24 » et « 08:30 » donnent « 2026-09-24T08:30 » ; sans heure, la date seule. */
 function joinBound(date: string, time: string | null): string {
 	return time === null ? date : `${date}T${time}`;
@@ -1024,87 +679,56 @@ function splitBound(bound: string): [string, string | null] {
 	return [date as string, time ?? null];
 }
 
+/** Les quatre colonnes d'une période saisie, dans l'ordre de la table ; toutes nulles sans période. */
+function periodColumns(
+	period: ModificationPeriod | null,
+): [string | null, string | null, string | null, string | null] {
+	if (period === null) return [null, null, null, null];
+	const [startDate, startTime] = splitBound(period.start);
+	const [endDate, endTime] = period.end === null ? [null, null] : splitBound(period.end);
+	return [startDate, startTime, endDate, endTime];
+}
+
 // ---
 
-type StandaloneRow = {
+type ModificationRow = {
 	uid: number;
+	origin: string;
+	alert_number: string | null;
 	route_id: string;
 	direction_id: number;
 	label: string | null;
-	start_date: string;
+	start_date: string | null;
 	start_time: string | null;
 	end_date: string | null;
 	end_time: string | null;
+	removed_overridden: number;
+	disabled: number;
 	created_at: number;
-};
-
-type DisabledRow = { alert_number: string; route_id: string; direction_id: number; disabled_at: number };
-
-type DetourRow = {
-	alert_number: string;
-	route_id: string;
-	direction_id: number;
 	updated_at: number;
 };
 
+type PatternRow = { uid: number; pattern_id: string };
+
+type RemovedRow = { uid: number; stop_id: string };
+
+type DismissedRow = { alert_number: string; route_id: string; direction_id: number; dismissed_at: number };
+
+type FirstSeenRow = { alert_number: string; first_seen_at: number };
+
+type ProvisionalRow = { stop_uid: number; name: string; latitude: number; longitude: number; created_at: number };
+
 type SegmentRow = {
-	alert_number: string;
-	route_id: string;
-	direction_id: number;
+	uid: number;
 	segment: number;
 	start_stop_id: string | null;
 	end_stop_id: string | null;
 	propagated_delay: number;
 };
 
-type SegmentPatternRow = {
-	alert_number: string;
-	route_id: string;
-	direction_id: number;
-	segment: number;
-	pattern_id: string;
-};
+type StopRow = { uid: number; segment: number; position: number; stop_id: string; travel_time: number };
 
-type OverrideRow = { alert_number: string; route_id: string; direction_id: number; updated_at: number };
-
-type OverrideStopRow = { alert_number: string; route_id: string; direction_id: number; stop_id: string };
-
-type ProvisionalRow = { stop_uid: number; name: string; latitude: number; longitude: number; created_at: number };
-
-type StopRow = {
-	alert_number: string;
-	route_id: string;
-	direction_id: number;
-	segment: number;
-	position: number;
-	stop_id: string;
-	travel_time: number;
-};
-
-/** L'ancienne forme des arrêts de déviation, telle que la migration vers la base d'arrêts la relit. */
-type LegacyStopRow = {
-	alert_number: string;
-	route_id: string;
-	direction_id: number;
-	stop_uid: number;
-	position: number;
-	name: string;
-	latitude: number;
-	longitude: number;
-	travel_time: number;
-	gtfs_stop_id: string | null;
-	shared_stop_id: string | null;
-};
-
-type PathRow = {
-	alert_number: string;
-	route_id: string;
-	direction_id: number;
-	segment: number;
-	position: number;
-	latitude: number;
-	longitude: number;
-};
+type PathRow = { uid: number; segment: number; position: number; latitude: number; longitude: number };
 
 type WaypointRow = PathRow & { mode: string };
 

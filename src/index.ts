@@ -28,6 +28,7 @@ import {
 } from "./config.js";
 import { adminRoutes } from "./detours/admin.js";
 import { buildDetourEntities } from "./detours/build-entities.js";
+import { useModificationIndex } from "./detours/modifications.js";
 import { useDetourStore } from "./detours/store.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
 import { resolveServiceRun, scheduledTripUpdates, serviceDays, tripRun } from "./gtfs-rt/scheduled-trips.js";
@@ -82,15 +83,14 @@ const staticGtfs = await useStaticGtfs(STATIC_GTFS_URL, GTFS_CHECK_INTERVAL);
 // lui-même, sans avoir à s'y réabonner.
 const vehicleLocator = useVehicleLocator(staticGtfs, restored?.locations);
 const detourStore = useDetourStore(DETOURS_DB_PATH);
-// Ce qui est saisi à la main — périmètres, modifications sans info trafic, désactivations — est relu
-// à chaque indexation, jamais retenu : une saisie vaut dès `serviceAlerts.reindex()`, sans attendre le
-// relevé suivant ni rappeler l'IA.
-const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs, () => ({
-	overrides: detourStore.scopeOverrides,
-	standalone: detourStore.standaloneModifications,
-	disabled: detourStore.disabledModifications,
-	dismissed: detourStore.dismissedScopes,
-}));
+// Les modifications se rebâtissent à chaque relevé d'infos trafic, et après chaque saisie : c'est
+// ce qui crée celles que l'IA propose sans ambiguïté, et qui tient à jour les arrêts à sauter. Le
+// premier relevé attend le réseau, l'index est donc là avant lui — celles saisies à la main ne
+// dépendent pas du flux, et n'ont pas à disparaître de l'interface tant qu'il n'a pas répondu.
+const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs, () =>
+	modificationIndex.reindex(),
+);
+const modificationIndex = useModificationIndex(detourStore, staticGtfs, () => serviceAlerts.alerts);
 // Sa présence est constatée ici, ses octets ne seront lus qu'au premier accrochage.
 const roadGraph = useRoadGraph(ROAD_GRAPH_PATH);
 
@@ -118,9 +118,9 @@ if (ADMIN_USERNAME && ADMIN_PASSWORD) {
 			store: detourStore,
 			gtfs: staticGtfs,
 			serviceAlerts,
+			modificationIndex,
 			roadGraph,
 			rebuild: () => rebuildDetourEntities(),
-			reindexAlerts: () => serviceAlerts.reindex(),
 		}),
 	);
 	console.log("➔ Detour administration mounted on /admin.");
@@ -527,7 +527,7 @@ async function pollTripUpdates() {
 				if (departure !== undefined) store.tripDepartures.set(resolvedTripId, departure);
 			}
 
-			applySkippedStops(entity.tripUpdate, tripRouteId, serviceAlerts.skipIndex, staticGtfs.data);
+			applySkippedStops(entity.tripUpdate, tripRouteId, modificationIndex.skipIndex, staticGtfs.data);
 
 			if (resolvedTripId && startDate) covered.add(tripRun(resolvedTripId, startDate));
 
@@ -560,7 +560,7 @@ async function pollTripUpdates() {
 
 		// Toutes les autres courses de la journée de service qui n'ont pas fini de circuler : le flux
 		// source les ignore, l'horaire théorique les connaît (cf. `scheduledTripUpdates`).
-		const scheduled = scheduledTripUpdates(staticGtfs.data, serviceAlerts.skipIndex, covered, nowSeconds);
+		const scheduled = scheduledTripUpdates(staticGtfs.data, modificationIndex.skipIndex, covered, nowSeconds);
 		for (const [id, tripUpdate] of scheduled) store.tripUpdates.set(id, tripUpdate);
 
 		console.log(
@@ -585,8 +585,7 @@ function rebuildDetourEntities() {
 	try {
 		store.detourEntities = buildDetourEntities(
 			staticGtfs.data,
-			serviceAlerts.alertScopes,
-			detourStore.records,
+			modificationIndex.modifications,
 			detourStore.provisionalStops,
 			Math.floor(Date.now() / 1000),
 		);

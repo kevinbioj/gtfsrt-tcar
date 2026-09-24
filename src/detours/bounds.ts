@@ -44,18 +44,29 @@ export type DetourBounds = {
  * `removedStopIds` porte TOUS les quais du nom supprimé, les deux sens confondus — c'est délibéré en
  * amont (cf. `resolveRemovedStop`). L'intersection avec l'itinéraire du sens fait le tri toute
  * seule : il ne faut jamais chercher le voisin « d'avant » par son nom.
+ *
+ * Une modification qui ne vise que certains tracés ne regarde qu'eux : ce sont leurs arrêts qui
+ * bornent ses tronçons, et une autre branche mieux couverte n'a rien à lui dicter.
  */
 export function deduceBounds(
 	gtfs: StaticGtfs,
 	routeId: string,
 	directionId: number,
 	removedStopIds: ReadonlySet<string>,
+	patternIds: readonly string[],
 ): DetourBounds[] {
 	const candidates: DetourBounds[] = [];
 	/** Combien d'arrêts supprimés chaque itinéraire dessert : c'est lui qui classe ses tronçons. */
 	const coverage = new Map<number, number>();
 
-	for (const [itinerary, sequence] of (gtfs.routeStopSequences.get(routeId)?.get(directionId) ?? []).entries()) {
+	const sequences =
+		patternIds.length === 0
+			? (gtfs.routeStopSequences.get(routeId)?.get(directionId) ?? [])
+			: (gtfs.routePatterns.get(routeId)?.get(directionId) ?? [])
+					.filter((pattern) => patternIds.includes(pattern.patternId))
+					.map((pattern) => pattern.stops);
+
+	for (const [itinerary, sequence] of sequences.entries()) {
 		const runs = boundsOn(sequence, removedStopIds, itinerary);
 		coverage.set(
 			itinerary,
@@ -83,20 +94,22 @@ export function deduceBounds(
  * Les bornes sont éprouvées d'abord pour elles-mêmes : une borne supprimée suffit, quand bien même
  * aucun itinéraire de la ligne ne porterait les deux — une branche que le GTFS a renumérotée.
  *
- * Seuls comptent les tracés que le tronçon vise : sa plage ne dit rien des courses qu'il ne touche pas.
+ * Seuls comptent les tracés que la modification vise : la plage ne dit rien des courses qu'elle ne
+ * touche pas.
  */
 export function removesStops(
 	gtfs: StaticGtfs,
 	routeId: string,
 	directionId: number,
+	patternIds: readonly string[],
 	removedStopIds: ReadonlySet<string>,
-	segment: SegmentScope,
+	segment: SegmentBounds,
 ): boolean {
 	const { startStopId, endStopId } = segment;
 	if (startStopId === null || endStopId === null || removedStopIds.size === 0) return false;
 	if (removedStopIds.has(startStopId) || removedStopIds.has(endStopId)) return true;
 
-	for (const { stops: sequence } of patternsOf(gtfs, routeId, directionId, segment)) {
+	for (const { stops: sequence } of patternsOf(gtfs, routeId, directionId, patternIds)) {
 		const start = sequence.findIndex((stop) => stop.stopId === startStopId);
 		const end = sequence.findIndex((stop) => stop.stopId === endStopId);
 		if (start === -1 || end === -1 || start > end) continue;
@@ -118,20 +131,19 @@ export function removesStops(
  * dans une même déclaration, c'est une erreur de saisie — celui qui saisit voit les deux et peut les
  * fondre en un seul.
  *
- * Un chevauchement sur UN SEUL tracé suffit à refuser : c'est bien deux tronçons superposés sur les
- * courses de ce tracé. Deux tronçons qui visent des tracés distincts, eux, ne se voient jamais sur la
- * même course, et peuvent porter les mêmes bornes — c'est tout l'objet de les distinguer.
+ * Un chevauchement sur UN SEUL des tracés visés suffit à refuser : c'est bien deux tronçons
+ * superposés sur les courses de ce tracé.
  */
 export function overlappingSegments(
 	gtfs: StaticGtfs,
 	routeId: string,
 	directionId: number,
-	bounds: readonly SegmentScope[],
+	patternIds: readonly string[],
+	bounds: readonly SegmentBounds[],
 ): [number, number] | undefined {
-	for (const { patternId, stops: sequence } of gtfs.routePatterns.get(routeId)?.get(directionId) ?? []) {
+	for (const { stops: sequence } of patternsOf(gtfs, routeId, directionId, patternIds)) {
 		const ranges = bounds.map((segment) => {
 			if (segment.startStopId === null || segment.endStopId === null) return undefined;
-			if (!targets(segment, patternId)) return undefined;
 			const start = sequence.findIndex((stop) => stop.stopId === segment.startStopId);
 			const end = sequence.findIndex((stop) => stop.stopId === segment.endStopId);
 			return start === -1 || end === -1 || start > end ? undefined : { start, end };
@@ -152,28 +164,23 @@ export function overlappingSegments(
 	return undefined;
 }
 
-/** Ce qu'il faut d'un tronçon pour savoir quelles courses il touche : ses bornes et ses tracés. */
-export type SegmentScope = {
-	startStopId: string | null;
-	endStopId: string | null;
-	/** Vide : tous les tracés du sens (cf. `DetourSegment.patternIds`). */
-	patternIds: readonly string[];
-};
+/** Les bornes d'un tronçon, arrêtées ou non. */
+export type SegmentBounds = { startStopId: string | null; endStopId: string | null };
 
-/** Le tronçon vise-t-il ce tracé ? Sans tracé nommé, il les vise tous. */
-export function targets(segment: { patternIds: readonly string[] }, patternId: string): boolean {
-	return segment.patternIds.length === 0 || segment.patternIds.includes(patternId);
+/** Ces tracés visés comprennent-ils celui-ci ? Aucun tracé nommé, c'est les viser tous. */
+export function targets(patternIds: readonly string[], patternId: string): boolean {
+	return patternIds.length === 0 || patternIds.includes(patternId);
 }
 
-/** Les tracés du sens que le tronçon vise. */
-function patternsOf(
+/** Les tracés du sens que la modification vise. */
+export function patternsOf(
 	gtfs: StaticGtfs,
 	routeId: string,
 	directionId: number,
-	segment: { patternIds: readonly string[] },
+	patternIds: readonly string[],
 ): RoutePattern[] {
 	return (gtfs.routePatterns.get(routeId)?.get(directionId) ?? []).filter((pattern) =>
-		targets(segment, pattern.patternId),
+		targets(patternIds, pattern.patternId),
 	);
 }
 

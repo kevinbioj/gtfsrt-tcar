@@ -4,13 +4,13 @@ import type GtfsRealtime from "gtfs-realtime-bindings";
 
 import { MAX_DETOUR_JUNCTION_OFFSET } from "../config.js";
 import { serviceDays } from "../gtfs-rt/scheduled-trips.js";
-import type { AlertScopeIndex } from "../gtfs-rt/use-service-alerts.js";
 import type { StaticGtfs, TripStop } from "../gtfs-rt/use-static-gtfs.js";
 import { encodePolyline } from "../utils/encode-polyline.js";
 import type { Coordinates } from "../utils/geometry.js";
 import { removesStops } from "./bounds.js";
+import type { ResolvedModification } from "./modifications.js";
 import { spliceShape } from "./splice-shape.js";
-import { type DetourRecord, detourKey, type ProvisionalStop, provisionalStopUid } from "./store.js";
+import { type ProvisionalStop, provisionalStopUid } from "./store.js";
 
 /**
  * Les journées de service qu'une déviation couvre. La veille en fait partie pour la même raison que
@@ -24,7 +24,7 @@ const CANDIDATE_DAYS = [-1, 0] as const;
  * déclaration dont il vient n'a plus d'importance, seule compte la course qu'il modifie.
  */
 type Candidate = {
-	/** De quoi le nommer au journal et dans les identifiants publiés : « 22467#0 ». */
+	/** De quoi le nommer au journal et dans les identifiants publiés : « M12#0 ». */
 	label: string;
 	/**
 	 * Sa plage supprime-t-elle des arrêts ? Sinon le véhicule passe ailleurs entre deux arrêts qu'il
@@ -103,14 +103,13 @@ type Modification = {
  */
 export function buildDetourEntities(
 	gtfs: StaticGtfs,
-	scopes: AlertScopeIndex,
-	records: ReadonlyMap<string, DetourRecord>,
+	modifications: ReadonlyMap<number, ResolvedModification>,
 	provisional: ReadonlyMap<string, ProvisionalStop>,
 	nowSeconds: number,
 ): GtfsRealtime.transit_realtime.IFeedEntity[] {
 	const stops = new Map<string, GtfsRealtime.transit_realtime.IStop>();
 	const shapes = new Map<string, GtfsRealtime.transit_realtime.IShape>();
-	const modifications: GtfsRealtime.transit_realtime.IFeedEntity[] = [];
+	const entities: GtfsRealtime.transit_realtime.IFeedEntity[] = [];
 	/**
 	 * Ce qui a empêché une déclaration de sortir, ou de sortir entière. Un ensemble, et non une liste :
 	 * les mêmes constats se reposent à l'identique sur des centaines de courses, et le journal n'a
@@ -118,9 +117,9 @@ export function buildDetourEntities(
 	 */
 	const problems = new Set<string>();
 
-	const candidates = collectCandidates(gtfs, scopes, records, provisional, problems);
+	const candidates = collectCandidates(gtfs, modifications, provisional, problems);
 	if (candidates.size === 0) {
-		report(records.size, 0, stops, shapes, modifications, problems);
+		report(modifications.size, 0, stops, shapes, entities, problems);
 		return [];
 	}
 
@@ -193,7 +192,7 @@ export function buildDetourEntities(
 			// tronçon sans suppression dont la shape n'a pas pu être recousue, et le journal l'a dit.
 			if (group.modifications.length === 0 && shapeId === null) continue;
 
-			modifications.push({
+			entities.push({
 				id: `TM:TCAR:${parts}:${day.date}:${fingerprint}`,
 				tripModifications: {
 					selectedTrips: [{ tripIds: group.tripIds, shapeId: shapeId ?? undefined }],
@@ -254,12 +253,12 @@ export function buildDetourEntities(
 		});
 	}
 
-	report(records.size, applied.size, stops, shapes, modifications, problems);
+	report(modifications.size, applied.size, stops, shapes, entities, problems);
 
 	return [
 		...stops.entries().map(([stopId, stop]) => ({ id: `ST:${stopId}`, stop })),
 		...shapes.entries().map(([shapeId, shape]) => ({ id: `SH:${shapeId}`, shape })),
-		...modifications,
+		...entities,
 	];
 }
 
@@ -309,28 +308,21 @@ export function countSelectableTrips(
  */
 function collectCandidates(
 	gtfs: StaticGtfs,
-	scopes: AlertScopeIndex,
-	records: ReadonlyMap<string, DetourRecord>,
+	modifications: ReadonlyMap<number, ResolvedModification>,
 	provisional: ReadonlyMap<string, ProvisionalStop>,
 	problems: Set<string>,
 ): Map<string, Candidate[]> {
 	const candidates = new Map<string, Candidate[]>();
 
-	for (const record of records.values()) {
-		const key = detourKey(record.alertNumber, record.routeId, record.directionId);
-		const scope = scopes.get(key);
-		// Une déclaration sans perturbation en vigueur ne s'annonce pas : l'info trafic est retombée, ou
-		// sa période n'a pas commencé. La déclaration reste en base — les travaux reprennent souvent.
-		if (scope === undefined) {
-			problems.add(`${key} — aucune info trafic ne porte plus cette déviation.`);
-			continue;
-		}
-		// Désactivée, la modification est tenue pour hors période : c'est un choix, pas un problème, et
-		// le journal n'a rien à en dire.
-		if (!scope.active || scope.disabled) continue;
+	for (const modification of modifications.values()) {
+		// Hors période ou invisible, la modification ne s'annonce pas : c'est un choix ou un calendrier,
+		// pas un problème, et le journal n'a rien à en dire. Celles dont l'info trafic a quitté le flux
+		// ne sont pas même indexées.
+		if (!modification.active || modification.disabled) continue;
+		const record = modification.record;
 
 		record.segments.forEach((segment, rank) => {
-			const label = `${record.alertNumber}#${rank}`;
+			const label = `M${record.uid}#${rank}`;
 			const { startStopId, endStopId } = segment;
 			// Les bornes sont requises quelle que soit la nature du tronçon : publiées ou non, ce sont
 			// elles qui désignent les courses concernées.
@@ -341,7 +333,14 @@ function collectCandidates(
 
 			// La nature du tronçon se lit d'ici : une plage sans arrêt supprimé ne supprime rien, et n'a
 			// que son tracé à annoncer.
-			const removes = removesStops(gtfs, record.routeId, record.directionId, scope.removedStopIds, segment);
+			const removes = removesStops(
+				gtfs,
+				record.routeId,
+				record.directionId,
+				record.patternIds,
+				modification.removedStopIds,
+				segment,
+			);
 
 			if (!removes && segment.path.length < 2) {
 				problems.add(`${label} — aucun arrêt supprimé dans sa plage, et pas de tracé : rien à annoncer.`);
@@ -385,10 +384,10 @@ function collectCandidates(
 			const candidate: Candidate = {
 				label,
 				removes,
-				alertId: scope.alertId,
+				alertId: modification.alertId,
 				routeId: record.routeId,
 				directionId: record.directionId,
-				patternIds: segment.patternIds.length === 0 ? null : new Set(segment.patternIds),
+				patternIds: record.patternIds.length === 0 ? null : new Set(record.patternIds),
 				startStopId,
 				endStopId,
 				propagatedDelay: removes ? segment.propagatedDelay : 0,

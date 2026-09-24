@@ -294,11 +294,14 @@ export const ALERT_CACHE_PATH = ".cache/alert-analysis.json";
 export const STATE_CACHE_PATH = ".state.json";
 
 /**
- * Base des déviations déclarées : arrêts de substitution et itinéraires de report, saisis dans
- * l'interface d'administration. Elle est rangée dans `.cache`, déjà monté en volume — SQLite y pose
- * aussi ses fichiers `-wal` et `-shm`, qu'un montage fichier par fichier ne couvrirait pas.
+ * Base des modifications et des arrêts provisoires, saisis dans l'interface d'administration. Elle est
+ * rangée dans `.cache`, déjà monté en volume — SQLite y pose aussi ses fichiers `-wal` et `-shm`,
+ * qu'un montage fichier par fichier ne couvrirait pas.
+ *
+ * Un nouveau nom pour un nouveau schéma : l'ancienne `detours.db` porte un historique de migrations
+ * que ce code ne rejoue plus, et une base neuve vaut mieux qu'une base lue de travers.
  */
-export const DETOURS_DB_PATH = ".cache/detours.db";
+export const DETOURS_DB_PATH = ".cache/modifications.sqlite";
 
 /**
  * Identifiants de l'interface d'administration. Sans eux, l'interface n'est PAS montée du tout : une

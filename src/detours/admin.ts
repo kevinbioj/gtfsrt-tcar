@@ -1,30 +1,19 @@
 import { type Context, Hono } from "hono";
 import { basicAuth } from "hono/basic-auth";
 
+import type { AlertPeriod } from "../ai/analyze-alert.js";
 import { ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SMOOTHING_TOLERANCE, ROAD_SNAP_RADIUS } from "../config.js";
-import {
-	type AlertScope,
-	type AlertScopeIndex,
-	type AnalyzedAlert,
-	hasEnded,
-	isActive,
-} from "../gtfs-rt/use-service-alerts.js";
+import { type AnalyzedAlert, hasEnded } from "../gtfs-rt/use-service-alerts.js";
 import { normalizeStopName, type RoutePattern, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
 import type { RoadGraph, RoadGraphHandle } from "../routing/road-graph.js";
 import { routeOnRoad } from "../routing/route-on-road.js";
 import { encodePolyline } from "../utils/encode-polyline.js";
 import { sanitizeHtml } from "../utils/sanitize-html.js";
 import { ADMIN_PAGE } from "./admin-page.js";
-import { deduceBounds, overlappingSegments, removesStops, type SegmentScope, targets } from "./bounds.js";
+import { deduceBounds, overlappingSegments, removesStops, type SegmentBounds } from "./bounds.js";
 import { countSelectableTrips } from "./build-entities.js";
-import {
-	type DetourInput,
-	type DetourSegment,
-	type DetourStore,
-	detourKey,
-	type StandalonePeriod,
-	standaloneUid,
-} from "./store.js";
+import type { ModificationIndex, ResolvedModification, Suggestion } from "./modifications.js";
+import type { DetourSegment, DetourStore, ModificationInput, ModificationPeriod, Scope } from "./store.js";
 
 /**
  * Nombre de quais que la recherche d'arrêts renvoie au plus. Un libellé court — « gare » — en touche
@@ -44,21 +33,18 @@ export type AdminDependencies = {
 	password: string;
 	store: DetourStore;
 	gtfs: { data: StaticGtfs };
-	serviceAlerts: {
-		alertScopes: AlertScopeIndex;
-		/** Les infos trafic analysées : c'est là qu'on trouve une ligne que l'analyse n'a pas retenue. */
-		alerts: AnalyzedAlert[];
-	};
+	/** Les infos trafic analysées : de quoi rattacher une modification à l'une d'elles. */
+	serviceAlerts: { alerts: AnalyzedAlert[] };
+	/** Les modifications résolues et les suggestions, à rebâtir après chaque saisie. */
+	modificationIndex: ModificationIndex;
 	/** Le graphe routier, pour accrocher un tracé aux rues. Son absence désarme le mode, rien de plus. */
 	roadGraph: RoadGraphHandle;
 	/** Réassemble les entités du feed, pour qu'un enregistrement se voie sans attendre le relevé suivant. */
 	rebuild: () => void;
-	/** Rebâtit le périmètre des perturbations après une saisie — à appeler AVANT {@link rebuild}. */
-	reindexAlerts: () => void;
 };
 
 /**
- * L'interface de déclaration des déviations, et l'API qu'elle consomme.
+ * L'interface de gestion des modifications, et l'API qu'elle consomme.
  *
  * Le sous-routeur est monté sous `/admin` et s'ouvre par son authentification : tout ce qui suit est
  * en accès restreint, y compris la page elle-même — elle porte les textes des infos trafic et la
@@ -68,11 +54,246 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 	const admin = new Hono();
 	admin.use(basicAuth({ username: deps.username, password: deps.password }));
 
+	/** Après une saisie : l'index se rebâtit, puis le feed, qui le lit. */
+	const refresh = () => {
+		deps.modificationIndex.reindex();
+		deps.rebuild();
+	};
+
+	/** La modification résolue que désigne `:uid`, ou `undefined`. */
+	const resolve = (c: Context) => deps.modificationIndex.modifications.get(Number(c.req.param("uid")));
+
 	admin.get("/", (c) => c.html(ADMIN_PAGE));
 
-	admin.get("/api/detours", (c) => {
-		const scopes = [...deps.serviceAlerts.alertScopes.values()].sort((a, b) => compareScopes(a, b, deps.gtfs.data));
-		return c.json(scopes.map((scope) => summarize(scope, deps)));
+	/**
+	 * Le tableau : les modifications, et les suggestions à accepter ou à ignorer. Tout part, en vigueur
+	 * ou non ; c'est l'interface qui range en onglets ce qui vient, ce qui court et ce qui est fini.
+	 */
+	admin.get("/api/modifications", (c) => {
+		const gtfs = deps.gtfs.data;
+		const now = Temporal.Now.instant();
+		const modifications = [...deps.modificationIndex.modifications.values()]
+			.sort((a, b) => compareRows(a, b, gtfs))
+			.map((modification) => summarize(modification, deps, now));
+		const suggestions = [...deps.modificationIndex.suggestions]
+			.sort((a, b) => compareRows(a, b, gtfs))
+			.map((suggestion) => summarizeSuggestion(suggestion, deps, now));
+
+		return c.json({ modifications, suggestions });
+	});
+
+	admin.get("/api/modifications/:uid", (c) => {
+		const modification = resolve(c);
+		if (modification === undefined) return c.json({ code: 404, message: "Modification inconnue." }, 404);
+		return c.json(detail(modification, deps));
+	});
+
+	/**
+	 * Crée une modification à la main. Rattachée à une info trafic, elle en hérite ce qu'on ne saisit
+	 * pas ; sans info trafic, sa raison et sa période sont obligatoires.
+	 */
+	admin.post("/api/modifications", async (c) => {
+		const payload = await readObject(c);
+		if ("message" in payload) return c.json({ code: 400, message: payload.message }, 400);
+
+		const gtfs = deps.gtfs.data;
+		const routeId = payload.routeId;
+		const directionId = payload.directionId;
+		const directions = typeof routeId === "string" ? gtfs.routeDirections.get(routeId) : undefined;
+		if (typeof routeId !== "string" || directions === undefined) {
+			return c.json({ code: 400, message: `Ligne « ${String(routeId)} » inconnue du GTFS.` }, 400);
+		}
+		if (typeof directionId !== "number" || !directions.some((direction) => direction.directionId === directionId)) {
+			return c.json(
+				{ code: 400, message: `La ligne ${lineName(gtfs, routeId)} n'a pas de sens ${String(directionId)}.` },
+				400,
+			);
+		}
+
+		let alertNumber: string | null = null;
+		if (payload.alertNumber !== undefined && payload.alertNumber !== null && payload.alertNumber !== "") {
+			if (!deps.serviceAlerts.alerts.some((alert) => alert.alertNumber === payload.alertNumber)) {
+				return c.json(
+					{ code: 400, message: `Aucune info trafic ${String(payload.alertNumber)} au flux courant.` },
+					400,
+				);
+			}
+			alertNumber = payload.alertNumber as string;
+		}
+
+		const header = parseHeader(payload, alertNumber !== null);
+		if ("message" in header) return c.json({ code: 400, message: header.message }, 400);
+
+		const patternIds = parsePatterns(payload.patternIds, patternsFor(gtfs, routeId, directionId));
+		if ("message" in patternIds) return c.json({ code: 400, message: patternIds.message }, 400);
+
+		const created = deps.store.createManual(
+			{ alertNumber, routeId, directionId, label: header.label, period: header.period, patternIds: patternIds.ids },
+			nowSeconds(),
+		);
+		refresh();
+		return c.json({ uid: created.uid });
+	});
+
+	/** Enregistre tout d'un bloc : raison, période, tracés, arrêts supprimés, tronçons. */
+	admin.put("/api/modifications/:uid", async (c) => {
+		const modification = resolve(c);
+		if (modification === undefined) return c.json({ code: 404, message: "Modification inconnue." }, 404);
+
+		const payload = await readObject(c);
+		if ("message" in payload) return c.json({ code: 400, message: payload.message }, 400);
+
+		const parsed = parseInput(payload, modification, deps);
+		if ("message" in parsed) return c.json({ code: 400, message: parsed.message }, 400);
+
+		deps.store.save(modification.uid, parsed.input, nowSeconds());
+		refresh();
+
+		const saved = deps.modificationIndex.modifications.get(modification.uid);
+		if (saved === undefined) return c.json({ code: 404, message: "Modification inconnue." }, 404);
+		return c.json(detail(saved, deps));
+	});
+
+	/** Visible ou invisible. Invisible, rien ne sort : ni ses tronçons, ni ses arrêts supprimés. */
+	admin.put("/api/modifications/:uid/visible", async (c) => {
+		const modification = resolve(c);
+		if (modification === undefined) return c.json({ code: 404, message: "Modification inconnue." }, 404);
+
+		const payload = await readObject(c);
+		if ("message" in payload) return c.json({ code: 400, message: payload.message }, 400);
+		if (typeof payload.visible !== "boolean")
+			return c.json({ code: 400, message: "Booléen « visible » attendu." }, 400);
+
+		deps.store.setDisabled([modification.uid], !payload.visible);
+		refresh();
+		return c.json({ code: 200, message: payload.visible ? "Visible." : "Invisible." });
+	});
+
+	/**
+	 * Supprime une modification, saisie ou de l'IA — celle-ci ne sera ni recréée ni suggérée.
+	 */
+	admin.delete("/api/modifications/:uid", (c) => {
+		const modification = resolve(c);
+		if (modification === undefined) return c.json({ code: 404, message: "Modification inconnue." }, 404);
+
+		discard(deps, [modification], []);
+		refresh();
+		return c.json({ code: 200, message: "Modification supprimée." });
+	});
+
+	/**
+	 * Une action sur les lignes cochées du tableau, d'un bloc : les masquer, les afficher, ou les
+	 * écarter — supprimer les modifications, ignorer les suggestions. Masquer ou afficher ne vaut que
+	 * pour les modifications ; une suggestion ne publie rien, elle ne s'ignore que.
+	 *
+	 * Ce qui a disparu entre l'affichage et le clic est passé sous silence : le résultat est le même.
+	 */
+	admin.post("/api/bulk", async (c) => {
+		const payload = await readObject(c);
+		if ("message" in payload) return c.json({ code: 400, message: payload.message }, 400);
+
+		const action = payload.action;
+		if (action !== "hide" && action !== "show" && action !== "discard") {
+			return c.json({ code: 400, message: "Action attendue : « hide », « show » ou « discard »." }, 400);
+		}
+
+		const uids = Array.isArray(payload.uids) ? payload.uids : [];
+		const keys = Array.isArray(payload.suggestions) ? payload.suggestions : [];
+		const modifications = uids.flatMap((uid) => {
+			const modification = deps.modificationIndex.modifications.get(Number(uid));
+			return modification === undefined ? [] : [modification];
+		});
+		const suggestions = deps.modificationIndex.suggestions.filter((suggestion) => keys.includes(suggestion.key));
+
+		if (action === "discard") {
+			discard(deps, modifications, suggestions);
+		} else {
+			deps.store.setDisabled(
+				modifications.map((modification) => modification.uid),
+				action === "hide",
+			);
+		}
+
+		refresh();
+		return c.json({ code: 200, message: `${modifications.length + suggestions.length} ligne(s) traitée(s).` });
+	});
+
+	/**
+	 * Combien de courses ces bornes-là modifieraient, tracé par tracé, sans rien enregistrer.
+	 * L'interface l'interroge dès qu'on change une borne : c'est le chiffre qui dit si le tronçon
+	 * sortira du feed, et sur quels tracés.
+	 */
+	admin.get("/api/modifications/:uid/trip-count", (c) => {
+		const modification = resolve(c);
+		if (modification === undefined) return c.json({ code: 404, message: "Modification inconnue." }, 404);
+
+		const bounds: SegmentBounds = { startStopId: c.req.query("start") ?? null, endStopId: c.req.query("end") ?? null };
+		return c.json({ tripsByPattern: Object.fromEntries(countTripsByPattern(bounds, modification, deps)) });
+	});
+
+	/**
+	 * Accepte une suggestion : elle devient une modification saisie, rattachée à son info trafic, qui
+	 * en hérite tout — y compris les arrêts que l'analyse y lit. La supprimer ensuite la refait
+	 * apparaître comme suggestion.
+	 */
+	admin.post("/api/suggestions/:key/accept", (c) => {
+		const suggestion = deps.modificationIndex.suggestions.find((candidate) => candidate.key === c.req.param("key"));
+		if (suggestion === undefined) return c.json({ code: 404, message: "Suggestion inconnue." }, 404);
+
+		const created = deps.store.createManual(
+			{
+				alertNumber: suggestion.alertNumber,
+				routeId: suggestion.routeId,
+				directionId: suggestion.directionId,
+				label: null,
+				period: null,
+				patternIds: [],
+			},
+			nowSeconds(),
+		);
+		refresh();
+		return c.json({ uid: created.uid });
+	});
+
+	/** Ignore une suggestion, pour de bon. */
+	admin.post("/api/suggestions/:key/dismiss", (c) => {
+		const suggestion = deps.modificationIndex.suggestions.find((candidate) => candidate.key === c.req.param("key"));
+		if (suggestion === undefined) return c.json({ code: 404, message: "Suggestion inconnue." }, 404);
+
+		discard(deps, [], [suggestion]);
+		refresh();
+		return c.json({ code: 200, message: "Suggestion ignorée." });
+	});
+
+	/** Les lignes du réseau, leurs sens et leurs tracés : de quoi créer une modification. */
+	admin.get("/api/routes", (c) => {
+		const gtfs = deps.gtfs.data;
+		const routes = [...gtfs.routeDirections]
+			.sort(([a], [b]) => compareLines(gtfs, a, b))
+			.map(([routeId, directions]) => ({
+				routeId,
+				line: lineName(gtfs, routeId),
+				lineCode: lineCode(routeId),
+				directions: directions.map((direction) => {
+					const patterns = patternsFor(gtfs, routeId, direction.directionId);
+					const labels = patternLabels(patterns, gtfs);
+					return {
+						directionId: direction.directionId,
+						headsigns: direction.headsigns,
+						patterns: patterns.map((pattern, index) => ({ patternId: pattern.patternId, label: labels[index] })),
+					};
+				}),
+			}));
+
+		return c.json(routes);
+	});
+
+	/** Les infos trafic du flux, pour y rattacher une modification. */
+	admin.get("/api/alerts", (c) => {
+		const alerts = deps.serviceAlerts.alerts
+			.map((alert) => ({ alertNumber: alert.alertNumber, headerText: alert.headerText, periods: alert.periods }))
+			.sort((a, b) => a.alertNumber.localeCompare(b.alertNumber, "fr", { numeric: true }));
+		return c.json(alerts);
 	});
 
 	/**
@@ -110,24 +331,42 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		return matches.length === 0 ? c.json([]) : c.json(matches);
 	});
 
-	// La base des arrêts provisoires. Un arrêt y vit indépendamment des déviations qui le désignent :
-	// le même point de report sert souvent aux deux sens, et parfois à deux infos trafic successives.
 	/**
-	 * La base des arrêts provisoires, chacun avec les déviations qui le désignent. C'est ce qu'il faut
-	 * voir avant d'en renommer ou d'en déplacer un : le changement vaudra pour toutes, et un arrêt que
-	 * rien ne désigne plus est le seul qu'on puisse retirer.
+	 * Tous les arrêts désignables, du GTFS comme de la base provisoire, pour les poser sur la carte : un
+	 * arrêt de substitution se choisit alors d'un clic, là où il est. En tableaux plutôt qu'en objets —
+	 * le réseau compte quelques milliers de quais.
+	 */
+	admin.get("/api/stops/all", (c) => {
+		const gtfs = deps.gtfs.data;
+		const stops: [stopId: string, name: string, latitude: number, longitude: number, provisional: boolean][] = [];
+
+		for (const stop of deps.store.provisionalStops.values()) {
+			stops.push([stop.stopId, stop.name, stop.latitude, stop.longitude, true]);
+		}
+		for (const [stopId, name] of gtfs.stopNames) {
+			const coordinates = gtfs.stopCoordinates.get(stopId);
+			if (coordinates === undefined) continue;
+			stops.push([stopId, name, coordinates.latitude, coordinates.longitude, false]);
+		}
+
+		return c.json(stops);
+	});
+
+	/**
+	 * La base des arrêts provisoires, chacun avec les modifications qui le désignent. C'est ce qu'il
+	 * faut voir avant d'en renommer ou d'en déplacer un : le changement vaudra pour toutes, et un arrêt
+	 * que rien ne désigne plus est le seul qu'on puisse retirer sans rien toucher d'autre.
 	 */
 	admin.get("/api/provisional-stops", (c) => {
 		const usages = new Map<string, ReturnType<typeof describeUsage>[]>();
 
-		for (const record of deps.store.records.values()) {
+		for (const record of deps.store.modifications.values()) {
 			const designated = new Set(record.segments.flatMap((segment) => segment.stops.map((stop) => stop.stopId)));
 			for (const stopId of designated) {
 				if (!deps.store.provisionalStops.has(stopId)) continue;
-				const list = usages.get(stopId);
-				const usage = describeUsage(record.alertNumber, record.routeId, record.directionId, deps);
-				if (list === undefined) usages.set(stopId, [usage]);
-				else list.push(usage);
+				const list = usages.get(stopId) ?? [];
+				list.push(describeUsage(record.uid, record.routeId, record.directionId, deps));
+				usages.set(stopId, list);
 			}
 		}
 
@@ -170,323 +409,6 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		// Des déviations publiées viennent de perdre un arrêt de substitution : le feed doit suivre.
 		if (withdrawn > 0) deps.rebuild();
 		return c.json({ code: 200, message: "Arrêt provisoire supprimé.", withdrawn });
-	});
-
-	/**
-	 * Les infos trafic analysées, avec les lignes qu'elles citent et, pour chaque sens, ce que l'on en
-	 * sait déjà : un périmètre tiré de l'analyse, un périmètre saisi, ou rien du tout.
-	 *
-	 * C'est de là que part une saisie : le sens qui n'apparaît nulle part dans la liste des déviations
-	 * est précisément celui qu'il faut pouvoir déclarer concerné.
-	 */
-	admin.get("/api/alerts", (c) => {
-		const gtfs = deps.gtfs.data;
-		const now = Temporal.Now.instant();
-
-		const alerts = deps.serviceAlerts.alerts.map((alert) => ({
-			alertNumber: alert.alertNumber,
-			headerText: alert.headerText,
-			periods: alert.periods,
-			active: isActive(alert.periods, now),
-			routes: [...alert.routeIds]
-				.sort((a, b) => compareLines(gtfs, a, b))
-				.map((routeId) => ({
-					routeId,
-					line: lineName(gtfs, routeId),
-					lineCode: lineCode(routeId),
-					directions: (gtfs.routeDirections.get(routeId) ?? []).map((direction) => {
-						const key = detourKey(alert.alertNumber, routeId, direction.directionId);
-						const scope = deps.serviceAlerts.alertScopes.get(key);
-						return {
-							key,
-							directionId: direction.directionId,
-							headsigns: direction.headsigns,
-							scoped: scope !== undefined,
-							manual: deps.store.scopeOverrides.has(key),
-							dismissed: deps.store.dismissedScopes.has(key),
-							removedStopCount: scope?.removedStopIds.size ?? 0,
-							declared: deps.store.records.has(key),
-						};
-					}),
-				})),
-		}));
-
-		return c.json(alerts);
-	});
-
-	/**
-	 * Saisit le périmètre d'une info trafic sur une ligne et un sens : la liste des arrêts supprimés,
-	 * éventuellement vide. Elle REMPLACE ce que l'analyse en dit — c'est la seule règle, et elle vaut
-	 * aussi bien pour corriger une suppression de trop que pour déclarer concerné un sens que
-	 * l'analyse n'a pas vu.
-	 *
-	 * Le périmètre étant ce qui ouvre la déclaration, il faut le réindexer avant de republier : le
-	 * feed suivant doit voir le nouveau périmètre et la déclaration qui s'y rattache d'un seul coup.
-	 */
-	admin.put("/api/scopes/:key", async (c) => {
-		const target = parseKey(c.req.param("key"), deps);
-		if ("message" in target) return c.json({ code: 400, message: target.message }, 400);
-
-		let body: unknown;
-		try {
-			body = await c.req.json();
-		} catch {
-			return c.json({ code: 400, message: "Corps de requête illisible." }, 400);
-		}
-
-		const payload = (body ?? {}) as Record<string, unknown>;
-		if (!Array.isArray(payload.removedStopIds)) {
-			return c.json({ code: 400, message: "Liste d'arrêts supprimés attendue." }, 400);
-		}
-
-		const stopIds: string[] = [];
-		for (const stopId of payload.removedStopIds) {
-			if (typeof stopId !== "string" || !deps.gtfs.data.stopNames.has(stopId)) {
-				return c.json({ code: 400, message: `Arrêt « ${String(stopId)} » inconnu du GTFS.` }, 400);
-			}
-			stopIds.push(stopId);
-		}
-
-		deps.store.saveScopeOverride(
-			target.alertNumber,
-			target.routeId,
-			target.directionId,
-			stopIds,
-			Math.floor(Date.now() / 1000),
-		);
-		deps.reindexAlerts();
-		deps.rebuild();
-
-		const scope = deps.serviceAlerts.alertScopes.get(target.key);
-		// L'info trafic n'est plus au flux : la saisie est en base, mais rien ne la porte — il n'y a
-		// pas de détail à rendre.
-		if (scope === undefined) {
-			return c.json({ code: 409, message: "Aucune info trafic ne porte ce numéro dans le flux courant." }, 409);
-		}
-
-		return c.json(detail(scope, deps));
-	});
-
-	/** Rend la main à l'analyse pour ce couple ligne/sens. La déclaration de déviation, elle, reste. */
-	admin.delete("/api/scopes/:key", (c) => {
-		const target = parseKey(c.req.param("key"), deps);
-		if ("message" in target) return c.json({ code: 400, message: target.message }, 400);
-
-		if (!deps.store.removeScopeOverride(target.alertNumber, target.routeId, target.directionId)) {
-			return c.json({ code: 404, message: "Aucun périmètre saisi pour cette ligne et ce sens." }, 404);
-		}
-
-		deps.reindexAlerts();
-		deps.rebuild();
-		return c.json({ code: 200, message: "Périmètre rendu à l'analyse." });
-	});
-
-	/**
-	 * Retire une entrée de la liste : l'info trafic ne concerne pas cette ligne dans ce sens, quoi
-	 * qu'en dise l'analyse. Sa déclaration, son périmètre saisi et sa désactivation partent avec.
-	 *
-	 * Une modification sans info trafic n'a pas d'analyse qui la ferait revenir : la retirer, c'est
-	 * l'effacer tout entière, comme depuis son détail.
-	 */
-	admin.put("/api/dismissed/:key", (c) => {
-		const scope = deps.serviceAlerts.alertScopes.get(c.req.param("key"));
-		if (scope === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
-
-		const uid = scope.standalone ? standaloneUid(scope.alertNumber) : undefined;
-		if (uid !== undefined) deps.store.removeStandalone(uid);
-		else deps.store.dismiss(scope.alertNumber, scope.routeId, scope.directionId, Math.floor(Date.now() / 1000));
-
-		deps.reindexAlerts();
-		deps.rebuild();
-		return c.json({ code: 200, message: uid !== undefined ? "Modification supprimée." : "Entrée retirée." });
-	});
-
-	/** Rétablit une entrée retirée : l'analyse en redit ce qu'elle voit, ou rien si elle n'y voit rien. */
-	admin.delete("/api/dismissed/:key", (c) => {
-		const target = parseKey(c.req.param("key"), deps);
-		if ("message" in target) return c.json({ code: 400, message: target.message }, 400);
-
-		if (!deps.store.restore(target.alertNumber, target.routeId, target.directionId)) {
-			return c.json({ code: 404, message: "Cette ligne et ce sens n'ont pas été retirés." }, 404);
-		}
-
-		deps.reindexAlerts();
-		deps.rebuild();
-		return c.json({ code: 200, message: "Entrée rétablie." });
-	});
-
-	/** Les lignes du réseau et leurs sens : de quoi choisir où porte une modification sans info trafic. */
-	admin.get("/api/routes", (c) => {
-		const gtfs = deps.gtfs.data;
-		const routes = [...gtfs.routeDirections]
-			.sort(([a], [b]) => compareLines(gtfs, a, b))
-			.map(([routeId, directions]) => ({
-				routeId,
-				line: lineName(gtfs, routeId),
-				lineCode: lineCode(routeId),
-				directions: directions.map((direction) => ({
-					directionId: direction.directionId,
-					headsigns: direction.headsigns,
-				})),
-			}));
-
-		return c.json(routes);
-	});
-
-	/**
-	 * Déclare une modification sans info trafic : une ligne, un sens, une période. Elle tient ensuite
-	 * lieu d'info trafic en tout point, et sa déviation se saisit comme les autres, par sa clé.
-	 */
-	admin.post("/api/modifications", async (c) => {
-		let body: unknown;
-		try {
-			body = await c.req.json();
-		} catch {
-			return c.json({ code: 400, message: "Corps de requête illisible." }, 400);
-		}
-
-		if (typeof body !== "object" || body === null) {
-			return c.json({ code: 400, message: "Corps de requête attendu : un objet." }, 400);
-		}
-		const payload = body as Record<string, unknown>;
-
-		const routeId = payload.routeId;
-		const directionId = payload.directionId;
-		const directions = typeof routeId === "string" ? deps.gtfs.data.routeDirections.get(routeId) : undefined;
-		if (typeof routeId !== "string" || directions === undefined) {
-			return c.json({ code: 400, message: `Ligne « ${String(routeId)} » inconnue du GTFS.` }, 400);
-		}
-		if (!directions.some((direction) => direction.directionId === directionId)) {
-			return c.json({ code: 400, message: `La ligne ${routeId} n'a pas de sens ${String(directionId)}.` }, 400);
-		}
-
-		const parsed = parseModification(payload);
-		if ("message" in parsed) return c.json({ code: 400, message: parsed.message }, 400);
-
-		const modification = deps.store.createStandalone(
-			routeId,
-			directionId as number,
-			parsed.label,
-			parsed.period,
-			Math.floor(Date.now() / 1000),
-		);
-		deps.reindexAlerts();
-		deps.rebuild();
-
-		return c.json({ key: detourKey(modification.alertNumber, routeId, modification.directionId) });
-	});
-
-	/** Reprend l'intitulé ou la période d'une modification sans info trafic. */
-	admin.put("/api/modifications/:number", async (c) => {
-		const number = c.req.param("number");
-		const uid = standaloneUid(number);
-		const existing = deps.store.standaloneModifications.get(number);
-		if (uid === undefined || existing === undefined) {
-			return c.json({ code: 404, message: "Modification sans info trafic inconnue." }, 404);
-		}
-
-		let body: unknown;
-		try {
-			body = await c.req.json();
-		} catch {
-			return c.json({ code: 400, message: "Corps de requête illisible." }, 400);
-		}
-		if (typeof body !== "object" || body === null) {
-			return c.json({ code: 400, message: "Corps de requête attendu : un objet." }, 400);
-		}
-
-		const parsed = parseModification(body as Record<string, unknown>);
-		if ("message" in parsed) return c.json({ code: 400, message: parsed.message }, 400);
-
-		deps.store.updateStandalone(uid, parsed.label, parsed.period);
-		// La période décide de la mise en vigueur : le périmètre se rejauge, et le feed avec lui.
-		deps.reindexAlerts();
-		deps.rebuild();
-
-		const scope = deps.serviceAlerts.alertScopes.get(detourKey(number, existing.routeId, existing.directionId));
-		if (scope === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
-		return c.json(detail(scope, deps));
-	});
-
-	/**
-	 * Désactive ou réactive une modification, qu'une info trafic la porte ou non. Désactivée, elle est
-	 * tenue pour hors période : ni sa modification ni ses arrêts supprimés ne sortent dans le feed.
-	 */
-	admin.put("/api/detours/:key/disabled", async (c) => {
-		const key = c.req.param("key");
-		const scope = deps.serviceAlerts.alertScopes.get(key);
-		if (scope === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
-
-		let body: unknown;
-		try {
-			body = await c.req.json();
-		} catch {
-			return c.json({ code: 400, message: "Corps de requête illisible." }, 400);
-		}
-
-		const disabled = (body as Record<string, unknown> | null)?.disabled;
-		if (typeof disabled !== "boolean") return c.json({ code: 400, message: "Booléen « disabled » attendu." }, 400);
-
-		deps.store.setDisabled(
-			scope.alertNumber,
-			scope.routeId,
-			scope.directionId,
-			disabled,
-			Math.floor(Date.now() / 1000),
-		);
-		// Le `skipIndex` en dépend autant que la modification : on réindexe avant de republier.
-		deps.reindexAlerts();
-		deps.rebuild();
-
-		const next = deps.serviceAlerts.alertScopes.get(key);
-		if (next === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
-		return c.json(detail(next, deps));
-	});
-
-	admin.get("/api/detours/:key", (c) => {
-		const scope = deps.serviceAlerts.alertScopes.get(c.req.param("key"));
-		if (scope === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
-
-		return c.json(detail(scope, deps));
-	});
-
-	/**
-	 * Combien de courses ces bornes-là modifieraient, sans rien enregistrer. L'interface l'interroge dès
-	 * qu'on change une borne ou un tracé visé : avec plusieurs tronçons, un compte figé au chargement de
-	 * la page dirait n'importe quoi, et c'est précisément le chiffre qui dit si le tronçon sortira du
-	 * feed. Le détail par tracé dit lesquels desservent ces bornes, qu'ils soient visés ou non.
-	 */
-	admin.get("/api/detours/:key/trip-count", (c) => {
-		const scope = deps.serviceAlerts.alertScopes.get(c.req.param("key"));
-		if (scope === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
-
-		const segment: SegmentScope = {
-			startStopId: c.req.query("start") ?? null,
-			endStopId: c.req.query("end") ?? null,
-			patternIds: (c.req.query("patterns") ?? "").split(",").filter((patternId) => patternId.length > 0),
-		};
-		const counts = countTripsByPattern(segment, scope, deps);
-		return c.json({ matchingTrips: sumTargeted(counts, segment), tripsByPattern: Object.fromEntries(counts) });
-	});
-
-	admin.put("/api/detours/:key", async (c) => {
-		const scope = deps.serviceAlerts.alertScopes.get(c.req.param("key"));
-		if (scope === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
-
-		let body: unknown;
-		try {
-			body = await c.req.json();
-		} catch {
-			return c.json({ code: 400, message: "Corps de requête illisible." }, 400);
-		}
-
-		const parsed = parseInput(body, scope, deps.gtfs.data, deps.store);
-		if ("message" in parsed) return c.json({ code: 400, message: parsed.message }, 400);
-
-		deps.store.save(scope.alertNumber, scope.routeId, scope.directionId, parsed.input, Math.floor(Date.now() / 1000));
-		deps.rebuild();
-
-		return c.json(detail(scope, deps));
 	});
 
 	/**
@@ -547,80 +469,74 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		});
 	});
 
-	admin.delete("/api/detours/:key", (c) => {
-		const scope = deps.serviceAlerts.alertScopes.get(c.req.param("key"));
-		if (scope === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
-
-		// Une modification sans info trafic n'est rien d'autre que ce qu'on y a déclaré : effacer la
-		// déclaration l'efface tout entière, période et périmètre compris.
-		const uid = scope.standalone ? standaloneUid(scope.alertNumber) : undefined;
-		if (uid !== undefined) {
-			deps.store.removeStandalone(uid);
-			deps.reindexAlerts();
-			deps.rebuild();
-			return c.json({ code: 200, message: "Modification supprimée." });
-		}
-
-		deps.store.remove(scope.alertNumber, scope.routeId, scope.directionId);
-		deps.rebuild();
-
-		return c.json({ code: 200, message: "Déclaration effacée." });
-	});
-
 	return admin;
 }
 
 // ---
 
-/**
- * Relit une clé `<numéro>:<routeId>:<sens>` : le numéro d'abord, le sens en dernier, la ligne au
- * milieu — un identifiant de ligne porte lui-même des deux-points (« TCAR:07 »), et c'est le seul
- * découpage qui ne s'y perde pas.
- */
-function parseKey(
-	key: string,
-	deps: AdminDependencies,
-): { key: string; alertNumber: string; routeId: string; directionId: number } | { message: string } {
-	const parts = key.split(":");
-	if (parts.length < 3) return { message: "Clé attendue : « numéro:ligne:sens »." };
-
-	const alertNumber = parts[0] as string;
-	const directionId = Number(parts.at(-1));
-	const routeId = parts.slice(1, -1).join(":");
-
-	if (directionId !== 0 && directionId !== 1) return { message: "Sens attendu : 0 ou 1." };
-
-	const directions = deps.gtfs.data.routeDirections.get(routeId);
-	if (directions === undefined) return { message: `Ligne « ${routeId} » inconnue du GTFS.` };
-	if (!directions.some((direction) => direction.directionId === directionId)) {
-		return { message: `La ligne ${routeId} n'a pas de sens ${directionId}.` };
-	}
-
-	// Une modification sans info trafic ne porte que sur sa ligne et son sens : une clé qui en
-	// désignerait d'autres ouvrirait un périmètre ailleurs, sous son numéro.
-	const standalone = deps.store.standaloneModifications.get(alertNumber);
-	if (standalone !== undefined) {
-		if (standalone.routeId !== routeId || standalone.directionId !== directionId) {
-			return {
-				message: `La modification ${alertNumber} porte sur ${standalone.routeId}, sens ${standalone.directionId}.`,
-			};
-		}
-	} else if (!deps.serviceAlerts.alerts.some((alert) => alert.alertNumber === alertNumber)) {
-		return { message: `Aucune info trafic ${alertNumber} au flux courant.` };
-	}
-
-	return { key: detourKey(alertNumber, routeId, directionId), alertNumber, routeId, directionId };
+function nowSeconds(): number {
+	return Math.floor(Date.now() / 1000);
 }
 
 /**
- * Par ligne, dans l'ordre du réseau, puis par sens ; en vigueur d'abord au sein d'un même sens. La
- * liste groupée par info trafic remonte elle-même les perturbations en vigueur.
+ * Supprime ou ignore, selon ce que c'est. Une modification saisie se supprime, rien de plus : la
+ * suggestion qu'elle couvrait peut reparaître. Une modification de l'IA s'efface ET son trio s'écarte,
+ * sans quoi le relevé suivant la recréerait ; une suggestion, elle, n'a que son trio à écarter.
  */
-function compareScopes(a: AlertScope, b: AlertScope, gtfs: StaticGtfs): number {
+function discard(
+	deps: AdminDependencies,
+	modifications: readonly ResolvedModification[],
+	suggestions: readonly Suggestion[],
+) {
+	const scopes: Scope[] = [...suggestions];
+	for (const modification of modifications) {
+		if (modification.origin !== "ai" || modification.alertNumber === null) continue;
+		scopes.push({
+			alertNumber: modification.alertNumber,
+			routeId: modification.routeId,
+			directionId: modification.directionId,
+		});
+	}
+
+	deps.store.discard(
+		modifications.map((modification) => modification.uid),
+		scopes,
+		nowSeconds(),
+	);
+}
+
+/** Le corps d'une requête, s'il est un objet JSON. */
+async function readObject(c: Context): Promise<Record<string, unknown> | { message: string }> {
+	let body: unknown;
+	try {
+		body = await c.req.json();
+	} catch {
+		return { message: "Corps de requête illisible." };
+	}
+	if (typeof body !== "object" || body === null || Array.isArray(body)) {
+		return { message: "Corps de requête attendu : un objet." };
+	}
+	return body as Record<string, unknown>;
+}
+
+/** Les tracés d'une ligne et d'un sens, du plus long au plus court. */
+function patternsFor(gtfs: StaticGtfs, routeId: string, directionId: number): RoutePattern[] {
+	return gtfs.routePatterns.get(routeId)?.get(directionId) ?? [];
+}
+
+/**
+ * Par ligne, dans l'ordre du réseau, puis par sens ; en vigueur d'abord au sein d'un même sens. Le
+ * reste du rangement — onglets, groupes, tri choisi — se fait dans l'interface.
+ */
+function compareRows(
+	a: { routeId: string; directionId: number; active: boolean },
+	b: { routeId: string; directionId: number; active: boolean },
+	gtfs: StaticGtfs,
+): number {
 	if (a.routeId !== b.routeId) return compareLines(gtfs, a.routeId, b.routeId);
 	if (a.directionId !== b.directionId) return a.directionId - b.directionId;
 	if (a.active !== b.active) return a.active ? -1 : 1;
-	return a.alertNumber.localeCompare(b.alertNumber);
+	return 0;
 }
 
 /** Le nom commercial d'une ligne (« F7 », « Métro »), ou à défaut le bout de son identifiant. */
@@ -648,36 +564,82 @@ function compareLines(gtfs: StaticGtfs, a: string, b: string): number {
 	return lineRank(nameA) - lineRank(nameB) || nameA.localeCompare(nameB, "fr", { numeric: true });
 }
 
-/** Ce que la liste affiche d'une déviation, sans la géographie que seul le détail demande. */
-function summarize(scope: AlertScope, deps: AdminDependencies) {
-	const record = deps.store.records.get(detourKey(scope.alertNumber, scope.routeId, scope.directionId));
+/** Les destinations d'un sens, telles que le GTFS les affiche. */
+function headsignsOf(gtfs: StaticGtfs, routeId: string, directionId: number): string[] {
+	return gtfs.routeDirections.get(routeId)?.find((direction) => direction.directionId === directionId)?.headsigns ?? [];
+}
+
+/**
+ * Où se range une ligne du tableau : ce qui n'a pas commencé, ce qui court, ce qui est fini. Une
+ * période sans borne court toujours.
+ */
+function phaseOf(periods: AlertPeriod[], active: boolean, now: Temporal.Instant): "upcoming" | "current" | "ended" {
+	if (active) return "current";
+	return hasEnded(periods, now) ? "ended" : "upcoming";
+}
+
+/** Ce que le tableau affiche d'une modification, sans la géographie que seule l'édition demande. */
+function summarize(modification: ResolvedModification, deps: AdminDependencies, now: Temporal.Instant) {
 	const gtfs = deps.gtfs.data;
-	const segments = record?.segments ?? [];
+	const record = modification.record;
+	const publishable = record.segments.filter((segment) => isSegmentPublishable(segment, modification, gtfs));
 
 	return {
-		key: scope.key,
-		alertNumber: scope.alertNumber,
-		routeId: scope.routeId,
-		line: lineName(gtfs, scope.routeId),
-		lineCode: lineCode(scope.routeId),
-		directionId: scope.directionId,
-		headsigns:
-			gtfs.routeDirections.get(scope.routeId)?.find((d) => d.directionId === scope.directionId)?.headsigns ?? [],
-		headerText: scope.headerText,
-		periods: scope.periods,
-		active: scope.active,
-		ended: hasEnded(scope.periods, Temporal.Now.instant()),
-		standalone: scope.standalone,
-		disabled: scope.disabled,
-		removedStopCount: scope.removedStopIds.size,
-		manualScope: deps.store.scopeOverrides.has(scope.key),
-		declared: record !== undefined,
-		segmentCount: segments.length,
-		publishableSegments: segments.filter((segment) => isSegmentPublishable(segment, scope, deps)).length,
-		stopCount: segments.reduce((total, segment) => total + segment.stops.length, 0),
-		pathPointCount: segments.reduce((total, segment) => total + segment.path.length, 0),
-		updatedAt: record?.updatedAt ?? null,
-		publishable: segments.some((segment) => isSegmentPublishable(segment, scope, deps)),
+		kind: "modification" as const,
+		uid: modification.uid,
+		origin: modification.origin,
+		alertNumber: modification.alertNumber,
+		alertHeader: modification.alertHeader,
+		label: modification.label,
+		routeId: modification.routeId,
+		line: lineName(gtfs, modification.routeId),
+		lineCode: lineCode(modification.routeId),
+		directionId: modification.directionId,
+		headsigns: headsignsOf(gtfs, modification.routeId, modification.directionId),
+		periods: modification.periods,
+		phase: phaseOf(modification.periods, modification.active, now),
+		disabled: modification.disabled,
+		removedStopCount: removedOnCourse(modification, gtfs).length,
+		patternCount: record.patternIds.length,
+		patternTotal: patternsFor(gtfs, modification.routeId, modification.directionId).length,
+		segmentCount: record.segments.length,
+		publishableSegments: publishable.length,
+		stopCount: record.segments.reduce((total, segment) => total + segment.stops.length, 0),
+		firstSeenAt: modification.firstSeenAt,
+	};
+}
+
+/**
+ * Les arrêts supprimés que desservent les tracés visés. L'analyse porte tous les quais d'un nom — ceux
+ * d'autres lignes, de l'autre sens — qui ne suppriment rien ici et n'ont pas à se compter.
+ */
+function removedOnCourse(modification: ResolvedModification, gtfs: StaticGtfs): string[] {
+	const served = new Set<string>();
+	for (const pattern of patternsFor(gtfs, modification.routeId, modification.directionId)) {
+		if (modification.patternIds.length > 0 && !modification.patternIds.includes(pattern.patternId)) continue;
+		for (const stop of pattern.stops) served.add(stop.stopId);
+	}
+	return [...modification.removedStopIds].filter((stopId) => served.has(stopId));
+}
+
+/** Ce que le tableau affiche d'une suggestion. */
+function summarizeSuggestion(suggestion: Suggestion, deps: AdminDependencies, now: Temporal.Instant) {
+	const gtfs = deps.gtfs.data;
+	return {
+		kind: "suggestion" as const,
+		key: suggestion.key,
+		alertNumber: suggestion.alertNumber,
+		alertHeader: suggestion.alertHeader,
+		label: suggestion.alertHeader,
+		routeId: suggestion.routeId,
+		line: lineName(gtfs, suggestion.routeId),
+		lineCode: lineCode(suggestion.routeId),
+		directionId: suggestion.directionId,
+		headsigns: headsignsOf(gtfs, suggestion.routeId, suggestion.directionId),
+		periods: suggestion.periods,
+		phase: phaseOf(suggestion.periods, suggestion.active, now),
+		removedStopCount: suggestion.removedStopIds.length,
+		firstSeenAt: suggestion.firstSeenAt,
 	};
 }
 
@@ -690,127 +652,119 @@ function summarize(scope: AlertScope, deps: AdminDependencies) {
  * toute l'information. Quand elle n'en supprime aucun, c'est le tracé et rien d'autre — il n'y a
  * rien à remplacer (cf. `removesStops`).
  */
-function isSegmentPublishable(segment: DetourSegment, scope: AlertScope, deps: AdminDependencies): boolean {
+function isSegmentPublishable(segment: DetourSegment, modification: ResolvedModification, gtfs: StaticGtfs): boolean {
 	if (segment.startStopId === null || segment.endStopId === null) return false;
-	if (!removesStops(deps.gtfs.data, scope.routeId, scope.directionId, scope.removedStopIds, segment)) {
-		return segment.path.length >= 2;
-	}
+	const removes = removesStops(
+		gtfs,
+		modification.routeId,
+		modification.directionId,
+		modification.patternIds,
+		modification.removedStopIds,
+		segment,
+	);
+	if (!removes) return segment.path.length >= 2;
 	return segment.stops.length > 0 || segment.path.length >= 2;
 }
 
 /**
- * Tout ce que la carte doit dessiner, en un seul aller-retour : les itinéraires de la ligne/sens avec
- * leurs arrêts, les tracés d'origine des courses, les bornes déduites, et les tronçons déclarés.
+ * Tout ce que l'édition doit afficher, en un seul aller-retour : ce qui a été saisi et ce qui est
+ * hérité de l'info trafic, les tracés du sens avec leurs arrêts, leurs shapes, les bornes déduites,
+ * et les tronçons.
  *
- * Les tracés partent en polylignes encodées plutôt qu'en tableaux de coordonnées : une ligne de bus
+ * Les shapes partent en polylignes encodées plutôt qu'en tableaux de coordonnées : une ligne de bus
  * en compte quelques milliers de points, et la page sait les décoder en quinze lignes.
  */
-function detail(scope: AlertScope, deps: AdminDependencies) {
+function detail(modification: ResolvedModification, deps: AdminDependencies) {
 	const gtfs = deps.gtfs.data;
-	const record = deps.store.records.get(detourKey(scope.alertNumber, scope.routeId, scope.directionId));
+	const record = modification.record;
+	const { routeId, directionId } = modification;
+	const alert =
+		modification.alertNumber === null
+			? undefined
+			: deps.serviceAlerts.alerts.find((candidate) => candidate.alertNumber === modification.alertNumber);
 
-	// Les tracés empruntés du sens, services partiels compris : un tronçon peut n'en viser que certains,
-	// et c'est sur leurs arrêts que se choisissent ses bornes.
-	const routePatterns = gtfs.routePatterns.get(scope.routeId)?.get(scope.directionId) ?? [];
+	// Les tracés empruntés du sens, services partiels compris : la modification peut n'en viser que
+	// certains, et c'est sur leurs arrêts que se choisissent les bornes de ses tronçons.
+	const routePatterns = patternsFor(gtfs, routeId, directionId);
 	const labels = patternLabels(routePatterns, gtfs);
 	const patterns = routePatterns.map((pattern, index) => ({
 		patternId: pattern.patternId,
 		shapeId: pattern.shapeId,
 		label: labels[index],
-		tripCount: pattern.tripCount,
 		sequence: pattern.stops.map((stop) => ({
 			stopId: stop.stopId,
 			name: gtfs.stopNames.get(stop.stopId) ?? stop.name,
 			...(gtfs.stopCoordinates.get(stop.stopId) ?? { latitude: null, longitude: null }),
-			removed: scope.removedStopIds.has(stop.stopId),
+			removed: modification.removedStopIds.has(stop.stopId),
 		})),
 	}));
 
-	// Les tracés d'origine des courses de la ligne/sens : ce sont eux que la déviation quitte, et il
-	// faut les voir pour dessiner. Distincts seulement — plusieurs centaines de courses les partagent.
-	const shapeIds = new Set<string>();
-	for (const meta of gtfs.trips.values()) {
-		if (meta.routeId === scope.routeId && meta.directionId === scope.directionId) shapeIds.add(meta.shapeId);
-	}
-
-	const shapes = [...shapeIds].flatMap((shapeId) => {
+	const shapes = [...new Set(routePatterns.map((pattern) => pattern.shapeId))].flatMap((shapeId) => {
 		const points = gtfs.shapes.get(shapeId);
 		return points === undefined ? [] : [{ shapeId, encodedPolyline: encodePolyline(points) }];
 	});
 
 	// Rien n'a encore été déclaré : les suites d'arrêts supprimés du meilleur itinéraire proposent
-	// d'emblée un tronçon chacune — c'est très exactement ce qu'il y a à dessiner.
-	const boundsCandidates = deduceBounds(gtfs, scope.routeId, scope.directionId, scope.removedStopIds);
+	// d'emblée un tronçon chacune. Sans arrêt supprimé, c'est un tronçon vierge qu'on propose — entre
+	// quels arrêts la course passe ailleurs reste à choisir.
+	const boundsCandidates = deduceBounds(
+		gtfs,
+		routeId,
+		directionId,
+		modification.removedStopIds,
+		modification.patternIds,
+	);
 	const proposed = boundsCandidates.filter((bounds) => bounds.itinerary === boundsCandidates[0]?.itinerary);
-	// Rien de supprimé, donc rien à borner : il ne reste qu'à choisir entre quels arrêts la course
-	// passe ailleurs, et c'est un tronçon vierge qu'on propose. C'est très exactement le cas d'une
-	// ligne déviée dans un sens où elle ne perd aucun arrêt.
-	const fallback: DetourSegment[] =
-		scope.removedStopIds.size === 0
-			? [{ patternIds: [], startStopId: null, endStopId: null, propagatedDelay: 0, stops: [], waypoints: [], path: [] }]
-			: proposed.map((bounds) => ({
-					patternIds: [],
-					startStopId: bounds.startStopId,
-					endStopId: bounds.endStopId,
-					propagatedDelay: 0,
-					stops: [],
-					waypoints: [],
-					path: [],
-				}));
-
-	const segments = record !== undefined && record.segments.length > 0 ? record.segments : fallback;
-
-	// La période d'une modification sans info trafic, découpée comme le formulaire la saisit.
-	const standalone = deps.store.standaloneModifications.get(scope.alertNumber);
-	const period =
-		standalone === undefined
-			? null
-			: {
-					label: standalone.label,
-					start: splitBound(standalone.period.start),
-					end: standalone.period.end === null ? null : splitBound(standalone.period.end),
-				};
+	const fallback: DetourSegment[] = (
+		modification.removedStopIds.size === 0 ? [{ startStopId: null, endStopId: null }] : proposed
+	).map((bounds) => ({
+		startStopId: bounds.startStopId,
+		endStopId: bounds.endStopId,
+		propagatedDelay: 0,
+		stops: [],
+		waypoints: [],
+		path: [],
+	}));
+	const segments = record.segments.length > 0 ? record.segments : fallback;
 
 	return {
-		...summarize(scope, deps),
-		period,
+		...summarize(modification, deps, Temporal.Now.instant()),
+		// Ce qui a été saisi, et ce qui s'hérite : l'interface montre le second en attente du premier.
+		labelInput: record.label,
+		periodInput:
+			record.period === null
+				? null
+				: {
+						start: splitBound(record.period.start),
+						end: record.period.end === null ? null : splitBound(record.period.end),
+					},
+		alertPeriods: alert?.periods ?? [],
 		// Le texte d'une info trafic est du HTML : le flux amont reprend ce que le CMS de l'exploitant a
 		// saisi, listes et plans de déviation compris. Il part nettoyé plutôt qu'échappé — la page
 		// l'affiche tel quel, et n'a pas à savoir d'où il vient (cf. `sanitizeHtml`).
-		descriptionHtml: sanitizeHtml(scope.descriptionText),
-		// L'éditeur ne propose l'accrochage aux rues que si le graphe est là. Le drapeau voyage avec le
-		// détail plutôt que dans un appel à lui — la carte n'existe que sur cette vue.
+		alertDescriptionHtml: sanitizeHtml(modification.alertDescription),
+		// L'éditeur ne propose l'accrochage aux rues que si le graphe est là.
 		roadRouting: deps.roadGraph.available,
-		removedStopIds: [...scope.removedStopIds],
-		// Le périmètre vient-il de l'analyse, ou a-t-il été saisi ? L'interface le dit, et propose de
-		// rendre la main à l'analyse — c'est la seule façon de revenir en arrière.
-		manualScope: deps.store.scopeOverrides.has(scope.key),
+		patternIds: record.patternIds,
+		removedStopIds: [...modification.removedStopIds],
+		removedFromAnalysis: modification.removedFromAnalysis,
+		analysisStopIds: [...modification.analysisStopIds],
 		patterns,
 		shapes,
 		boundsCandidates,
-		// Un arrêt n'est plus décrit dans la déclaration, seulement désigné : son libellé et sa position
-		// se relisent à l'affichage, du GTFS ou de la base provisoire. Un arrêt provisoire déplacé depuis
-		// une autre déviation se voit donc tout de suite, sans rien avoir à recopier.
-		//
-		// `matchingTrips` dit combien de courses ces bornes-là modifieraient sur les tracés visés. Zéro
-		// veut dire que le tronçon ne sortira pas du tout dans le feed, et c'est exactement ce qu'il faut
-		// voir AVANT d'enregistrer : des bornes prises sur une autre branche, des quais renumérotés ou
-		// un tracé disparu d'un GTFS plus récent ne sélectionnent rien.
-		segments: segments.map((segment) => {
-			const counts = countTripsByPattern(segment, scope, deps);
-			return {
-				patternIds: segment.patternIds,
-				startStopId: segment.startStopId,
-				endStopId: segment.endStopId,
-				propagatedDelay: segment.propagatedDelay,
-				stops: segment.stops.map((stop) => ({ ...stop, ...describeStop(stop.stopId, deps) })),
-				waypoints: segment.waypoints,
-				path: segment.path,
-				publishable: isSegmentPublishable(segment, scope, deps),
-				tripsByPattern: Object.fromEntries(counts),
-				matchingTrips: sumTargeted(counts, segment),
-			};
-		}),
+		// Un arrêt n'est que désigné : son libellé et sa position se relisent à l'affichage, du GTFS ou de
+		// la base provisoire. `tripsByPattern` dit combien de courses ces bornes-là modifieraient sur
+		// chaque tracé — zéro partout, et le tronçon ne sortira pas du tout dans le feed.
+		segments: segments.map((segment) => ({
+			startStopId: segment.startStopId,
+			endStopId: segment.endStopId,
+			propagatedDelay: segment.propagatedDelay,
+			stops: segment.stops.map((stop) => ({ ...stop, ...describeStop(stop.stopId, deps) })),
+			waypoints: segment.waypoints,
+			path: segment.path,
+			publishable: isSegmentPublishable(segment, modification, gtfs),
+			tripsByPattern: Object.fromEntries(countTripsByPattern(segment, modification, deps)),
+		})),
 	};
 }
 
@@ -836,32 +790,85 @@ function patternLabels(patterns: readonly RoutePattern[], gtfs: StaticGtfs): str
 	});
 }
 
-/** Le nombre de courses touchées sur les seuls tracés visés, d'après {@link countTripsByPattern}. */
-function sumTargeted(counts: ReadonlyMap<string, number>, segment: { patternIds: readonly string[] }): number {
-	let total = 0;
-	for (const [patternId, count] of counts) if (targets(segment, patternId)) total += count;
-	return total;
-}
-
 /**
- * Combien de courses les bornes d'un tronçon désignent sur chaque tracé, qu'il le vise ou non. Rien
+ * Combien de courses les bornes d'un tronçon désignent sur chaque tracé du sens, visé ou non. Rien
  * tant qu'elles ne sont pas arrêtées.
  */
 function countTripsByPattern(
-	segment: { startStopId: string | null; endStopId: string | null },
-	scope: AlertScope,
+	bounds: SegmentBounds,
+	modification: ResolvedModification,
 	deps: AdminDependencies,
 ): Map<string, number> {
-	if (segment.startStopId === null || segment.endStopId === null) return new Map();
+	if (bounds.startStopId === null || bounds.endStopId === null) return new Map();
 
 	return countSelectableTrips(
 		deps.gtfs.data,
-		scope.routeId,
-		scope.directionId,
-		segment.startStopId,
-		segment.endStopId,
-		Math.floor(Date.now() / 1000),
+		modification.routeId,
+		modification.directionId,
+		bounds.startStopId,
+		bounds.endStopId,
+		nowSeconds(),
 	);
+}
+
+/**
+ * La raison et la période d'une modification. Rattachée à une info trafic, l'une et l'autre peuvent
+ * rester vides : elles suivent alors l'info trafic. Sans elle, les deux sont obligatoires.
+ *
+ * Chaque borne est un objet `{ date, time }` : la date est obligatoire, l'heure facultative. La fin
+ * peut manquer — la période est alors ouverte — et doit sinon venir après le début.
+ */
+function parseHeader(
+	payload: Record<string, unknown>,
+	attached: boolean,
+): { label: string | null; period: ModificationPeriod | null } | { message: string } {
+	if (payload.label !== undefined && payload.label !== null && typeof payload.label !== "string") {
+		return { message: "Raison attendue : un texte." };
+	}
+	const label = typeof payload.label === "string" && payload.label.trim().length > 0 ? payload.label.trim() : null;
+	if (label === null && !attached) return { message: "La raison est obligatoire sans info trafic." };
+
+	const start = readBound(payload.start, "début");
+	if ("message" in start) return start;
+	const end = readBound(payload.end, "fin");
+	if ("message" in end) return end;
+
+	if (start.bound === null) {
+		if (end.bound !== null) return { message: "Une fin sans début : saisir aussi la date de début." };
+		if (!attached) return { message: "La date de début est obligatoire sans info trafic." };
+		return { label, period: null };
+	}
+
+	// La fin se compare comme elle se jauge : exclusive, et à la journée entière quand elle est sans
+	// heure (cf. `periodEnd`). « Du 24 au 24 » couvre donc bien la journée.
+	if (end.bound !== null) {
+		const from = start.time === null ? start.date.toPlainDateTime() : start.date.toPlainDateTime(start.time);
+		const until = end.time === null ? end.date.add({ days: 1 }).toPlainDateTime() : end.date.toPlainDateTime(end.time);
+		if (Temporal.PlainDateTime.compare(until, from) <= 0) return { message: "La fin doit venir après le début." };
+	}
+
+	return { label, period: { start: start.bound, end: end.bound } };
+}
+
+/**
+ * Les tracés visés. Facultatifs : sans eux, la modification les vise tous. Un tracé inconnu est
+ * refusé plutôt qu'écarté — l'écarter élargirait en silence la modification à des courses qu'on n'a
+ * pas choisies. Les nommer tous revient à n'en nommer aucun, et cette forme-là survit à un tracé que
+ * le GTFS ajouterait demain.
+ */
+function parsePatterns(raw: unknown, patterns: readonly RoutePattern[]): { ids: string[] } | { message: string } {
+	if (raw === undefined || raw === null) return { ids: [] };
+	if (!Array.isArray(raw)) return { message: "Tracés visés attendus : une liste." };
+
+	const ids: string[] = [];
+	for (const patternId of raw) {
+		if (typeof patternId !== "string" || !patterns.some((pattern) => pattern.patternId === patternId)) {
+			return { message: `Tracé « ${String(patternId)} » inconnu du GTFS pour cette ligne et ce sens.` };
+		}
+		if (!ids.includes(patternId)) ids.push(patternId);
+	}
+
+	return { ids: ids.length === patterns.length ? [] : ids };
 }
 
 /**
@@ -870,41 +877,62 @@ function countTripsByPattern(
  * chez tous les consommateurs.
  */
 function parseInput(
-	body: unknown,
-	scope: AlertScope,
-	gtfs: StaticGtfs,
-	store: DetourStore,
-): { input: DetourInput } | { message: string } {
-	if (typeof body !== "object" || body === null) return { message: "Corps de requête attendu : un objet." };
-	const payload = body as Record<string, unknown>;
+	payload: Record<string, unknown>,
+	modification: ResolvedModification,
+	deps: AdminDependencies,
+): { input: ModificationInput } | { message: string } {
+	const gtfs = deps.gtfs.data;
+	const attached = modification.alertNumber !== null;
+
+	const header = parseHeader(payload, attached);
+	if ("message" in header) return header;
+
+	const patternIds = parsePatterns(
+		payload.patternIds,
+		patternsFor(gtfs, modification.routeId, modification.directionId),
+	);
+	if ("message" in patternIds) return patternIds;
+
+	// Les arrêts supprimés : une liste, fût-elle vide, qui fait foi ; ou `null` pour suivre l'analyse —
+	// ce qui n'a de sens qu'avec une info trafic.
+	let removedStopIds: string[] | null = null;
+	if (payload.removedStopIds !== null && payload.removedStopIds !== undefined) {
+		if (!Array.isArray(payload.removedStopIds)) return { message: "Arrêts supprimés attendus : une liste." };
+		removedStopIds = [];
+		for (const stopId of payload.removedStopIds) {
+			if (typeof stopId !== "string" || !gtfs.stopNames.has(stopId)) {
+				return { message: `Arrêt « ${String(stopId)} » inconnu du GTFS.` };
+			}
+			removedStopIds.push(stopId);
+		}
+	}
+	if (removedStopIds === null && !attached) removedStopIds = [];
 
 	if (!Array.isArray(payload.segments)) return { message: "Liste de tronçons attendue." };
-	if (payload.segments.length === 0) return { message: "Une déclaration compte au moins un tronçon." };
 
 	const segments: DetourSegment[] = [];
 	// Deux entrées qui désignent le même arrêt donneraient deux `replacement_stops` de même `stop_id` :
 	// la course s'y arrêterait deux fois. Tous tronçons confondus — ils se suivent sur la même course.
 	const designated = new Set<string>();
 
-	const patterns = gtfs.routePatterns.get(scope.routeId)?.get(scope.directionId) ?? [];
-
 	for (const [index, raw] of payload.segments.entries()) {
-		const parsed = parseSegment(raw, `Tronçon ${index + 1}`, designated, patterns, gtfs, store);
+		const parsed = parseSegment(raw, `Tronçon ${index + 1}`, designated, gtfs, deps.store);
 		if ("message" in parsed) return parsed;
 		segments.push(parsed.segment);
 	}
 
-	const overlap = overlappingSegments(gtfs, scope.routeId, scope.directionId, segments);
+	const overlap = overlappingSegments(gtfs, modification.routeId, modification.directionId, patternIds.ids, segments);
 	if (overlap !== undefined) {
 		return {
 			message:
-				`Tronçons ${overlap[0] + 1} et ${overlap[1] + 1} : leurs plages se recoupent sur l'itinéraire de la ` +
-				"ligne. Un même arrêt ne peut être supprimé deux fois — fondre les deux tronçons, ou reprendre " +
-				"les bornes.",
+				`Tronçons ${overlap[0] + 1} et ${overlap[1] + 1} : leurs plages se recoupent sur l'un des tracés visés. ` +
+				"Un même arrêt ne peut être supprimé deux fois — fondre les deux tronçons, ou reprendre les bornes.",
 		};
 	}
 
-	return { input: { segments } };
+	return {
+		input: { label: header.label, period: header.period, patternIds: patternIds.ids, removedStopIds, segments },
+	};
 }
 
 /** Un tronçon tel que l'interface l'envoie, contrôlé de bout en bout. */
@@ -912,31 +940,11 @@ function parseSegment(
 	raw: unknown,
 	label: string,
 	designated: Set<string>,
-	patterns: readonly RoutePattern[],
 	gtfs: StaticGtfs,
 	store: DetourStore,
 ): { segment: DetourSegment } | { message: string } {
 	if (typeof raw !== "object" || raw === null) return { message: `${label} : illisible.` };
 	const payload = raw as Record<string, unknown>;
-
-	// Les tracés visés sont facultatifs : sans eux, le tronçon les vise tous, comme avant qu'on puisse
-	// les distinguer. Un tracé inconnu est refusé plutôt qu'écarté — l'écarter élargirait en silence
-	// le tronçon à des courses qu'on n'a pas choisies.
-	const patternIds: string[] = [];
-	if (payload.patternIds !== undefined) {
-		if (!Array.isArray(payload.patternIds)) return { message: `${label} : tracés visés attendus, une liste.` };
-
-		for (const patternId of payload.patternIds) {
-			if (typeof patternId !== "string" || !patterns.some((pattern) => pattern.patternId === patternId)) {
-				return { message: `${label} : tracé « ${String(patternId)} » inconnu du GTFS pour cette ligne et ce sens.` };
-			}
-			if (!patternIds.includes(patternId)) patternIds.push(patternId);
-		}
-
-		// Les nommer tous revient à n'en nommer aucun, et cette forme-là survit à un tracé que le GTFS
-		// ajouterait demain.
-		if (patternIds.length === patterns.length) patternIds.length = 0;
-	}
 
 	const startStopId = payload.startStopId ?? null;
 	const endStopId = payload.endStopId ?? null;
@@ -1039,7 +1047,6 @@ function parseSegment(
 
 	return {
 		segment: {
-			patternIds,
 			startStopId: startStopId as string | null,
 			endStopId: endStopId as string | null,
 			propagatedDelay: propagatedDelay as number,
@@ -1051,26 +1058,21 @@ function parseSegment(
 }
 
 /**
- * Une déviation qui désigne un arrêt provisoire, telle que la liste des arrêts la cite. Sa
- * perturbation peut avoir quitté le flux : la déclaration reste en base, mais n'a plus de détail à
- * ouvrir — `open` le dit.
+ * Une modification qui désigne un arrêt provisoire, telle que la liste des arrêts la cite. Son info
+ * trafic peut avoir quitté le flux : la modification reste en base, mais n'a plus d'édition à ouvrir
+ * — `open` le dit.
  */
-function describeUsage(alertNumber: string, routeId: string, directionId: number, deps: AdminDependencies) {
-	const key = detourKey(alertNumber, routeId, directionId);
-	const scope = deps.serviceAlerts.alertScopes.get(key);
+function describeUsage(uid: number, routeId: string, directionId: number, deps: AdminDependencies) {
+	const modification = deps.modificationIndex.modifications.get(uid);
 
 	return {
-		key,
-		alertNumber,
-		standalone: scope?.standalone ?? false,
+		uid,
 		line: lineName(deps.gtfs.data, routeId),
 		lineCode: lineCode(routeId),
 		directionId,
-		headsigns:
-			deps.gtfs.data.routeDirections.get(routeId)?.find((direction) => direction.directionId === directionId)
-				?.headsigns ?? [],
-		headerText: scope?.headerText ?? null,
-		open: scope !== undefined,
+		headsigns: headsignsOf(deps.gtfs.data, routeId, directionId),
+		label: modification?.label ?? null,
+		open: modification !== undefined,
 	};
 }
 
@@ -1093,37 +1095,6 @@ function describeStop(stopId: string, deps: AdminDependencies) {
 		longitude: coordinates?.longitude ?? null,
 		provisional: false,
 	};
-}
-
-/**
- * Relit l'intitulé et la période d'une modification sans info trafic. Chaque borne est un objet
- * `{ date, time }` : la date est obligatoire, l'heure facultative. La fin peut manquer — la période
- * est alors ouverte — et doit sinon venir après le début.
- */
-function parseModification(
-	payload: Record<string, unknown>,
-): { label: string | null; period: StandalonePeriod } | { message: string } {
-	if (payload.label !== undefined && payload.label !== null && typeof payload.label !== "string") {
-		return { message: "Intitulé attendu : un texte." };
-	}
-	const label = typeof payload.label === "string" && payload.label.trim().length > 0 ? payload.label.trim() : null;
-
-	const start = readBound(payload.start, "début");
-	if ("message" in start) return start;
-	if (start.bound === null) return { message: "La date de début est obligatoire." };
-
-	const end = readBound(payload.end, "fin");
-	if ("message" in end) return end;
-
-	// La fin se compare comme elle se jauge : exclusive, et à la journée entière quand elle est sans
-	// heure (cf. `periodEnd`). « Du 24 au 24 » couvre donc bien la journée.
-	if (end.bound !== null) {
-		const from = start.time === null ? start.date.toPlainDateTime() : start.date.toPlainDateTime(start.time);
-		const until = end.time === null ? end.date.add({ days: 1 }).toPlainDateTime() : end.date.toPlainDateTime(end.time);
-		if (Temporal.PlainDateTime.compare(until, from) <= 0) return { message: "La fin doit venir après le début." };
-	}
-
-	return { label, period: { start: start.bound, end: end.bound } };
 }
 
 /** Une borne `{ date, time }` telle que le formulaire l'envoie, ou `null` pour une borne absente. */
