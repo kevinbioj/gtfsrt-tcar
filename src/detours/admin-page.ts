@@ -397,6 +397,13 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			</section>
 
 			<section class="card">
+				<h2>Courses annulées</h2>
+				<p class="note" id="cancelSummary"></p>
+				<div id="cancelPicker"></div>
+				<div class="row" id="cancelActions" style="margin:8px 0 0"></div>
+			</section>
+
+			<section class="card">
 				<h2>Tronçons</h2>
 				<div class="tabs" id="segmentBar"></div>
 				<div class="segment">
@@ -504,6 +511,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		patterns: [], stalePatterns: 0,
 		// Les arrêts supprimés saisis, ou null pour suivre l'analyse ; et si leur liste est dépliée.
 		removed: null, removedEditing: false,
+		// Les départs annulés, { stopId, departure } : quai et horaire du premier arrêt.
+		cancelled: [],
 		map: null, base: null, routeLayer: null, otherLayer: null, drawLayer: null, previewLine: null,
 		stopMarkers: [], waypointMarkers: [], legLines: [], legToggles: [], pen: "free",
 		shapes: [], shapeLayers: {}, searchTimer: null, countTimer: null,
@@ -821,8 +830,14 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var badges = [];
 		if (row.disabled) badges.push('<span class="badge warn">invisible</span>');
 
+		if (row.cancelledCount > 0) {
+			badges.push('<span class="badge warn">' + row.cancelledCount
+				+ (row.cancelledCount > 1 ? " départs annulés" : " départ annulé") + "</span>");
+		}
+
 		if (row.segmentCount === 0) {
-			badges.push('<span class="badge off">sans tronçon</span>');
+			// Une modification qui ne fait qu'annuler des courses n'a pas de tronçon à déclarer.
+			if (row.cancelledCount === 0) badges.push('<span class="badge off">sans tronçon</span>');
 		} else if (row.publishableSegments < row.segmentCount) {
 			badges.push('<span class="badge warn">incomplète</span>');
 		} else {
@@ -1718,6 +1733,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		state.stalePatterns = detail.patternIds.length === 0 ? 0 : detail.patternIds.length - state.patterns.length;
 		state.removed = detail.removedFromAnalysis ? null : detail.removedStopIds.slice();
 		state.removedEditing = false;
+		state.cancelled = detail.cancelledDepartures.map(function (entry) {
+			return { stopId: entry.stopId, departure: entry.departure };
+		});
 		state.segments = detail.segments.map(adoptSegment);
 		if (state.segments.length === 0) state.segments = [emptySegment()];
 		state.active = Math.max(0, Math.min(state.active, state.segments.length - 1));
@@ -1726,6 +1744,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		renderHeading();
 		renderHeader();
 		renderRemoved();
+		renderCancelled();
 		renderPublication();
 		setupMap(fit);
 		renderSegment();
@@ -1797,6 +1816,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 					.filter(function (patternId) { return chosen.indexOf(patternId) !== -1; });
 				state.stalePatterns = 0;
 				renderRemoved();
+				renderCancelled();
 				renderSegment();
 			};
 
@@ -2067,6 +2087,83 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				onRemovedChanged();
 			}));
 		}
+	}
+
+	/** Un horaire GTFS en secondes depuis minuit : « 17:05 », et « 01:10 +1 » passé minuit. */
+	function formatDeparture(seconds) {
+		var minutes = Math.floor(seconds / 60);
+		var hours = Math.floor(minutes / 60);
+		var text = String(hours % 24).padStart(2, "0") + ":" + String(minutes % 60).padStart(2, "0");
+		return hours >= 24 ? text + " +1" : text;
+	}
+
+	function departureKey(entry) { return entry.stopId + "|" + entry.departure; }
+
+	/**
+	 * Les départs à annuler, chaque jour de la période où ils circulent : ceux des tracés cochés, et
+	 * ceux déjà annulés que la liste ne montrerait plus — un tracé décoché, une période qui a changé.
+	 */
+	function renderCancelled() {
+		var detail = state.detail;
+		var picker = el("cancelPicker");
+		var actions = el("cancelActions");
+		picker.innerHTML = "";
+		actions.innerHTML = "";
+
+		var cancelled = {};
+		state.cancelled.forEach(function (entry) { cancelled[departureKey(entry)] = true; });
+
+		var listed = {};
+		var rows = detail.departures.filter(function (entry) {
+			var shown = entry.patternIds.some(function (patternId) { return state.patterns.indexOf(patternId) !== -1; });
+			if (shown) listed[departureKey(entry)] = true;
+			return shown;
+		});
+		state.cancelled.forEach(function (entry) {
+			if (listed[departureKey(entry)]) return;
+			rows.push({ stopId: entry.stopId, departure: entry.departure, name: stopNameOf(entry.stopId), headsign: "" });
+		});
+		rows.sort(function (a, b) { return a.departure - b.departure; });
+
+		var count = state.cancelled.length;
+		el("cancelSummary").textContent = count === 0 ? "Aucune course annulée."
+			: count + (count > 1 ? " départs annulés" : " départ annulé") + ", chaque jour de la période.";
+
+		if (rows.length === 0) {
+			el("cancelSummary").textContent += " Aucun départ sur la période.";
+			return;
+		}
+
+		var box = document.createElement("div");
+		box.className = "picker";
+		rows.forEach(function (entry) {
+			var label = document.createElement("label");
+			var input = document.createElement("input");
+			input.type = "checkbox";
+			input.checked = cancelled[departureKey(entry)] === true;
+			input.onchange = function () {
+				setCancelled([entry], input.checked);
+			};
+			label.appendChild(input);
+			label.appendChild(document.createTextNode(formatDeparture(entry.departure) + "  " + entry.name
+				+ (entry.headsign ? " → " + entry.headsign : "")));
+			box.appendChild(label);
+		});
+		picker.appendChild(box);
+
+		actions.appendChild(actionButton("Tout cocher", "", function () { setCancelled(rows, true); }));
+		actions.appendChild(actionButton("Tout décocher", "", function () { setCancelled(rows, false); }));
+	}
+
+	/** Annule ou rétablit ces départs. */
+	function setCancelled(entries, cancel) {
+		var keys = {};
+		entries.forEach(function (entry) { keys[departureKey(entry)] = true; });
+		state.cancelled = state.cancelled.filter(function (entry) { return !keys[departureKey(entry)]; });
+		if (cancel) {
+			entries.forEach(function (entry) { state.cancelled.push({ stopId: entry.stopId, departure: entry.departure }); });
+		}
+		renderCancelled();
 	}
 
 	/** Un arrêt coché ou décoché : la carte et le tronçon actif se relisent aussitôt. */
@@ -3166,6 +3263,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			end: period.end,
 			patternIds: state.patterns.length === state.detail.patterns.length ? [] : state.patterns,
 			removedStopIds: state.removed,
+			cancelledDepartures: state.cancelled,
 			segments: kept.map(function (segment) {
 				return {
 					startStopId: segment.startStopId,

@@ -707,7 +707,7 @@ function buildCourses(
 		// Course sans horaire : elle n'a pas de quoi être rapprochée de quoi que ce soit.
 		if (origin === undefined || departure === undefined) continue;
 
-		const key = `${meta.routeId}|${meta.directionId}|${origin.stopId}|${departure}`;
+		const key = courseKey(meta.routeId, meta.directionId, origin.stopId, departure);
 		tripCourseKeys.set(tripId, key);
 
 		const versions = courseVersions.get(key);
@@ -716,6 +716,14 @@ function buildCourses(
 	}
 
 	return { tripCourseKeys, courseVersions };
+}
+
+/**
+ * La clé d'une course : sa ligne, son sens, le quai de son premier arrêt et son départ en secondes
+ * depuis le minuit de la journée de service (cf. {@link buildCourses}).
+ */
+export function courseKey(routeId: string, directionId: number, stopId: string, departure: number): string {
+	return `${routeId}|${directionId}|${stopId}|${departure}`;
 }
 
 /** Colonnes des jours de `calendar.txt`, du lundi au dimanche — l'ordre de {@link ServiceCalendar.weekdays}. */

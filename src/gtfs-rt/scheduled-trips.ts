@@ -1,6 +1,14 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
 
-import { applySkippedStops, declareNoRealtime, hasSkippedStops, type SkipIndex } from "./use-service-alerts.js";
+import {
+	applySkippedStops,
+	type CancelIndex,
+	declareCancelled,
+	declareNoRealtime,
+	hasSkippedStops,
+	isCancelled,
+	type SkipIndex,
+} from "./use-service-alerts.js";
 import { SERVICE_ADDED, SERVICE_REMOVED, type StaticGtfs } from "./use-static-gtfs.js";
 
 const TIME_ZONE = "Europe/Paris";
@@ -23,17 +31,19 @@ export type ServiceDay = { date: string; midnight: number; services: Set<string>
  * ne durent pas vingt-quatre heures, et toutes leurs courses seraient décalées d'une heure.
  */
 export function serviceDays(gtfs: StaticGtfs, offsets: readonly number[]): ServiceDay[] {
-	const today = Temporal.Now.zonedDateTimeISO(TIME_ZONE).startOfDay();
+	const today = Temporal.Now.plainDateISO(TIME_ZONE);
+	return offsets.map((offset) => serviceDay(gtfs, today.add({ days: offset })));
+}
 
-	return offsets.map((offset) => {
-		const day = today.add({ days: offset });
-		const date = day.toPlainDate().toString().replaceAll("-", "");
-		return {
-			date,
-			midnight: Math.floor(day.epochMilliseconds / 1000),
-			services: activeServices(gtfs, day.dayOfWeek, date),
-		};
-	});
+/** La journée de service d'une date donnée. */
+export function serviceDay(gtfs: StaticGtfs, plainDate: Temporal.PlainDate): ServiceDay {
+	const day = plainDate.toZonedDateTime(TIME_ZONE);
+	const date = plainDate.toString().replaceAll("-", "");
+	return {
+		date,
+		midnight: Math.floor(day.epochMilliseconds / 1000),
+		services: activeServices(gtfs, day.dayOfWeek, date),
+	};
 }
 
 /** Une course rattachée à la journée de service où elle circule. */
@@ -114,6 +124,8 @@ export function tripRun(tripId: string, date: string): string {
  * quelques lignes régulières lui échappent — et une suppression d'arrêt qui les touche n'aurait
  * sinon aucune course où s'annoncer.
  *
+ * Une course annulée par une modification y figure toujours, annulée (cf. `isCancelled`).
+ *
  * Est retenue toute course de la journée de service en cours qui n'a pas fini de circuler : le reste
  * de la journée est publié d'un bloc — une suppression d'arrêt de ce soir se lit dès ce matin — et
  * ce qui s'est déjà achevé est écarté, n'ayant plus rien à annoncer. `covered` porte les courses que
@@ -135,6 +147,7 @@ export function tripRun(tripId: string, date: string): string {
 export function scheduledTripUpdates(
 	gtfs: StaticGtfs,
 	skipIndex: SkipIndex,
+	cancelIndex: CancelIndex,
 	covered: ReadonlySet<string>,
 	nowSeconds: number,
 ): Map<string, GtfsRealtime.transit_realtime.ITripUpdate> {
@@ -150,7 +163,9 @@ export function scheduledTripUpdates(
 				const arrival = gtfs.tripArrivals.get(tripId);
 				if (arrival === undefined || midnight + arrival < nowSeconds) continue;
 
-				const tripUpdate = buildTripUpdate(gtfs, skipIndex, tripId, date, nowSeconds);
+				const tripUpdate = isCancelled(cancelIndex, gtfs, tripId, midnight)
+					? buildCancellation(gtfs, tripId, date, nowSeconds)
+					: buildTripUpdate(gtfs, skipIndex, tripId, date, nowSeconds);
 				if (tripUpdate === undefined) continue;
 
 				// L'identifiant porte la journée de service comme le descripteur, et pour la même raison :
@@ -188,6 +203,24 @@ function activeServices(gtfs: StaticGtfs, dayOfWeek: number, date: string): Set<
 	}
 
 	return services;
+}
+
+/** L'annulation d'une course absente du flux source : son descripteur, et rien d'autre. */
+function buildCancellation(
+	gtfs: StaticGtfs,
+	tripId: string,
+	startDate: string,
+	nowSeconds: number,
+): GtfsRealtime.transit_realtime.ITripUpdate | undefined {
+	const meta = gtfs.trips.get(tripId);
+	if (meta === undefined) return undefined;
+
+	const tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate = {
+		trip: { tripId, routeId: meta.routeId, directionId: meta.directionId, startDate },
+		timestamp: nowSeconds,
+	};
+	declareCancelled(tripUpdate);
+	return tripUpdate;
 }
 
 /**

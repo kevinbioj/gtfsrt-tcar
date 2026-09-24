@@ -137,6 +137,20 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 		created_at INTEGER NOT NULL
 	) STRICT;
 	`,
+	// Une modification peut annuler des courses entières. Elle les désigne par leur départ — le quai
+	// et l'horaire du premier arrêt — et non par leur trip_id : le GTFS décrit une même course une fois
+	// par service qui l'assure, et « le 17:05 depuis Théâtre des Arts » est une seule chose, en semaine
+	// comme le samedi. Avec la ligne et le sens de la modification, c'est la clé de course du GTFS
+	// (cf. buildCourses).
+	`
+	CREATE TABLE modification_cancelled_departures (
+		uid       INTEGER NOT NULL REFERENCES modifications (uid) ON DELETE CASCADE,
+		stop_id   TEXT    NOT NULL,
+		-- Secondes depuis le minuit de la journée de service, au-delà de 86 400 après minuit.
+		departure INTEGER NOT NULL,
+		PRIMARY KEY (uid, stop_id, departure)
+	) STRICT;
+	`,
 ];
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
@@ -247,10 +261,22 @@ export type Modification = {
 	updatedAt: number;
 	/** Les tronçons déviés, dans l'ordre où la course les rencontre. */
 	segments: DetourSegment[];
+	/** Les départs annulés, chaque jour de la période où ils circulent. */
+	cancelledDepartures: CancelledDeparture[];
 };
 
+/**
+ * Un départ annulé : le quai et l'horaire du premier arrêt de la course, en secondes depuis le
+ * minuit de la journée de service. Avec la ligne et le sens de la modification, c'est la clé de
+ * course du GTFS : toutes les versions de la course, un par service, en relèvent.
+ */
+export type CancelledDeparture = { stopId: string; departure: number };
+
 /** Ce qu'un enregistrement porte : tout ce qui se saisit, d'un bloc. */
-export type ModificationInput = Pick<Modification, "label" | "period" | "patternIds" | "removedStopIds" | "segments">;
+export type ModificationInput = Pick<
+	Modification,
+	"label" | "period" | "patternIds" | "removedStopIds" | "segments" | "cancelledDepartures"
+>;
 
 /** Ce qu'il faut pour créer une modification à la main. Le reste se saisit ensuite. */
 export type ManualInput = Pick<
@@ -341,6 +367,7 @@ export function useDetourStore(path: string) {
 				createdAt: row.created_at,
 				updatedAt: row.updated_at,
 				segments: [],
+				cancelledDepartures: [],
 			});
 		}
 
@@ -390,6 +417,12 @@ export function useDetourStore(path: string) {
 				mode: row.mode === "route" ? "route" : "free",
 			});
 		}
+
+		for (const row of db
+			.prepare("SELECT * FROM modification_cancelled_departures ORDER BY uid, departure, stop_id")
+			.all() as CancelledRow[]) {
+			modifications.get(row.uid)?.cancelledDepartures.push({ stopId: row.stop_id, departure: row.departure });
+		}
 	};
 
 	/** Exécute `work` dans une transaction : tout ou rien, puis relit l'instantané. */
@@ -422,6 +455,14 @@ export function useDetourStore(path: string) {
 		db.prepare("DELETE FROM modification_removed_stops WHERE uid = ?").run(uid);
 		const insert = db.prepare("INSERT INTO modification_removed_stops (uid, stop_id) VALUES (?, ?)");
 		for (const stopId of new Set(removedStopIds ?? [])) insert.run(uid, stopId);
+	};
+
+	const writeCancelled = (uid: number, departures: readonly CancelledDeparture[]) => {
+		db.prepare("DELETE FROM modification_cancelled_departures WHERE uid = ?").run(uid);
+		const insert = db.prepare(
+			"INSERT OR IGNORE INTO modification_cancelled_departures (uid, stop_id, departure) VALUES (?, ?, ?)",
+		);
+		for (const { stopId, departure } of departures) insert.run(uid, stopId, departure);
 	};
 
 	/**
@@ -562,6 +603,7 @@ export function useDetourStore(path: string) {
 				writePatterns(uid, input.patternIds);
 				writeRemoved(uid, input.removedStopIds);
 				writeSegments(uid, input.segments);
+				writeCancelled(uid, input.cancelledDepartures);
 			});
 
 			return modifications.get(uid);
@@ -731,6 +773,8 @@ type StopRow = { uid: number; segment: number; position: number; stop_id: string
 type PathRow = { uid: number; segment: number; position: number; latitude: number; longitude: number };
 
 type WaypointRow = PathRow & { mode: string };
+
+type CancelledRow = { uid: number; stop_id: string; departure: number };
 
 /**
  * Applique les migrations qui manquent. Chacune passe dans sa propre transaction, `user_version`

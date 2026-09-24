@@ -1,5 +1,7 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
 
+const CANCELED = GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.CANCELED;
+
 export function createFeed(
 	tripUpdates: Map<string, GtfsRealtime.transit_realtime.ITripUpdate> | null,
 	vehiclePositions: Map<string, GtfsRealtime.transit_realtime.IVehiclePosition> | null,
@@ -20,7 +22,12 @@ export function createFeed(
 			...(tripUpdates !== null
 				? tripUpdates
 						.entries()
-						.flatMap(([id, tripUpdate]) => (tripUpdate.stopTimeUpdate?.length ? [{ id, tripUpdate }] : []))
+						// Une course sans arrêt n'a rien à dire — sauf annulée : le descripteur dit tout.
+						.flatMap(([id, tripUpdate]) =>
+							tripUpdate.stopTimeUpdate?.length || tripUpdate.trip?.scheduleRelationship === CANCELED
+								? [{ id, tripUpdate }]
+								: [],
+						)
 						.toArray()
 				: []),
 			...(vehiclePositions !== null

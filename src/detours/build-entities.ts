@@ -4,6 +4,7 @@ import type GtfsRealtime from "gtfs-realtime-bindings";
 
 import { MAX_DETOUR_JUNCTION_OFFSET } from "../config.js";
 import { serviceDays } from "../gtfs-rt/scheduled-trips.js";
+import { type CancelIndex, isCancelled } from "../gtfs-rt/use-service-alerts.js";
 import type { StaticGtfs, TripStop } from "../gtfs-rt/use-static-gtfs.js";
 import { encodePolyline } from "../utils/encode-polyline.js";
 import type { Coordinates } from "../utils/geometry.js";
@@ -104,6 +105,7 @@ type Modification = {
 export function buildDetourEntities(
 	gtfs: StaticGtfs,
 	modifications: ReadonlyMap<number, ResolvedModification>,
+	cancelIndex: CancelIndex,
 	provisional: ReadonlyMap<string, ProvisionalStop>,
 	nowSeconds: number,
 ): GtfsRealtime.transit_realtime.IFeedEntity[] {
@@ -146,6 +148,9 @@ export function buildDetourEntities(
 				// trip updates reconstruits.
 				const arrival = gtfs.tripArrivals.get(tripId);
 				if (arrival === undefined || day.midnight + arrival < nowSeconds) continue;
+
+				// Annulée, la course ne roule pas : elle n'a pas d'itinéraire à modifier.
+				if (isCancelled(cancelIndex, gtfs, tripId, day.midnight)) continue;
 
 				const schedule = gtfs.tripStopSequences.get(tripId);
 				if (schedule === undefined) continue;

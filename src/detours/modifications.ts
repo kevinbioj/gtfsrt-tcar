@@ -1,6 +1,6 @@
 import type { AlertPeriod } from "../ai/analyze-alert.js";
-import { type AnalyzedAlert, isActive, type SkipIndex } from "../gtfs-rt/use-service-alerts.js";
-import type { OrderedStop, StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
+import { type AnalyzedAlert, type CancelIndex, isActive, type SkipIndex } from "../gtfs-rt/use-service-alerts.js";
+import { courseKey, type OrderedStop, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
 import { type DetourStore, type Modification, type ModificationOrigin, type Proposal, scopeKey } from "./store.js";
 
 /**
@@ -80,6 +80,8 @@ export function useModificationIndex(
 		suggestions: [] as Suggestion[],
 		/** Les quais à sauter dans les trip updates. */
 		skipIndex: new Map() as SkipIndex,
+		/** Les courses à annuler, par clé de course. */
+		cancelIndex: new Map() as CancelIndex,
 		reindex() {
 			const now = Temporal.Now.instant();
 			const nowSeconds = Math.floor(now.epochMilliseconds / 1000);
@@ -97,6 +99,7 @@ export function useModificationIndex(
 			resource.modifications = indexed.modifications;
 			resource.suggestions = indexed.suggestions;
 			resource.skipIndex = indexed.skipIndex;
+			resource.cancelIndex = indexed.cancelIndex;
 		},
 	};
 
@@ -228,6 +231,7 @@ function indexModifications(
 	const byNumber = new Map(alerts.map((alert) => [alert.alertNumber, alert]));
 	const modifications = new Map<number, ResolvedModification>();
 	const skipIndex: SkipIndex = new Map();
+	const cancelIndex: CancelIndex = new Map();
 	/** Les trios qui portent une modification : ils ne se suggèrent plus. */
 	const covered = new Set<string>();
 
@@ -280,6 +284,18 @@ function indexModifications(
 			});
 			skipIndex.set(record.routeId, buckets);
 		}
+
+		// Les annulations, elles, ne se jaugent pas maintenant mais course par course, à son départ
+		// (cf. `isCancelled`) : seule l'invisibilité les écarte d'emblée.
+		if (!record.disabled) {
+			const entry = { patternIds: record.patternIds.length === 0 ? null : new Set(record.patternIds), periods };
+			for (const { stopId, departure } of record.cancelledDepartures) {
+				const key = courseKey(record.routeId, record.directionId, stopId, departure);
+				const entries = cancelIndex.get(key) ?? [];
+				entries.push(entry);
+				cancelIndex.set(key, entries);
+			}
+		}
 	}
 
 	const suggestions: Suggestion[] = [];
@@ -301,8 +317,8 @@ function indexModifications(
 	}
 
 	console.log(
-		`✓ ${modifications.size} modifications indexed (${skipIndex.size} routes with skipped stops, ${suggestions.length} suggestions).`,
+		`✓ ${modifications.size} modifications indexed (${skipIndex.size} routes with skipped stops, ${cancelIndex.size} cancelled departures, ${suggestions.length} suggestions).`,
 	);
 
-	return { modifications, suggestions, skipIndex };
+	return { modifications, suggestions, skipIndex, cancelIndex };
 }

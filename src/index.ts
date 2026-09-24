@@ -36,8 +36,10 @@ import { type Movement, useMovementTracker } from "./gtfs-rt/use-movement-tracke
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
 import {
 	applySkippedStops,
+	declareCancelled,
 	declareNoRealtime,
 	hasSkippedStops,
+	isCancelled,
 	useServiceAlerts,
 } from "./gtfs-rt/use-service-alerts.js";
 import { departureEpoch, useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
@@ -503,6 +505,7 @@ async function pollTripUpdates() {
 		const covered = new Set<string>();
 		let realtimeTrips = 0;
 		let scheduleOnly = 0;
+		let cancelledTrips = 0;
 		let unresolvedTrips = 0;
 
 		for (const entity of feed.entity) {
@@ -561,9 +564,33 @@ async function pollTripUpdates() {
 				if (departure !== undefined) store.tripDepartures.set(resolvedTripId, departure);
 			}
 
-			applySkippedStops(entity.tripUpdate, tripRouteId, modificationIndex.skipIndex, staticGtfs.data);
-
 			if (resolvedTripId && startDate) covered.add(tripRun(resolvedTripId, startDate));
+
+			// L'identifiant est celui de la course retenue, et non celui qu'annonce l'entité : la course a pu
+			// être réappariée, et il désignerait alors l'exemplaire d'une autre journée. C'est le moule des
+			// courses reconstruites depuis le théorique, pour que les deux ne puissent pas se dédoubler.
+			//
+			// Il porte la journée de service pour la même raison qu'elles : deux occurrences d'une même
+			// course peuvent circuler ensemble — celle d'hier qui s'achève après minuit et celle
+			// d'aujourd'hui qui part à « 25:10 » — et sous un identifiant nu, la seconde écraserait la
+			// première.
+			const tripEntityId = (resolvedTripId ?? entity.id).split(":").at(-1) ?? entity.id;
+			const entityId = `ET:TCAR:${tripEntityId}${startDate ? `:${startDate}` : ""}`;
+
+			// Annulée par une modification : ce que la source en dit ne tient plus, temps réel compris.
+			const midnight = candidateDays.find((day) => day.date === startDate)?.midnight;
+			if (
+				resolvedTripId &&
+				midnight !== undefined &&
+				isCancelled(modificationIndex.cancelIndex, staticGtfs.data, resolvedTripId, midnight)
+			) {
+				declareCancelled(entity.tripUpdate);
+				store.tripUpdates.set(entityId, entity.tripUpdate);
+				cancelledTrips += 1;
+				continue;
+			}
+
+			applySkippedStops(entity.tripUpdate, tripRouteId, modificationIndex.skipIndex, staticGtfs.data);
 
 			// Ligne sans vrai temps réel : on ne relaie pas ses horaires, seulement l'existence de la course
 			// et ses suppressions d'arrêt — la forme même que prennent les courses reconstruites.
@@ -580,25 +607,22 @@ async function pollTripUpdates() {
 				scheduleOnly += 1;
 			}
 
-			// L'identifiant est celui de la course retenue, et non celui qu'annonce l'entité : la course a pu
-			// être réappariée, et il désignerait alors l'exemplaire d'une autre journée. C'est le moule des
-			// courses reconstruites depuis le théorique, pour que les deux ne puissent pas se dédoubler.
-			//
-			// Il porte la journée de service pour la même raison qu'elles : deux occurrences d'une même
-			// course peuvent circuler ensemble — celle d'hier qui s'achève après minuit et celle
-			// d'aujourd'hui qui part à « 25:10 » — et sous un identifiant nu, la seconde écraserait la
-			// première.
-			const tripEntityId = (resolvedTripId ?? entity.id).split(":").at(-1) ?? entity.id;
-			store.tripUpdates.set(`ET:TCAR:${tripEntityId}${startDate ? `:${startDate}` : ""}`, entity.tripUpdate);
+			store.tripUpdates.set(entityId, entity.tripUpdate);
 		}
 
 		// Toutes les autres courses de la journée de service qui n'ont pas fini de circuler : le flux
 		// source les ignore, l'horaire théorique les connaît (cf. `scheduledTripUpdates`).
-		const scheduled = scheduledTripUpdates(staticGtfs.data, modificationIndex.skipIndex, covered, nowSeconds);
+		const scheduled = scheduledTripUpdates(
+			staticGtfs.data,
+			modificationIndex.skipIndex,
+			modificationIndex.cancelIndex,
+			covered,
+			nowSeconds,
+		);
 		for (const [id, tripUpdate] of scheduled) store.tripUpdates.set(id, tripUpdate);
 
 		console.log(
-			`✓ ${store.tripUpdates.size} trip updates (${realtimeTrips} realtime, ${scheduleOnly} source without realtime, ${scheduled.size} rebuilt from schedule, ${store.tripDepartures.size} departures announced, ${unresolvedTrips} unresolved trips).`,
+			`✓ ${store.tripUpdates.size} trip updates (${realtimeTrips} realtime, ${scheduleOnly} source without realtime, ${cancelledTrips} source cancelled, ${scheduled.size} rebuilt from schedule, ${store.tripDepartures.size} departures announced, ${unresolvedTrips} unresolved trips).`,
 		);
 
 		rebuildDetourEntities();
@@ -620,6 +644,7 @@ function rebuildDetourEntities() {
 		store.detourEntities = buildDetourEntities(
 			staticGtfs.data,
 			modificationIndex.modifications,
+			modificationIndex.cancelIndex,
 			detourStore.provisionalStops,
 			Math.floor(Date.now() / 1000),
 		);

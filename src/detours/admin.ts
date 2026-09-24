@@ -3,6 +3,7 @@ import { basicAuth } from "hono/basic-auth";
 
 import type { AlertPeriod } from "../ai/analyze-alert.js";
 import { ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SMOOTHING_TOLERANCE, ROAD_SNAP_RADIUS } from "../config.js";
+import { serviceDay } from "../gtfs-rt/scheduled-trips.js";
 import { type AnalyzedAlert, hasEnded } from "../gtfs-rt/use-service-alerts.js";
 import { normalizeStopName, type RoutePattern, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
 import type { RoadGraph, RoadGraphHandle } from "../routing/road-graph.js";
@@ -13,7 +14,14 @@ import { ADMIN_PAGE } from "./admin-page.js";
 import { deduceBounds, overlappingSegments, removesStops, type SegmentBounds } from "./bounds.js";
 import { countSelectableTrips } from "./build-entities.js";
 import type { ModificationIndex, ResolvedModification, Suggestion } from "./modifications.js";
-import type { DetourSegment, DetourStore, ModificationInput, ModificationPeriod, Scope } from "./store.js";
+import type {
+	CancelledDeparture,
+	DetourSegment,
+	DetourStore,
+	ModificationInput,
+	ModificationPeriod,
+	Scope,
+} from "./store.js";
 
 /**
  * Nombre de quais que la recherche d'arrêts renvoie au plus. Un libellé court — « gare » — en touche
@@ -26,6 +34,18 @@ const LATITUDE_RANGE = [48, 51] as const;
 const LONGITUDE_RANGE = [-1, 3] as const;
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+const TIME_ZONE = "Europe/Paris";
+
+/**
+ * Combien de journées de service la liste des départs à annuler parcourt, à partir du premier jour de
+ * la période qui n'est pas passé. Une semaine voit passer tous les types de journée — semaine, samedi,
+ * dimanche — sans noyer la liste sous des départs qui se répètent.
+ */
+const DEPARTURE_WINDOW_DAYS = 7;
+
+/** Au-delà, un horaire n'est plus celui d'une journée de service, fût-elle débordante. */
+const MAX_DEPARTURE = 48 * 3600;
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 export type AdminDependencies = {
@@ -603,6 +623,7 @@ function summarize(modification: ResolvedModification, deps: AdminDependencies, 
 		patternCount: record.patternIds.length,
 		patternTotal: patternsFor(gtfs, modification.routeId, modification.directionId).length,
 		segmentCount: record.segments.length,
+		cancelledCount: record.cancelledDepartures.length,
 		publishableSegments: publishable.length,
 		stopCount: record.segments.reduce((total, segment) => total + segment.stops.length, 0),
 		firstSeenAt: modification.firstSeenAt,
@@ -752,6 +773,9 @@ function detail(modification: ResolvedModification, deps: AdminDependencies) {
 		patterns,
 		shapes,
 		boundsCandidates,
+		// Les départs qu'on peut annuler, et ceux qui le sont.
+		departures: departuresOf(modification, gtfs),
+		cancelledDepartures: record.cancelledDepartures,
 		// Un arrêt n'est que désigné : son libellé et sa position se relisent à l'affichage, du GTFS ou de
 		// la base provisoire. `tripsByPattern` dit combien de courses ces bornes-là modifieraient sur
 		// chaque tracé — zéro partout, et le tronçon ne sortira pas du tout dans le feed.
@@ -766,6 +790,67 @@ function detail(modification: ResolvedModification, deps: AdminDependencies) {
 			tripsByPattern: Object.fromEntries(countTripsByPattern(segment, modification, deps)),
 		})),
 	};
+}
+
+/**
+ * Les départs de la ligne et du sens qu'on peut annuler : ceux des courses qui circulent au moins
+ * une journée de la période, parmi les {@link DEPARTURE_WINDOW_DAYS} qui suivent son premier jour non
+ * passé. Chacun dit de quels tracés il relève : la page ne montre que ceux des tracés cochés.
+ *
+ * Une période close avant aujourd'hui n'en propose aucun.
+ */
+function departuresOf(modification: ResolvedModification, gtfs: StaticGtfs) {
+	const today = Temporal.Now.plainDateISO(TIME_ZONE);
+	const dateOf = (bound: string) => Temporal.PlainDate.from(bound.slice(0, 10));
+
+	const starts = modification.periods.map((period) => (period.start === null ? today : dateOf(period.start)));
+	const ends = modification.periods.map((period) => (period.end === null ? null : dateOf(period.end)));
+
+	let first = starts.reduce((a, b) => (Temporal.PlainDate.compare(a, b) <= 0 ? a : b), today);
+	if (Temporal.PlainDate.compare(first, today) < 0) first = today;
+	let last = first.add({ days: DEPARTURE_WINDOW_DAYS - 1 });
+	if (ends.length > 0 && ends.every((end) => end !== null)) {
+		const end = (ends as Temporal.PlainDate[]).reduce((a, b) => (Temporal.PlainDate.compare(a, b) >= 0 ? a : b));
+		if (Temporal.PlainDate.compare(end, last) < 0) last = end;
+	}
+
+	const departures = new Map<
+		string,
+		{ stopId: string; departure: number; name: string; headsign: string; patternIds: Set<string> }
+	>();
+
+	for (let date = first; Temporal.PlainDate.compare(date, last) <= 0; date = date.add({ days: 1 })) {
+		for (const serviceId of serviceDay(gtfs, date).services) {
+			for (const tripId of gtfs.serviceTrips.get(serviceId) ?? []) {
+				const meta = gtfs.trips.get(tripId);
+				if (meta === undefined || meta.routeId !== modification.routeId) continue;
+				if (meta.directionId !== modification.directionId) continue;
+
+				const origin = gtfs.tripStopSequences.get(tripId)?.[0];
+				const departure = gtfs.tripDepartures.get(tripId);
+				const patternId = gtfs.tripPatterns.get(tripId);
+				if (origin === undefined || departure === undefined || patternId === undefined) continue;
+
+				const key = `${origin.stopId}|${departure}`;
+				const known = departures.get(key);
+				if (known !== undefined) {
+					known.patternIds.add(patternId);
+					continue;
+				}
+				departures.set(key, {
+					stopId: origin.stopId,
+					departure,
+					name: gtfs.stopNames.get(origin.stopId) ?? origin.stopId,
+					headsign: meta.headsign,
+					patternIds: new Set([patternId]),
+				});
+			}
+		}
+	}
+
+	return [...departures.values()]
+		.sort((a, b) => a.departure - b.departure || a.name.localeCompare(b.name, "fr"))
+		.map((entry) => ({ ...entry, patternIds: [...entry.patternIds] }));
 }
 
 /**
@@ -908,6 +993,20 @@ function parseInput(
 	}
 	if (removedStopIds === null && !attached) removedStopIds = [];
 
+	if (!Array.isArray(payload.cancelledDepartures)) return { message: "Liste de départs annulés attendue." };
+	const cancelledDepartures: CancelledDeparture[] = [];
+	for (const [index, raw] of payload.cancelledDepartures.entries()) {
+		const entry = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
+		if (typeof entry.stopId !== "string" || !gtfs.stopNames.has(entry.stopId)) {
+			return { message: `Départ annulé ${index + 1} : arrêt inconnu du GTFS.` };
+		}
+		const departure = entry.departure;
+		if (typeof departure !== "number" || !Number.isInteger(departure) || departure < 0 || departure >= MAX_DEPARTURE) {
+			return { message: `Départ annulé ${index + 1} : horaire attendu en secondes depuis minuit.` };
+		}
+		cancelledDepartures.push({ stopId: entry.stopId, departure });
+	}
+
 	if (!Array.isArray(payload.segments)) return { message: "Liste de tronçons attendue." };
 
 	const segments: DetourSegment[] = [];
@@ -931,7 +1030,14 @@ function parseInput(
 	}
 
 	return {
-		input: { label: header.label, period: header.period, patternIds: patternIds.ids, removedStopIds, segments },
+		input: {
+			label: header.label,
+			period: header.period,
+			patternIds: patternIds.ids,
+			removedStopIds,
+			segments,
+			cancelledDepartures,
+		},
 	};
 }
 

@@ -37,6 +37,40 @@ export type SkipBucket = { directionId: number; patternIds: ReadonlySet<string> 
 export type SkipIndex = Map<string, SkipBucket[]>;
 
 /**
+ * Des départs annulés par une modification : pour les courses de certains tracés seulement — ou de
+ * tous (`null`) —, et les jours où leur départ tombe dans l'une de ces périodes.
+ */
+export type CancelEntry = { patternIds: ReadonlySet<string> | null; periods: AlertPeriod[] };
+/** Clé de course (cf. `courseKey`) → modifications qui en annulent le départ. */
+export type CancelIndex = Map<string, CancelEntry[]>;
+
+/**
+ * La course, sur la journée de service qui commence à `midnight`, est-elle annulée ?
+ *
+ * C'est son propre départ qui se jauge à la période, et non l'instant où le feed est produit : le
+ * 17:05 d'une modification qui court de 16:30 au lendemain 01:30 est annulé ce soir, pas demain —
+ * quand bien même le feed de ce soir porte déjà les courses de demain.
+ */
+export function isCancelled(index: CancelIndex, gtfs: StaticGtfs, tripId: string, midnight: number): boolean {
+	if (index.size === 0) return false;
+
+	const key = gtfs.tripCourseKeys.get(tripId);
+	const departure = gtfs.tripDepartures.get(tripId);
+	if (key === undefined || departure === undefined) return false;
+
+	const entries = index.get(key);
+	if (entries === undefined) return false;
+
+	const pattern = gtfs.tripPatterns.get(tripId);
+	const departsAt = Temporal.Instant.fromEpochMilliseconds((midnight + departure) * 1000);
+	return entries.some(
+		(entry) =>
+			(entry.patternIds === null || (pattern !== undefined && entry.patternIds.has(pattern))) &&
+			isActive(entry.periods, departsAt),
+	);
+}
+
+/**
  * Une info trafic analysée, réduite à ce qui sert à bâtir les index.
  *
  * Elle est retenue telle quelle d'un relevé à l'autre, et c'est ce qui permet de rebâtir l'index des
@@ -234,6 +268,18 @@ export function declareNoRealtime(
 			: [{ stopSequence: origin.stopSequence, stopId: origin.stopId, scheduleRelationship: NO_DATA }, ...skipped];
 
 	// Retard global calculé sur du faux temps réel → sans objet.
+	tripUpdate.delay = null;
+}
+
+/**
+ * Annonce la course annulée. Rien d'autre ne tient : ni ses horaires ni ses arrêts supprimés n'ont
+ * plus d'objet, et le seul descripteur suffit à la désigner.
+ */
+export function declareCancelled(tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate) {
+	if (tripUpdate.trip) {
+		tripUpdate.trip.scheduleRelationship = GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.CANCELED;
+	}
+	tripUpdate.stopTimeUpdate = [];
 	tripUpdate.delay = null;
 }
 
