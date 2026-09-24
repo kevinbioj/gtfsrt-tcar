@@ -2,7 +2,13 @@ import { type Context, Hono } from "hono";
 import { basicAuth } from "hono/basic-auth";
 
 import { ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SMOOTHING_TOLERANCE, ROAD_SNAP_RADIUS } from "../config.js";
-import { type AlertScope, type AlertScopeIndex, type AnalyzedAlert, isActive } from "../gtfs-rt/use-service-alerts.js";
+import {
+	type AlertScope,
+	type AlertScopeIndex,
+	type AnalyzedAlert,
+	hasEnded,
+	isActive,
+} from "../gtfs-rt/use-service-alerts.js";
 import { normalizeStopName, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
 import type { RoadGraph, RoadGraphHandle } from "../routing/road-graph.js";
 import { routeOnRoad } from "../routing/route-on-road.js";
@@ -11,7 +17,14 @@ import { sanitizeHtml } from "../utils/sanitize-html.js";
 import { ADMIN_PAGE } from "./admin-page.js";
 import { deduceBounds, overlappingSegments, removesStops } from "./bounds.js";
 import { countSelectableTrips } from "./build-entities.js";
-import { type DetourInput, type DetourSegment, type DetourStore, detourKey } from "./store.js";
+import {
+	type DetourInput,
+	type DetourSegment,
+	type DetourStore,
+	detourKey,
+	type StandalonePeriod,
+	standaloneUid,
+} from "./store.js";
 
 /**
  * Nombre de quais que la recherche d'arrêts renvoie au plus. Un libellé court — « gare » — en touche
@@ -22,6 +35,9 @@ const STOP_SEARCH_LIMIT = 50;
 /** Bornes larges du réseau, qui n'écartent qu'une coordonnée manifestement fautive. */
 const LATITUDE_RANGE = [48, 51] as const;
 const LONGITUDE_RANGE = [-1, 3] as const;
+
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 export type AdminDependencies = {
 	username: string;
@@ -232,6 +248,130 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		return c.json({ code: 200, message: "Périmètre rendu à l'analyse." });
 	});
 
+	/** Les lignes du réseau et leurs sens : de quoi choisir où porte une modification sans info trafic. */
+	admin.get("/api/routes", (c) => {
+		const routes = [...deps.gtfs.data.routeDirections].map(([routeId, directions]) => ({
+			routeId,
+			line: routeId.split(":").at(-1) ?? routeId,
+			directions: directions.map((direction) => ({
+				directionId: direction.directionId,
+				headsigns: direction.headsigns,
+			})),
+		}));
+
+		return c.json(routes.sort((a, b) => a.line.localeCompare(b.line, "fr", { numeric: true })));
+	});
+
+	/**
+	 * Déclare une modification sans info trafic : une ligne, un sens, une période. Elle tient ensuite
+	 * lieu d'info trafic en tout point, et sa déviation se saisit comme les autres, par sa clé.
+	 */
+	admin.post("/api/modifications", async (c) => {
+		let body: unknown;
+		try {
+			body = await c.req.json();
+		} catch {
+			return c.json({ code: 400, message: "Corps de requête illisible." }, 400);
+		}
+
+		if (typeof body !== "object" || body === null) {
+			return c.json({ code: 400, message: "Corps de requête attendu : un objet." }, 400);
+		}
+		const payload = body as Record<string, unknown>;
+
+		const routeId = payload.routeId;
+		const directionId = payload.directionId;
+		const directions = typeof routeId === "string" ? deps.gtfs.data.routeDirections.get(routeId) : undefined;
+		if (typeof routeId !== "string" || directions === undefined) {
+			return c.json({ code: 400, message: `Ligne « ${String(routeId)} » inconnue du GTFS.` }, 400);
+		}
+		if (!directions.some((direction) => direction.directionId === directionId)) {
+			return c.json({ code: 400, message: `La ligne ${routeId} n'a pas de sens ${String(directionId)}.` }, 400);
+		}
+
+		const parsed = parseModification(payload);
+		if ("message" in parsed) return c.json({ code: 400, message: parsed.message }, 400);
+
+		const modification = deps.store.createStandalone(
+			routeId,
+			directionId as number,
+			parsed.label,
+			parsed.period,
+			Math.floor(Date.now() / 1000),
+		);
+		deps.reindexAlerts();
+		deps.rebuild();
+
+		return c.json({ key: detourKey(modification.alertNumber, routeId, modification.directionId) });
+	});
+
+	/** Reprend l'intitulé ou la période d'une modification sans info trafic. */
+	admin.put("/api/modifications/:number", async (c) => {
+		const number = c.req.param("number");
+		const uid = standaloneUid(number);
+		const existing = deps.store.standaloneModifications.get(number);
+		if (uid === undefined || existing === undefined) {
+			return c.json({ code: 404, message: "Modification sans info trafic inconnue." }, 404);
+		}
+
+		let body: unknown;
+		try {
+			body = await c.req.json();
+		} catch {
+			return c.json({ code: 400, message: "Corps de requête illisible." }, 400);
+		}
+		if (typeof body !== "object" || body === null) {
+			return c.json({ code: 400, message: "Corps de requête attendu : un objet." }, 400);
+		}
+
+		const parsed = parseModification(body as Record<string, unknown>);
+		if ("message" in parsed) return c.json({ code: 400, message: parsed.message }, 400);
+
+		deps.store.updateStandalone(uid, parsed.label, parsed.period);
+		// La période décide de la mise en vigueur : le périmètre se rejauge, et le feed avec lui.
+		deps.reindexAlerts();
+		deps.rebuild();
+
+		const scope = deps.serviceAlerts.alertScopes.get(detourKey(number, existing.routeId, existing.directionId));
+		if (scope === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
+		return c.json(detail(scope, deps));
+	});
+
+	/**
+	 * Désactive ou réactive une modification, qu'une info trafic la porte ou non. Désactivée, elle est
+	 * tenue pour hors période : ni sa modification ni ses arrêts supprimés ne sortent dans le feed.
+	 */
+	admin.put("/api/detours/:key/disabled", async (c) => {
+		const key = c.req.param("key");
+		const scope = deps.serviceAlerts.alertScopes.get(key);
+		if (scope === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
+
+		let body: unknown;
+		try {
+			body = await c.req.json();
+		} catch {
+			return c.json({ code: 400, message: "Corps de requête illisible." }, 400);
+		}
+
+		const disabled = (body as Record<string, unknown> | null)?.disabled;
+		if (typeof disabled !== "boolean") return c.json({ code: 400, message: "Booléen « disabled » attendu." }, 400);
+
+		deps.store.setDisabled(
+			scope.alertNumber,
+			scope.routeId,
+			scope.directionId,
+			disabled,
+			Math.floor(Date.now() / 1000),
+		);
+		// Le `skipIndex` en dépend autant que la modification : on réindexe avant de republier.
+		deps.reindexAlerts();
+		deps.rebuild();
+
+		const next = deps.serviceAlerts.alertScopes.get(key);
+		if (next === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
+		return c.json(detail(next, deps));
+	});
+
 	admin.get("/api/detours/:key", (c) => {
 		const scope = deps.serviceAlerts.alertScopes.get(c.req.param("key"));
 		if (scope === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
@@ -335,6 +475,16 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		const scope = deps.serviceAlerts.alertScopes.get(c.req.param("key"));
 		if (scope === undefined) return c.json({ code: 404, message: "Déviation inconnue." }, 404);
 
+		// Une modification sans info trafic n'est rien d'autre que ce qu'on y a déclaré : effacer la
+		// déclaration l'efface tout entière, période et périmètre compris.
+		const uid = scope.standalone ? standaloneUid(scope.alertNumber) : undefined;
+		if (uid !== undefined) {
+			deps.store.removeStandalone(uid);
+			deps.reindexAlerts();
+			deps.rebuild();
+			return c.json({ code: 200, message: "Modification supprimée." });
+		}
+
 		deps.store.remove(scope.alertNumber, scope.routeId, scope.directionId);
 		deps.rebuild();
 
@@ -370,7 +520,16 @@ function parseKey(
 		return { message: `La ligne ${routeId} n'a pas de sens ${directionId}.` };
 	}
 
-	if (!deps.serviceAlerts.alerts.some((alert) => alert.alertNumber === alertNumber)) {
+	// Une modification sans info trafic ne porte que sur sa ligne et son sens : une clé qui en
+	// désignerait d'autres ouvrirait un périmètre ailleurs, sous son numéro.
+	const standalone = deps.store.standaloneModifications.get(alertNumber);
+	if (standalone !== undefined) {
+		if (standalone.routeId !== routeId || standalone.directionId !== directionId) {
+			return {
+				message: `La modification ${alertNumber} porte sur ${standalone.routeId}, sens ${standalone.directionId}.`,
+			};
+		}
+	} else if (!deps.serviceAlerts.alerts.some((alert) => alert.alertNumber === alertNumber)) {
 		return { message: `Aucune info trafic ${alertNumber} au flux courant.` };
 	}
 
@@ -402,6 +561,9 @@ function summarize(scope: AlertScope, deps: AdminDependencies) {
 		headerText: scope.headerText,
 		periods: scope.periods,
 		active: scope.active,
+		ended: hasEnded(scope.periods, Temporal.Now.instant()),
+		standalone: scope.standalone,
+		disabled: scope.disabled,
 		removedStopCount: scope.removedStopIds.size,
 		manualScope: deps.store.scopeOverrides.has(scope.key),
 		declared: record !== undefined,
@@ -484,8 +646,20 @@ function detail(scope: AlertScope, deps: AdminDependencies) {
 
 	const segments = record !== undefined && record.segments.length > 0 ? record.segments : fallback;
 
+	// La période d'une modification sans info trafic, découpée comme le formulaire la saisit.
+	const standalone = deps.store.standaloneModifications.get(scope.alertNumber);
+	const period =
+		standalone === undefined
+			? null
+			: {
+					label: standalone.label,
+					start: splitBound(standalone.period.start),
+					end: standalone.period.end === null ? null : splitBound(standalone.period.end),
+				};
+
 	return {
 		...summarize(scope, deps),
+		period,
 		// Le texte d'une info trafic est du HTML : le flux amont reprend ce que le CMS de l'exploitant a
 		// saisi, listes et plans de déviation compris. Il part nettoyé plutôt qu'échappé — la page
 		// l'affiche tel quel, et n'a pas à savoir d'où il vient (cf. `sanitizeHtml`).
@@ -721,6 +895,76 @@ function describeStop(stopId: string, deps: AdminDependencies) {
 		longitude: coordinates?.longitude ?? null,
 		provisional: false,
 	};
+}
+
+/**
+ * Relit l'intitulé et la période d'une modification sans info trafic. Chaque borne est un objet
+ * `{ date, time }` : la date est obligatoire, l'heure facultative. La fin peut manquer — la période
+ * est alors ouverte — et doit sinon venir après le début.
+ */
+function parseModification(
+	payload: Record<string, unknown>,
+): { label: string | null; period: StandalonePeriod } | { message: string } {
+	if (payload.label !== undefined && payload.label !== null && typeof payload.label !== "string") {
+		return { message: "Intitulé attendu : un texte." };
+	}
+	const label = typeof payload.label === "string" && payload.label.trim().length > 0 ? payload.label.trim() : null;
+
+	const start = readBound(payload.start, "début");
+	if ("message" in start) return start;
+	if (start.bound === null) return { message: "La date de début est obligatoire." };
+
+	const end = readBound(payload.end, "fin");
+	if ("message" in end) return end;
+
+	// La fin se compare comme elle se jauge : exclusive, et à la journée entière quand elle est sans
+	// heure (cf. `periodEnd`). « Du 24 au 24 » couvre donc bien la journée.
+	if (end.bound !== null) {
+		const from = start.time === null ? start.date.toPlainDateTime() : start.date.toPlainDateTime(start.time);
+		const until = end.time === null ? end.date.add({ days: 1 }).toPlainDateTime() : end.date.toPlainDateTime(end.time);
+		if (Temporal.PlainDateTime.compare(until, from) <= 0) return { message: "La fin doit venir après le début." };
+	}
+
+	return { label, period: { start: start.bound, end: end.bound } };
+}
+
+/** Une borne `{ date, time }` telle que le formulaire l'envoie, ou `null` pour une borne absente. */
+function readBound(
+	raw: unknown,
+	which: string,
+):
+	| { bound: string; date: Temporal.PlainDate; time: Temporal.PlainTime | null }
+	| { bound: null }
+	| { message: string } {
+	if (raw === undefined || raw === null) return { bound: null };
+	if (typeof raw !== "object") return { message: `Borne de ${which} illisible.` };
+
+	const payload = raw as Record<string, unknown>;
+	const date = typeof payload.date === "string" ? payload.date.trim() : "";
+	const time = typeof payload.time === "string" ? payload.time.trim() : "";
+
+	if (date.length === 0) {
+		return time.length === 0 ? { bound: null } : { message: `Heure de ${which} sans date.` };
+	}
+	if (!DATE_PATTERN.test(date)) return { message: `Date de ${which} attendue au format AAAA-MM-JJ.` };
+	if (time.length > 0 && !TIME_PATTERN.test(time)) return { message: `Heure de ${which} attendue au format HH:MM.` };
+
+	let plainDate: Temporal.PlainDate;
+	try {
+		plainDate = Temporal.PlainDate.from(date, { overflow: "reject" });
+	} catch {
+		return { message: `Date de ${which} invalide.` };
+	}
+
+	return time.length === 0
+		? { bound: date, date: plainDate, time: null }
+		: { bound: `${date}T${time}`, date: plainDate, time: Temporal.PlainTime.from(time) };
+}
+
+/** « 2026-09-24T08:30 » donne `{ date: "2026-09-24", time: "08:30" }` ; sans heure, `time` est null. */
+function splitBound(bound: string) {
+	const [date, time] = bound.split("T");
+	return { date: date as string, time: time ?? null };
 }
 
 /** Relit le corps d'une création ou d'une modification d'arrêt provisoire. */

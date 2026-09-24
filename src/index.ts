@@ -82,14 +82,14 @@ const staticGtfs = await useStaticGtfs(STATIC_GTFS_URL, GTFS_CHECK_INTERVAL);
 // lui-même, sans avoir à s'y réabonner.
 const vehicleLocator = useVehicleLocator(staticGtfs, restored?.locations);
 const detourStore = useDetourStore(DETOURS_DB_PATH);
-// Les périmètres saisis à la main sont relus à chaque indexation, jamais retenus : une saisie vaut
-// dès `serviceAlerts.reindex()`, sans attendre le relevé suivant ni rappeler l'IA.
-const serviceAlerts = useServiceAlerts(
-	SERVICE_ALERTS_URL,
-	ALERTS_POLL_INTERVAL,
-	staticGtfs,
-	() => detourStore.scopeOverrides,
-);
+// Ce qui est saisi à la main — périmètres, modifications sans info trafic, désactivations — est relu
+// à chaque indexation, jamais retenu : une saisie vaut dès `serviceAlerts.reindex()`, sans attendre le
+// relevé suivant ni rappeler l'IA.
+const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs, () => ({
+	overrides: detourStore.scopeOverrides,
+	standalone: detourStore.standaloneModifications,
+	disabled: detourStore.disabledModifications,
+}));
 // Sa présence est constatée ici, ses octets ne seront lus qu'au premier accrochage.
 const roadGraph = useRoadGraph(ROAD_GRAPH_PATH);
 

@@ -275,6 +275,37 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 	`
 	ALTER TABLE detour_segments DROP COLUMN kind;
 	`,
+	// Une modification peut se déclarer sans qu'aucune info trafic ne la porte : un chantier que
+	// l'exploitant n'a pas annoncé, une déviation d'un soir. Elle tient alors lieu d'info trafic —
+	// une période, une ligne, un sens, un intitulé — et reçoit un numéro à elle, « M<uid> », qui prend
+	// la place du numéro d'info trafic dans toutes les tables : déclarations, tronçons, périmètre.
+	//
+	// La désactivation, elle, vaut pour N'IMPORTE QUELLE modification, et se range à part : elle
+	// s'applique à un couple ligne/sens déclaré ou non, et survit à l'effacement de la déclaration.
+	`
+	CREATE TABLE standalone_modifications (
+		uid          INTEGER PRIMARY KEY AUTOINCREMENT,
+		route_id     TEXT    NOT NULL,
+		direction_id INTEGER NOT NULL,
+		-- NULL : pas d'intitulé, la liste en affiche un par défaut.
+		label        TEXT,
+		-- AAAA-MM-JJ. L'heure est facultative : sans elle, la période commence à minuit.
+		start_date   TEXT    NOT NULL,
+		start_time   TEXT,
+		-- NULL : période ouverte. Sans heure, la fin couvre toute la journée.
+		end_date     TEXT,
+		end_time     TEXT,
+		created_at   INTEGER NOT NULL
+	) STRICT;
+
+	CREATE TABLE disabled_modifications (
+		alert_number TEXT    NOT NULL,
+		route_id     TEXT    NOT NULL,
+		direction_id INTEGER NOT NULL,
+		disabled_at  INTEGER NOT NULL,
+		PRIMARY KEY (alert_number, route_id, direction_id)
+	) STRICT;
+	`,
 ];
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
@@ -373,6 +404,26 @@ export type ScopeOverride = {
 	updatedAt: number;
 };
 
+/**
+ * Une modification déclarée sans info trafic. Elle en tient lieu en tout point : son numéro remplace
+ * celui de l'info trafic dans la clé de la déviation, sa période décide seule de sa mise en vigueur.
+ */
+export type StandaloneModification = {
+	/** Le numéro qui tient lieu de numéro d'info trafic, « M<uid> » (cf. {@link standaloneNumber}). */
+	alertNumber: string;
+	uid: number;
+	routeId: string;
+	directionId: number;
+	label: string | null;
+	period: StandalonePeriod;
+};
+
+/**
+ * La période d'application, bornes au format « AAAA-MM-JJ » ou « AAAA-MM-JJTHH:MM » — celui des
+ * périodes d'info trafic, qui se jaugent de la même façon (cf. `isActive`). Sans fin, elle est ouverte.
+ */
+export type StandalonePeriod = { start: string; end: string | null };
+
 /** Ce qu'une déclaration porte de modifiable : le reste — identité, horodatage — est calculé. */
 export type DetourInput = {
 	segments: DetourSegment[];
@@ -412,11 +463,34 @@ export function useDetourStore(path: string) {
 	const records = new Map<string, DetourRecord>();
 	const provisional = new Map<string, ProvisionalStop>();
 	const overrides = new Map<string, ScopeOverride>();
+	const standalone = new Map<string, StandaloneModification>();
+	const disabled = new Set<string>();
 
 	const reload = () => {
 		records.clear();
 		provisional.clear();
 		overrides.clear();
+		standalone.clear();
+		disabled.clear();
+
+		for (const row of db.prepare("SELECT * FROM standalone_modifications ORDER BY uid").all() as StandaloneRow[]) {
+			const alertNumber = standaloneNumber(row.uid);
+			standalone.set(alertNumber, {
+				alertNumber,
+				uid: row.uid,
+				routeId: row.route_id,
+				directionId: row.direction_id,
+				label: row.label,
+				period: {
+					start: joinBound(row.start_date, row.start_time),
+					end: row.end_date === null ? null : joinBound(row.end_date, row.end_time),
+				},
+			});
+		}
+
+		for (const row of db.prepare("SELECT * FROM disabled_modifications").all() as DisabledRow[]) {
+			disabled.add(detourKey(row.alert_number, row.route_id, row.direction_id));
+		}
 
 		for (const row of db.prepare("SELECT * FROM provisional_stops ORDER BY stop_uid").all() as ProvisionalRow[]) {
 			const stopId = provisionalStopId(row.stop_uid);
@@ -503,6 +577,96 @@ export function useDetourStore(path: string) {
 
 		/** Les périmètres saisis à la main, par {@link detourKey}. */
 		scopeOverrides: overrides as ReadonlyMap<string, ScopeOverride>,
+
+		/** Les modifications déclarées sans info trafic, par numéro (« M<uid> »). */
+		standaloneModifications: standalone as ReadonlyMap<string, StandaloneModification>,
+
+		/** Les modifications désactivées, par {@link detourKey} — qu'une info trafic les porte ou non. */
+		disabledModifications: disabled as ReadonlySet<string>,
+
+		/** Déclare une modification sans info trafic. Sa déviation se saisit ensuite comme les autres. */
+		createStandalone(
+			routeId: string,
+			directionId: number,
+			label: string | null,
+			period: StandalonePeriod,
+			nowSeconds: number,
+		): StandaloneModification {
+			const [startDate, startTime] = splitBound(period.start);
+			const [endDate, endTime] = period.end === null ? [null, null] : splitBound(period.end);
+
+			const { lastInsertRowid } = db
+				.prepare(
+					`INSERT INTO standalone_modifications
+						(route_id, direction_id, label, start_date, start_time, end_date, end_time, created_at)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				)
+				.run(routeId, directionId, label, startDate, startTime, endDate, endTime, nowSeconds);
+
+			reload();
+			return standalone.get(standaloneNumber(Number(lastInsertRowid))) as StandaloneModification;
+		},
+
+		/** Reprend l'intitulé ou la période. La ligne et le sens, eux, font partie de la clé et ne bougent pas. */
+		updateStandalone(uid: number, label: string | null, period: StandalonePeriod): boolean {
+			const [startDate, startTime] = splitBound(period.start);
+			const [endDate, endTime] = period.end === null ? [null, null] : splitBound(period.end);
+
+			const { changes } = db
+				.prepare(
+					`UPDATE standalone_modifications
+					 SET label = ?, start_date = ?, start_time = ?, end_date = ?, end_time = ?
+					 WHERE uid = ?`,
+				)
+				.run(label, startDate, startTime, endDate, endTime, uid);
+
+			reload();
+			return changes > 0;
+		},
+
+		/**
+		 * Efface une modification sans info trafic, et tout ce qui s'y rattache : sa déclaration, son
+		 * périmètre, sa désactivation. Sans elle, rien de tout cela ne désigne plus rien.
+		 */
+		removeStandalone(uid: number): boolean {
+			const alertNumber = standaloneNumber(uid);
+			let changes = 0;
+
+			db.exec("BEGIN");
+			try {
+				db.prepare("DELETE FROM detours WHERE alert_number = ?").run(alertNumber);
+				db.prepare("DELETE FROM scope_overrides WHERE alert_number = ?").run(alertNumber);
+				db.prepare("DELETE FROM disabled_modifications WHERE alert_number = ?").run(alertNumber);
+				changes = Number(db.prepare("DELETE FROM standalone_modifications WHERE uid = ?").run(uid).changes);
+				db.exec("COMMIT");
+			} catch (cause) {
+				db.exec("ROLLBACK");
+				throw cause;
+			}
+
+			reload();
+			return changes > 0;
+		},
+
+		/**
+		 * Désactive ou réactive une modification. Désactivée, elle est tenue pour hors période : ni sa
+		 * modification ni les arrêts que son périmètre supprime ne sortent dans le feed.
+		 */
+		setDisabled(alertNumber: string, routeId: string, directionId: number, value: boolean, nowSeconds: number) {
+			if (value) {
+				db.prepare(
+					`INSERT INTO disabled_modifications (alert_number, route_id, direction_id, disabled_at)
+					 VALUES (?, ?, ?, ?)
+					 ON CONFLICT (alert_number, route_id, direction_id) DO NOTHING`,
+				).run(alertNumber, routeId, directionId, nowSeconds);
+			} else {
+				db.prepare(
+					"DELETE FROM disabled_modifications WHERE alert_number = ? AND route_id = ? AND direction_id = ?",
+				).run(alertNumber, routeId, directionId);
+			}
+
+			reload();
+		},
 
 		/**
 		 * Saisit — ou ressaisit — le périmètre d'une info trafic sur une ligne et un sens. La liste
@@ -712,7 +876,42 @@ export function provisionalStopUid(stopId: string): number | undefined {
 	return match === null ? undefined : Number(match[1]);
 }
 
+/** Le numéro qui tient lieu de numéro d'info trafic à une modification déclarée sans elle. */
+export function standaloneNumber(uid: number): string {
+	return `M${uid}`;
+}
+
+/** L'uid d'une modification sans info trafic d'après son numéro, ou `undefined` si ce n'en est pas une. */
+export function standaloneUid(alertNumber: string): number | undefined {
+	const match = /^M(\d+)$/.exec(alertNumber);
+	return match === null ? undefined : Number(match[1]);
+}
+
+/** « 2026-09-24 » et « 08:30 » donnent « 2026-09-24T08:30 » ; sans heure, la date seule. */
+function joinBound(date: string, time: string | null): string {
+	return time === null ? date : `${date}T${time}`;
+}
+
+function splitBound(bound: string): [string, string | null] {
+	const [date, time] = bound.split("T");
+	return [date as string, time ?? null];
+}
+
 // ---
+
+type StandaloneRow = {
+	uid: number;
+	route_id: string;
+	direction_id: number;
+	label: string | null;
+	start_date: string;
+	start_time: string | null;
+	end_date: string | null;
+	end_time: string | null;
+	created_at: number;
+};
+
+type DisabledRow = { alert_number: string; route_id: string; direction_id: number; disabled_at: number };
 
 type DetourRow = {
 	alert_number: string;

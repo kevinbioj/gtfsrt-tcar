@@ -182,6 +182,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	.results .id { color: var(--muted); font-size: 12px; }
 	.results .empty { color: var(--muted); cursor: default; }
 	.gtfsname { font-weight: 600; flex: 1; }
+	/* Les champs d'un formulaire s'empilent : une ligne chacun, un peu d'air entre eux. */
+	.form .field { margin-bottom: 8px; }
+	.form { max-width: 560px; }
 </style>
 </head>
 <body>
@@ -193,8 +196,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			<option value="line">par ligne</option>
 			<option value="alert">par info trafic</option>
 		</select></label>
-		<label class="note"><input type="checkbox" id="showUpcoming" style="width:auto"> afficher les déviations à venir</label>
+		<label class="note"><input type="checkbox" id="showUpcoming" style="width:auto"> afficher aussi les déviations à venir ou terminées</label>
 		<a id="openScopes" class="button" href="#/scopes">Ajouter une ligne concernée</a>
+		<a id="openNew" class="button" href="#/new">Nouvelle modification</a>
 	</span>
 	<a id="back" class="button hidden" href="#/">Retour à la liste</a>
 </header>
@@ -214,6 +218,18 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		périmètre vide : il accepte alors un tracé de déviation sans qu'aucun arrêt n'y soit supprimé.</p>
 	<div id="scopeList"></div>
 	<p id="scopeEmpty" class="note hidden">Aucune info trafic au flux courant.</p>
+</div>
+
+<div id="newView" class="wrap hidden">
+	<div class="scopes form">
+		<p class="note">Une modification sans info trafic : on choisit la ligne, le sens et la période
+			d'application, puis on la saisit comme les autres — arrêts supprimés, tronçons, tracé.</p>
+		<div class="field"><label>Ligne</label><select id="newRoute"></select></div>
+		<div class="field"><label>Sens</label><select id="newDirection"></select></div>
+		<div id="newPeriod"></div>
+		<div class="actions"><button id="create" class="primary">Créer</button></div>
+		<p class="status" id="newStatus"></p>
+	</div>
 </div>
 
 <div id="detailView" class="detail hidden">
@@ -285,8 +301,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		<p class="note" id="pathNote"></p>
 
 		<h2>Publication</h2>
+		<p class="note" id="disabledNote"></p>
 		<div class="actions">
 			<button id="save" class="primary">Enregistrer</button>
+			<button id="toggleDisabled"></button>
 			<button id="remove" class="danger">Supprimer la déclaration</button>
 		</div>
 		<p class="status" id="status"></p>
@@ -299,12 +317,14 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	"use strict";
 
 	var state = {
-		detail: null, rows: [], alerts: [], segments: [], active: 0, mode: "idle",
+		detail: null, rows: [], alerts: [], routes: [], segments: [], active: 0, mode: "idle",
 		// Le périmètre en cours de saisie : la liste des arrêts cochés, ou null tant qu'on le lit.
 		scopeSelection: null,
 		map: null, base: null, routeLayer: null, otherLayer: null, drawLayer: null, previewLine: null,
 		stopMarkers: [], waypointMarkers: [], legLines: [], legToggles: [], pen: "free",
-		shapes: [], searchTimer: null, countTimer: null
+		shapes: [], searchTimer: null, countTimer: null,
+		// Les lecteurs des champs de période : celui de la création, et celui du détail.
+		readNewPeriod: null, readPeriod: null
 	};
 
 	/** Le tronçon en cours d'édition. Il y en a toujours au moins un dès qu'un détail est ouvert. */
@@ -449,15 +469,17 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	function showView(name) {
 		el("listView").className = name === "list" ? "wrap" : "wrap hidden";
 		el("scopeView").className = name === "scopes" ? "wrap" : "wrap hidden";
+		el("newView").className = name === "new" ? "wrap" : "wrap hidden";
 		el("detailView").className = name === "detail" ? "detail" : "detail hidden";
 		el("listTools").className = name === "list" ? "tools" : "tools hidden";
 		el("back").className = name === "list" ? "button hidden" : "button";
 		el("title").textContent = name === "scopes" ? "Ajouter une ligne concernée"
+			: name === "new" ? "Nouvelle modification"
 			: name === "detail" ? "Déviation" : "Déviations en vigueur";
 	}
 
 	/**
-	 * La vue courante vit dans l'adresse : « #/ », « #/scopes », « #/detour/<clé> », et
+	 * La vue courante vit dans l'adresse : « #/ », « #/scopes », « #/new », « #/detour/<clé> », et
 	 * « #/declare/<clé> », qui déclare le sens concerné avant d'ouvrir sa déviation. Le retour du
 	 * navigateur revient alors à l'écran précédent, et non au site d'où l'on venait — c'est le geste
 	 * qu'on fait sans y penser, et il ne doit pas faire perdre la page.
@@ -483,6 +505,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			openScopes();
 			return;
 		}
+		if (route === "new") {
+			openNew();
+			return;
+		}
 
 		state.detail = null;
 		showView("list");
@@ -506,7 +532,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			return "<span class='toward' style='margin-left:0'>" + escapeHtml(towardOf(row)) + "</span>";
 		} },
 		alert: { label: "Info trafic", cell: function (row) {
-			return "<span class='ref'>" + escapeHtml(row.alertNumber) + "</span>" + escapeHtml(row.headerText);
+			return perturbationRef(row) + escapeHtml(row.headerText);
 		} },
 		stops: { label: "Arrêts", className: "num", cell: function (row) { return String(row.removedStopCount); } },
 		period: { label: "Période", className: "note", cell: function (row) {
@@ -538,7 +564,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			keyOf: function (row) { return row.alertNumber; },
 			heading: function (rows) {
 				var row = rows[0];
-				return "<span class='ref'>" + escapeHtml(row.alertNumber) + "</span>"
+				return perturbationRef(row)
 					+ "<span class='title'>" + escapeHtml(row.headerText) + "</span><span class='grow'></span>"
 					+ "<span class='note'>" + countLabel(rows) + "</span>"
 					+ "<span class='note'>" + escapeHtml(describePeriodsShort(row.periods)) + "</span>"
@@ -568,10 +594,25 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		return row.headsigns.length ? "→ " + row.headsigns.join(" / ") : "sens " + row.directionId;
 	}
 
+	/**
+	 * Ce qui rattache la déviation à sa perturbation : le numéro de l'info trafic, ou le constat qu'il
+	 * n'y en a pas. Une modification sans info trafic a bien un numéro, mais il ne dit rien à personne.
+	 */
+	function perturbationRef(row) {
+		return row.standalone
+			? '<span class="badge warn" style="margin-right:8px">sans info trafic</span>'
+			: "<span class='ref'>" + escapeHtml(row.alertNumber) + "</span>";
+	}
+
+	/**
+	 * La désactivation passe avant tout : elle dit qu'on a choisi de ne rien publier, quelle que soit la
+	 * période. Ensuite seulement vient ce que la période en dit.
+	 */
 	function stateBadge(row) {
-		return row.active
-			? '<span class="badge ok">en vigueur</span>'
-			: '<span class="badge off">à venir</span>';
+		if (row.disabled) return '<span class="badge warn">désactivée</span>';
+		if (row.active) return '<span class="badge ok">en vigueur</span>';
+		if (row.ended) return '<span class="badge off">terminée</span>';
+		return '<span class="badge off">à venir</span>';
 	}
 
 	function declarationBadge(row) {
@@ -645,7 +686,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				// Ce que la ligne abrège se relit en entier au survol : la destination comme le texte de
 				// l'info trafic dépassent volontiers la largeur d'une colonne.
 				tr.title = row.line + " " + towardOf(row) + "\n"
-					+ row.alertNumber + " — " + row.headerText + "\n" + describePeriods(row.periods);
+					+ (row.standalone ? "Sans info trafic" : row.alertNumber) + " — " + row.headerText + "\n"
+					+ describePeriods(row.periods);
 
 				tr.innerHTML = grouping.columns.map(function (column) {
 					var definition = COLUMNS[column[0]];
@@ -758,6 +800,113 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		}).catch(function (error) {
 			alert(error.message);
 			window.location.replace("#/scopes");
+		});
+	}
+
+	// --- modification sans info trafic ---
+
+	/**
+	 * Les champs d'une période d'application, et l'intitulé qui l'accompagne : la création et le détail
+	 * les partagent. Renvoie de quoi les relire, dans la forme que le serveur attend.
+	 *
+	 * Le début a sa date obligatoire, la fin non — sans elle, la période reste ouverte. L'heure est
+	 * toujours facultative : sans elle, le début vaut minuit et la fin couvre la journée entière. Une
+	 * heure de fin sans date de fin ne voudrait rien dire, et son champ reste grisé tant qu'il en manque.
+	 */
+	function periodFields(container, period) {
+		container.innerHTML =
+			'<div class="field"><label>Intitulé</label><input class="label" placeholder="facultatif"></div>' +
+			'<div class="field"><label>Début</label><input type="date" class="startDate" required>' +
+				'<input type="time" class="startTime"></div>' +
+			'<div class="field"><label>Fin</label><input type="date" class="endDate">' +
+				'<input type="time" class="endTime"></div>' +
+			'<p class="note">Heures facultatives. Sans fin, la modification reste en vigueur jusqu\'à ce ' +
+				"qu'on la désactive ou la supprime.</p>";
+
+		function field(name) { return container.querySelector("." + name); }
+
+		field("label").value = period && period.label ? period.label : "";
+		field("startDate").value = period ? period.start.date : "";
+		field("startTime").value = period && period.start.time ? period.start.time : "";
+		field("endDate").value = period && period.end ? period.end.date : "";
+		field("endTime").value = period && period.end && period.end.time ? period.end.time : "";
+
+		function syncEnd() {
+			field("endTime").disabled = field("endDate").value === "";
+			if (field("endTime").disabled) field("endTime").value = "";
+		}
+		field("endDate").oninput = syncEnd;
+		syncEnd();
+
+		return function () {
+			return {
+				label: field("label").value,
+				start: { date: field("startDate").value, time: field("startTime").value },
+				end: field("endDate").value === "" ? null : { date: field("endDate").value, time: field("endTime").value }
+			};
+		};
+	}
+
+	/** Le formulaire de création : la ligne, le sens, la période. Le reste se saisit dans le détail. */
+	function openNew() {
+		request(API + "/api/routes").then(function (routes) {
+			state.routes = routes;
+			state.detail = null;
+			showView("new");
+
+			var select = el("newRoute");
+			select.innerHTML = "";
+			routes.forEach(function (route, index) {
+				var option = document.createElement("option");
+				option.value = String(index);
+				option.textContent = "Ligne " + route.line;
+				select.appendChild(option);
+			});
+			select.onchange = renderNewDirections;
+			renderNewDirections();
+
+			state.readNewPeriod = periodFields(el("newPeriod"), null);
+			el("newStatus").textContent = "";
+		}).catch(function (error) { alert(error.message); go(""); });
+	}
+
+	function renderNewDirections() {
+		var route = state.routes[parseInt(el("newRoute").value, 10)];
+		var select = el("newDirection");
+		select.innerHTML = "";
+		(route ? route.directions : []).forEach(function (direction) {
+			var option = document.createElement("option");
+			option.value = String(direction.directionId);
+			option.textContent = towardOf(direction);
+			select.appendChild(option);
+		});
+	}
+
+	/**
+	 * Crée la modification, puis ouvre sa déviation. L'adresse de création est REMPLACÉE : le retour du
+	 * navigateur ramène à la liste, et non à un formulaire qui en créerait une seconde.
+	 */
+	function createModification() {
+		var route = state.routes[parseInt(el("newRoute").value, 10)];
+		if (!route) return;
+
+		var status = el("newStatus");
+		status.textContent = "Création…";
+		status.style.color = "var(--muted)";
+
+		var body = state.readNewPeriod();
+		body.routeId = route.routeId;
+		body.directionId = parseInt(el("newDirection").value, 10);
+
+		request(API + "/api/modifications", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body)
+		}).then(function (created) {
+			window.location.replace("#/detour/" + encodeURIComponent(created.key));
+		}).catch(function (error) {
+			status.textContent = error.message;
+			status.style.color = "var(--danger)";
 		});
 	}
 
@@ -882,6 +1031,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 		renderSummary();
 		renderScope();
+		renderPublication();
 		// La carte est refaite à chaque adoption, et pas seulement à l'ouverture : un périmètre
 		// ressaisi change les arrêts marqués supprimés, qu'elle dessine en rouge.
 		setupMap();
@@ -1046,8 +1196,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 		if (state.scopeSelection === null) {
 			var names = detail.removedStopIds.map(stopNameOf);
-			summary.innerHTML = (detail.manualScope
-				? '<span class="badge warn">saisi à la main</span> '
+			// Sans info trafic, il n'y a pas d'analyse : le périmètre est toujours saisi, et le dire
+			// n'apprendrait rien.
+			summary.innerHTML = (detail.standalone ? ""
+				: detail.manualScope ? '<span class="badge warn">saisi à la main</span> '
 				: '<span class="badge ok">analyse du texte</span> ')
 				+ (names.length === 0
 					? "Aucun arrêt supprimé dans ce sens : seul le chemin peut changer."
@@ -1062,7 +1214,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			};
 			actions.appendChild(edit);
 
-			if (detail.manualScope) {
+			if (detail.manualScope && !detail.standalone) {
 				var revert = document.createElement("button");
 				revert.className = "danger";
 				revert.textContent = "Rendre à l'analyse";
@@ -1072,9 +1224,12 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			return;
 		}
 
-		summary.innerHTML = "Cocher les arrêts que l'info trafic supprime dans ce sens. La liste "
-			+ "remplacera ce que l'analyse en dit — aucun arrêt coché veut dire que la ligne est "
-			+ "concernée sans perdre d'arrêt.";
+		summary.innerHTML = detail.standalone
+			? "Cocher les arrêts que la modification supprime dans ce sens — aucun arrêt coché veut dire "
+				+ "que seul le chemin change."
+			: "Cocher les arrêts que l'info trafic supprime dans ce sens. La liste "
+				+ "remplacera ce que l'analyse en dit — aucun arrêt coché veut dire que la ligne est "
+				+ "concernée sans perdre d'arrêt.";
 
 		var box = document.createElement("div");
 		box.className = "picker";
@@ -1138,12 +1293,81 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	function renderSummary() {
 		var detail = state.detail;
-		el("summary").innerHTML =
-			"<h2 style='display:flex;align-items:center;gap:8px'>" + lineChip(detail.line)
-				+ "<span>" + escapeHtml(detail.line + " " + towardOf(detail)) + "</span></h2>" +
-			"<p><strong>" + escapeHtml(detail.headerText) + "</strong></p>" +
-			"<div class='richtext'>" + detail.descriptionHtml + "</div>" +
-			"<p class='note'>Info trafic " + detail.alertNumber + " · " + escapeHtml(describePeriods(detail.periods)) + "</p>";
+		var heading = "<h2 style='display:flex;align-items:center;gap:8px'>" + lineChip(detail.line)
+			+ "<span>" + escapeHtml(detail.line + " " + towardOf(detail)) + "</span>" + stateBadge(detail) + "</h2>";
+
+		if (!detail.standalone) {
+			el("summary").innerHTML = heading +
+				"<p><strong>" + escapeHtml(detail.headerText) + "</strong></p>" +
+				"<div class='richtext'>" + detail.descriptionHtml + "</div>" +
+				"<p class='note'>Info trafic " + detail.alertNumber + " · " + escapeHtml(describePeriods(detail.periods)) + "</p>";
+			state.readPeriod = null;
+			return;
+		}
+
+		// Sans info trafic, c'est ici que vivent l'intitulé et la période : ils se reprennent sur place.
+		el("summary").innerHTML = heading +
+			"<p>" + perturbationRef(detail) + "<strong>" + escapeHtml(detail.headerText) + "</strong></p>" +
+			"<h2>Période d'application</h2><div class='form' id='periodEditor'></div>" +
+			"<div class='row'><button id='savePeriod'>Enregistrer la période</button></div>";
+
+		state.readPeriod = periodFields(el("periodEditor"), detail.period);
+		el("savePeriod").onclick = savePeriod;
+	}
+
+	/**
+	 * La période s'enregistre à part, comme le périmètre. Elle ne touche pas aux tronçons : on n'en
+	 * reprend que ce qu'elle change — l'intitulé, les dates, l'état —, et ce qui est en cours de
+	 * saisie sur la carte reste où il est.
+	 */
+	function savePeriod() {
+		setStatus("Enregistrement de la période…");
+		request(API + "/api/modifications/" + encodeURIComponent(state.detail.alertNumber), {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(state.readPeriod())
+		}).then(function (detail) {
+			adoptState(detail);
+			renderSummary();
+			setStatus("Période enregistrée.", "ok");
+		}).catch(function (error) { setStatus(error.message, "error"); });
+	}
+
+	/** Reprend du détail rendu ce qui ne tient pas aux tronçons : la période, l'intitulé, l'état. */
+	function adoptState(detail) {
+		["headerText", "period", "periods", "active", "ended", "disabled"].forEach(function (name) {
+			state.detail[name] = detail[name];
+		});
+	}
+
+	/**
+	 * La désactivation, et ce qu'elle fait. Elle vaut pour toute modification : désactivée, rien ne
+	 * sort — ni la modification, ni les arrêts que son périmètre supprime.
+	 */
+	function renderPublication() {
+		var detail = state.detail;
+		el("toggleDisabled").textContent = detail.disabled ? "Réactiver" : "Désactiver";
+		el("remove").textContent = detail.standalone ? "Supprimer la modification" : "Supprimer la déclaration";
+
+		var note = el("disabledNote");
+		note.textContent = detail.disabled
+			? "Désactivée : rien n'est publié, ni la modification ni ses arrêts supprimés."
+			: "";
+		note.style.color = "var(--warn)";
+	}
+
+	function toggleDisabled() {
+		var disabled = !state.detail.disabled;
+		request(API + "/api/detours/" + encodeURIComponent(state.detail.key) + "/disabled", {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ disabled: disabled })
+		}).then(function (detail) {
+			adoptState(detail);
+			renderSummary();
+			renderPublication();
+			setStatus(disabled ? "Désactivée." : "Réactivée.", "ok");
+		}).catch(function (error) { setStatus(error.message, "error"); });
 	}
 
 	/** Tous les arrêts de la ligne/sens, dédoublonnés, dans l'ordre du premier itinéraire qui les voit. */
@@ -2032,6 +2256,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			state.segments = detail.segments.map(adoptSegment);
 			state.active = Math.min(state.active, state.segments.length - 1);
 			renderSegment();
+			renderPublication();
 
 			// Le compte rendu porte sur le premier tronçon qui coince : c'est celui-là qu'il faut reprendre,
 			// et le nommer évite de les passer tous en revue.
@@ -2057,7 +2282,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	}
 
 	function remove() {
-		if (!confirm("Effacer cette déclaration ?")) return;
+		if (!confirm(state.detail.standalone
+			? "Supprimer cette modification, sa période et son périmètre ?"
+			: "Effacer cette déclaration ?")) return;
 		request(API + "/api/detours/" + encodeURIComponent(state.detail.key), { method: "DELETE" })
 			.then(backToList)
 			.catch(function (error) { setStatus(error.message, "error"); });
@@ -2093,7 +2320,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		renderSegments();
 	};
 	el("save").onclick = save;
+	el("toggleDisabled").onclick = toggleDisabled;
 	el("remove").onclick = remove;
+	el("create").onclick = createModification;
 
 	document.addEventListener("keydown", function (event) {
 		if ((event.ctrlKey || event.metaKey) && event.key === "z" && state.detail) {

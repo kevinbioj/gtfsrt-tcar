@@ -46,10 +46,18 @@ export type SkipIndex = Map<string, SkipBucket[]>;
 export type AlertScope = {
 	/** Clé stable `<numéro d'info trafic>:<routeId>:<directionId>`. */
 	key: string;
-	/** L'identifiant d'entité du flux amont, tel quel : c'est lui que porte `serviceAlertId`. */
-	alertId: string;
-	/** Le numéro d'info trafic (cf. {@link alertNumber}), qui sert de clé aux déclarations. */
+	/**
+	 * L'identifiant d'entité du flux amont, tel quel : c'est lui que porte `serviceAlertId`. `null`
+	 * pour une modification déclarée sans info trafic — il n'y a alors rien à citer.
+	 */
+	alertId: string | null;
+	/**
+	 * Le numéro d'info trafic (cf. {@link alertNumber}), qui sert de clé aux déclarations — ou celui
+	 * d'une modification sans info trafic, « M<uid> », qui en tient lieu.
+	 */
 	alertNumber: string;
+	/** Vrai pour une modification déclarée sans info trafic : sa période et son texte sont saisis. */
+	standalone: boolean;
 	routeId: string;
 	directionId: number;
 	headerText: string;
@@ -57,6 +65,11 @@ export type AlertScope = {
 	periods: AlertPeriod[];
 	/** Vrai lorsque l'une des périodes couvre l'instant du relevé. */
 	active: boolean;
+	/**
+	 * Vrai lorsque la modification a été désactivée à la main. Elle est alors tenue pour hors période :
+	 * rien de ce qu'elle déclare ne sort, ni ses arrêts supprimés ni sa déviation.
+	 */
+	disabled: boolean;
 	/** Les quais supprimés pour ce sens, une fois retranchés ceux que {@link SERVED_STOPS} rétablit. */
 	removedStopIds: Set<string>;
 };
@@ -73,7 +86,7 @@ export type AlertScopeIndex = Map<string, AlertScope>;
  */
 export type AnalyzedAlert = {
 	/** L'identifiant d'entité du flux amont : c'est lui que porte `serviceAlertId`. */
-	alertId: string;
+	alertId: string | null;
 	alertNumber: string;
 	headerText: string;
 	descriptionText: string;
@@ -97,6 +110,33 @@ export type ScopeOverrideIndex = ReadonlyMap<
 	{ alertNumber: string; routeId: string; directionId: number; removedStopIds: string[] }
 >;
 
+/**
+ * Les modifications déclarées sans info trafic, par numéro. Même forme minimale que
+ * {@link ScopeOverrideIndex}, pour la même raison.
+ */
+export type StandaloneIndex = ReadonlyMap<string, StandaloneEntry>;
+
+type StandaloneEntry = {
+	alertNumber: string;
+	routeId: string;
+	directionId: number;
+	label: string | null;
+	period: { start: string; end: string | null };
+};
+
+/**
+ * Tout ce qui a été saisi à la main et que l'indexation doit relire : les périmètres, les
+ * modifications sans info trafic, et les modifications désactivées (par {@link detourKey}).
+ */
+export type HandwrittenIndex = {
+	overrides: ScopeOverrideIndex;
+	standalone: StandaloneIndex;
+	disabled: ReadonlySet<string>;
+};
+
+/** L'intitulé d'une modification sans info trafic à qui l'on n'en a pas donné. */
+const STANDALONE_HEADER = "Modification sans info trafic";
+
 /** Numéro d'info trafic → routeId → quais que cette alerte ne doit PAS faire sauter. */
 type ServedStopIndex = Map<string, Map<string, Set<string>>>;
 
@@ -108,15 +148,16 @@ let currentInterval: NodeJS.Timeout | undefined;
 /**
  * Les infos trafic, analysées puis indexées.
  *
- * `overrides` rend les périmètres saisis à la main, et il est relu à CHAQUE indexation plutôt que
- * retenu : une saisie doit valoir tout de suite, et `reindex` est là pour ça — l'indexation ne
- * touche pas au réseau, elle se rejoue en quelques millisecondes.
+ * `handwritten` rend ce qui a été saisi à la main — périmètres, modifications sans info trafic,
+ * désactivations —, et il est relu à CHAQUE indexation plutôt que retenu : une saisie doit valoir
+ * tout de suite, et `reindex` est là pour ça — l'indexation ne touche pas au réseau, elle se rejoue
+ * en quelques millisecondes.
  */
 export function useServiceAlerts(
 	url: string,
 	pollInterval: number,
 	gtfs: { data: StaticGtfs },
-	overrides: () => ScopeOverrideIndex,
+	handwritten: () => HandwrittenIndex,
 ) {
 	const state: AlertsState = { headerTimestamp: null };
 	const resource = {
@@ -127,11 +168,12 @@ export function useServiceAlerts(
 		alerts: [] as AnalyzedAlert[],
 		importedAt: Temporal.Now.instant(),
 		/**
-		 * Rebâtit les index depuis la dernière analyse. À appeler dès qu'un périmètre est saisi ou
-		 * retiré : le relevé suivant ferait tout autant, mais vingt minutes plus tard.
+		 * Rebâtit les index depuis la dernière analyse. À appeler dès qu'une saisie change — périmètre,
+		 * modification sans info trafic, désactivation : le relevé suivant ferait tout autant, mais vingt
+		 * minutes plus tard.
 		 */
 		reindex() {
-			const indexed = indexAlerts(resource.alerts, overrides(), Temporal.Now.instant());
+			const indexed = indexAlerts(resource.alerts, handwritten(), Temporal.Now.instant());
 			resource.skipIndex = indexed.skipIndex;
 			resource.alertScopes = indexed.alertScopes;
 		},
@@ -159,6 +201,9 @@ export function useServiceAlerts(
 		clearInterval(currentInterval);
 	}
 
+	// Une première indexation, sans attendre l'analyse : les modifications déclarées sans info trafic
+	// ne dépendent pas du flux, et n'ont pas à disparaître de l'interface tant qu'il n'a pas répondu.
+	resource.reindex();
 	void runPoll();
 	currentInterval = setInterval(runPoll, pollInterval);
 
@@ -401,12 +446,21 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
  * Un périmètre saisi REMPLACE l'analyse pour son couple ligne/sens : ses arrêts sont les arrêts
  * supprimés, fût-ce aucun. La règle vaut dans les deux sens du terme — l'analyse est écartée là où
  * elle voyait quelque chose, et la saisie crée le périmètre là où elle ne voyait rien.
+ *
+ * Une modification déclarée sans info trafic entre ici comme une info trafic de plus, qui citerait
+ * sa ligne et son sens sans y supprimer d'arrêt : ses arrêts supprimés, s'il y en a, sont un
+ * périmètre saisi comme un autre. Tout ce qui suit l'ignore — c'est une perturbation, rien de plus.
+ *
+ * Une modification désactivée garde son périmètre — l'interface doit pouvoir la réactiver —, mais
+ * ne verse plus rien au `skipIndex` : c'est la règle, qu'une info trafic la porte ou non.
  */
 export function indexAlerts(
-	alerts: readonly AnalyzedAlert[],
-	overrides: ScopeOverrideIndex,
+	analyzed: readonly AnalyzedAlert[],
+	handwritten: HandwrittenIndex,
 	now: Temporal.Instant,
 ): { skipIndex: SkipIndex; alertScopes: AlertScopeIndex } {
+	const { overrides, disabled } = handwritten;
+	const alerts = [...analyzed, ...handwritten.standalone.values().map(asAlert)];
 	const skipIndex: SkipIndex = new Map();
 	const alertScopes: AlertScopeIndex = new Map();
 	let removedCount = 0;
@@ -421,12 +475,20 @@ export function indexAlerts(
 			const free = directions.filter((direction) => !overrides.has(detourKey(alert.alertNumber, routeId, direction)));
 			if (free.length === 0) continue;
 
-			if (active) {
-				mergeSkip(skipIndex, routeId, free.length === directions.length ? directionId : (free[0] as number), stopIds);
+			// Même dédoublement pour la désactivation : un sens désactivé cesse de supprimer ses arrêts,
+			// l'autre continue.
+			const publishing = free.filter((direction) => !disabled.has(detourKey(alert.alertNumber, routeId, direction)));
+			if (active && publishing.length > 0 && stopIds.size > 0) {
+				mergeSkip(
+					skipIndex,
+					routeId,
+					publishing.length === directions.length ? directionId : (publishing[0] as number),
+					stopIds,
+				);
 				removedCount += 1;
 			}
 
-			for (const direction of free) mergeScope(alertScopes, alert, routeId, direction, stopIds, active);
+			for (const direction of free) mergeScope(alertScopes, alert, routeId, direction, stopIds, active, disabled);
 		}
 	}
 
@@ -443,19 +505,36 @@ export function indexAlerts(
 
 		const active = isActive(alert.periods, now);
 		const stopIds = new Set(override.removedStopIds);
-		mergeScope(alertScopes, alert, override.routeId, override.directionId, stopIds, active);
+		mergeScope(alertScopes, alert, override.routeId, override.directionId, stopIds, active, disabled);
 
-		if (active && stopIds.size > 0) {
+		const key = detourKey(override.alertNumber, override.routeId, override.directionId);
+		if (active && !disabled.has(key) && stopIds.size > 0) {
 			mergeSkip(skipIndex, override.routeId, override.directionId, stopIds);
 			removedCount += 1;
 		}
 	}
 
 	console.log(
-		`✓ ${skipIndex.size} routes with skipped stops (${removedCount} entries, ${alertScopes.size} detour scopes, ${overrides.size} hand-written).`,
+		`✓ ${skipIndex.size} routes with skipped stops (${removedCount} entries, ${alertScopes.size} detour scopes, ${overrides.size} hand-written, ${handwritten.standalone.size} without alert, ${disabled.size} disabled).`,
 	);
 
 	return { skipIndex, alertScopes };
+}
+
+/**
+ * Une modification sans info trafic, sous la forme d'une info trafic analysée : sa période, son
+ * intitulé, et sa ligne et son sens cités sans arrêt supprimé — de quoi ouvrir son périmètre.
+ */
+function asAlert(modification: StandaloneEntry): AnalyzedAlert {
+	return {
+		alertId: null,
+		alertNumber: modification.alertNumber,
+		headerText: modification.label ?? STANDALONE_HEADER,
+		descriptionText: "",
+		periods: [{ start: modification.period.start, end: modification.period.end, dailyWindow: null }],
+		routeIds: [modification.routeId],
+		contributions: [{ routeId: modification.routeId, directionId: modification.directionId, stopIds: new Set() }],
+	};
 }
 
 /**
@@ -464,6 +543,20 @@ export function indexAlerts(
  */
 export function isActive(periods: AlertPeriod[], now: Temporal.Instant): boolean {
 	return periods.length === 0 || periods.some((period) => isPeriodActive(period, now));
+}
+
+/**
+ * Toutes les périodes sont-elles closes ? Une période sans fin ne l'est jamais, et aucune période du
+ * tout veut dire « sans borne » : ce n'est pas fini non plus.
+ */
+export function hasEnded(periods: AlertPeriod[], now: Temporal.Instant): boolean {
+	return (
+		periods.length > 0 &&
+		periods.every((period) => {
+			const endExclusive = period.end ? periodEnd(period.end) : null;
+			return endExclusive !== null && Temporal.Instant.compare(now, endExclusive) >= 0;
+		})
+	);
 }
 
 /**
@@ -760,6 +853,7 @@ function mergeScope(
 	directionId: number,
 	stopIds: ReadonlySet<string>,
 	active: boolean,
+	disabled: ReadonlySet<string>,
 ) {
 	// La même clé que celle des déclarations, et empruntée à elles : c'est le seul lien entre les deux
 	// modules, et le réécrire ici serait la meilleure façon de le laisser diverger un jour.
@@ -771,12 +865,14 @@ function mergeScope(
 			key,
 			alertId: alert.alertId,
 			alertNumber: alert.alertNumber,
+			standalone: alert.alertId === null,
 			routeId,
 			directionId,
 			headerText: alert.headerText,
 			descriptionText: alert.descriptionText,
 			periods: alert.periods,
 			active,
+			disabled: disabled.has(key),
 			removedStopIds: new Set(),
 		};
 		scopes.set(key, scope);

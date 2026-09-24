@@ -31,7 +31,8 @@ type Candidate = {
 	 * dessert toujours : le tronçon ne publie pas de `Modification`, seulement son tracé.
 	 */
 	removes: boolean;
-	alertId: string;
+	/** `null` pour une modification déclarée sans info trafic : il n'y a pas d'alerte à citer. */
+	alertId: string | null;
 	routeId: string;
 	directionId: number;
 	startStopId: string;
@@ -70,7 +71,7 @@ type Modification = {
 	propagatedDelay: number;
 	stops: { stopId: string; travelTime: number }[];
 	paths: Coordinates[][];
-	alertId: string;
+	alertId: string | null;
 	lastModifiedTime: number;
 };
 
@@ -208,7 +209,8 @@ export function buildDetourEntities(
 							stopId: stop.stopId,
 							travelTimeToStop: stop.travelTime,
 						})),
-						serviceAlertId: modification.alertId,
+						// Facultatif dans la spécification : une modification sans info trafic n'en cite aucune.
+						serviceAlertId: modification.alertId ?? undefined,
 						lastModifiedTime: modification.lastModifiedTime,
 					})),
 				},
@@ -313,7 +315,9 @@ function collectCandidates(
 			problems.add(`${key} — aucune info trafic ne porte plus cette déviation.`);
 			continue;
 		}
-		if (!scope.active) continue;
+		// Désactivée, la modification est tenue pour hors période : c'est un choix, pas un problème, et
+		// le journal n'a rien à en dire.
+		if (!scope.active || scope.disabled) continue;
 
 		record.segments.forEach((segment, rank) => {
 			const label = `${record.alertNumber}#${rank}`;
