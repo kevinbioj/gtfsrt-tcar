@@ -11,8 +11,8 @@ import type { Coordinates } from "../utils/geometry.js";
 import { networkOf } from "../utils/network.js";
 import { removesStops } from "./bounds.js";
 import type { ResolvedModification } from "./modifications.js";
-import { spliceShape } from "./splice-shape.js";
-import { type ProvisionalStop, provisionalStopUid } from "./store.js";
+import { type DrawnPath, spliceShape } from "./splice-shape.js";
+import { type DetourTerminus, type ProvisionalStop, provisionalStopUid } from "./store.js";
 
 /**
  * Les journées de service qu'une déviation couvre. La veille en fait partie pour la même raison que
@@ -44,6 +44,8 @@ type Candidate = {
 	propagatedDelay: number;
 	stops: { stopId: string; travelTime: number }[];
 	path: Coordinates[];
+	/** Le bout de la course que le tracé remplace, s'il le déclare (cf. `DetourSegment.terminus`). */
+	terminus: DetourTerminus | null;
 	updatedAt: number;
 };
 
@@ -76,7 +78,7 @@ type Modification = {
 	endIndex: number;
 	propagatedDelay: number;
 	stops: { stopId: string; travelTime: number }[];
-	paths: Coordinates[][];
+	paths: DrawnPath[];
 	alertId: string | null;
 	lastModifiedTime: number;
 };
@@ -434,6 +436,7 @@ function collectCandidates(
 				propagatedDelay: removes ? segment.propagatedDelay : 0,
 				stops: removes ? segment.stops.map((stop) => ({ stopId: stop.stopId, travelTime: stop.travelTime })) : [],
 				path: segment.path,
+				terminus: segment.terminus,
 				updatedAt: record.updatedAt,
 			};
 			if (list === undefined) candidates.set(routeDirection, [candidate]);
@@ -519,7 +522,7 @@ function mergeOverlaps(
 				endIndex,
 				propagatedDelay: candidate.propagatedDelay,
 				stops: [...candidate.stops],
-				paths: candidate.path.length >= 2 ? [candidate.path] : [],
+				paths: candidate.path.length >= 2 ? [drawnPath(candidate)] : [],
 				alertId: candidate.alertId,
 				lastModifiedTime: candidate.updatedAt,
 			});
@@ -550,7 +553,7 @@ function mergeOverlaps(
 		}
 		previous.propagatedDelay += candidate.propagatedDelay;
 		previous.lastModifiedTime = Math.max(previous.lastModifiedTime, candidate.updatedAt);
-		if (candidate.path.length >= 2) previous.paths.push(candidate.path);
+		if (candidate.path.length >= 2) previous.paths.push(drawnPath(candidate));
 
 		for (const stop of candidate.stops) {
 			if (previous.stops.some((existing) => existing.stopId === stop.stopId)) continue;
@@ -567,6 +570,11 @@ function mergeOverlaps(
 	}
 
 	return merged;
+}
+
+/** Le tracé d'un tronçon, tel que la recouture le prend. */
+function drawnPath(candidate: Candidate): DrawnPath {
+	return { points: candidate.path, terminus: candidate.terminus };
 }
 
 /**
@@ -642,7 +650,7 @@ function buildShape(
 ): string | null {
 	const paths = [
 		...group.modifications.flatMap((modification) => modification.paths),
-		...group.reroutes.map((entry) => entry.candidate.path),
+		...group.reroutes.map((entry) => drawnPath(entry.candidate)),
 	];
 	if (paths.length === 0) return null;
 
@@ -670,7 +678,7 @@ function buildShape(
 	}
 	if (outcome.unreachable > 0) {
 		problems.add(
-			`${parts} — ${group.shapeId} : ${outcome.unreachable} tracé(s) laissé(s) de côté, la course ne les atteint pas dans cet ordre.`,
+			`${parts} — ${group.shapeId} : ${outcome.unreachable} tracé(s) laissé(s) de côté, la course ne les atteint pas dans cet ordre, ou deux ouvrent la course.`,
 		);
 	}
 

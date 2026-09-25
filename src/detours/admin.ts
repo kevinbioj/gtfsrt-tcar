@@ -763,6 +763,7 @@ function detail(modification: ResolvedModification, deps: AdminDependencies) {
 		startStopId: bounds.startStopId,
 		endStopId: bounds.endStopId,
 		propagatedDelay: 0,
+		terminus: null,
 		stops: [],
 		waypoints: [],
 		path: [],
@@ -804,6 +805,7 @@ function detail(modification: ResolvedModification, deps: AdminDependencies) {
 			startStopId: segment.startStopId,
 			endStopId: segment.endStopId,
 			propagatedDelay: segment.propagatedDelay,
+			terminus: segment.terminus,
 			stops: segment.stops.map((stop) => ({ ...stop, ...describeStop(stop.stopId, deps) })),
 			waypoints: segment.waypoints,
 			path: segment.path,
@@ -1172,11 +1174,21 @@ function parseSegment(
 		return { message: `${label} : tracé et points de passage doivent être tous deux vides, ou tous deux remplis.` };
 	}
 
+	// Seul un tracé ouvre ou ferme la course : c'est lui qui en remplace le bout.
+	const terminus = payload.terminus ?? null;
+	if (terminus !== null && terminus !== "start" && terminus !== "end") {
+		return { message: `${label} : bout de course attendu, « start », « end » ou rien.` };
+	}
+	if (terminus !== null && path.length === 0) {
+		return { message: `${label} : seul un tracé peut ouvrir ou fermer la course.` };
+	}
+
 	return {
 		segment: {
 			startStopId: startStopId as string | null,
 			endStopId: endStopId as string | null,
 			propagatedDelay: propagatedDelay as number,
+			terminus,
 			stops,
 			waypoints,
 			path,

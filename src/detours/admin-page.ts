@@ -448,6 +448,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 								rue à sens unique si c'est le plus court.</li>
 							<li>La course ne reprend sa ligne que si le tracé l'y ramène. Le finir à l'écart, c'est
 								l'arrêter là : terminus provisoire, ligne coupée.</li>
+							<li>« Nouveau début » et « Nouvelle fin » ne devinent plus rien : rien de la ligne ne
+								précède, ou ne suit, le tracé — même s'il la touche.</li>
 						</ul>
 					</details>
 
@@ -459,6 +461,13 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 						</div>
 					</div>
 					<p class="note" id="penNote"></p>
+					<div class="field"><label>Course</label>
+						<div class="segmented">
+							<button id="terminusNone">Raccord auto</button>
+							<button id="terminusStart">Nouveau début</button>
+							<button id="terminusEnd">Nouvelle fin</button>
+						</div>
+					</div>
 
 					<div class="actions divided">
 						<button id="undo">Annuler le dernier point</button>
@@ -1631,6 +1640,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var adopted = {
 			startStopId: segment.startStopId, endStopId: segment.endStopId,
 			propagatedDelay: segment.propagatedDelay,
+			terminus: segment.terminus || null,
 			stops: segment.stops.map(adoptStop),
 			path: segment.path.map(asPair),
 			waypoints: [], legs: [],
@@ -1752,7 +1762,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	function emptySegment() {
 		return {
-			startStopId: null, endStopId: null, propagatedDelay: 0, stops: [],
+			startStopId: null, endStopId: null, propagatedDelay: 0, terminus: null, stops: [],
 			waypoints: [], legs: [], path: [], tripsByPattern: {}
 		};
 	}
@@ -1878,6 +1888,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	/** Tout ce qui dépend du tronçon actif, d'un bloc : on ne repeint jamais l'un sans les autres. */
 	function renderSegment() {
 		renderPen();
+		renderTerminus();
 		renderSegments();
 		renderPatterns();
 		styleShapes();
@@ -3003,6 +3014,20 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			: "Graphe routier absent : le construire avec pnpm build:graph pour accrocher aux rues.";
 	}
 
+	/** Le bout de course que le tracé remplace : aucun, son début, ou sa fin. */
+	function renderTerminus() {
+		var terminus = seg().terminus;
+		el("terminusNone").className = terminus === null ? "active" : "";
+		el("terminusStart").className = terminus === "start" ? "active" : "";
+		el("terminusEnd").className = terminus === "end" ? "active" : "";
+	}
+
+	function setTerminus(terminus) {
+		seg().terminus = terminus;
+		renderTerminus();
+		renderPath();
+	}
+
 	function renderPath() {
 		rebuildPath();
 
@@ -3098,6 +3123,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		text += preview.rejoined
 			? "il revient sur l'itinéraire."
 			: "il s'achève au dernier tracé, en terminus provisoire.";
+		if (preview.opened) text += " Il part du début d'un tracé, en terminus provisoire.";
 		if (preview.unreachable > 0) text += " " + preview.unreachable + " tracé(s) hors d'atteinte.";
 		if (preview.offset > MAX_JUNCTION_METRES) {
 			text += " Départ à " + Math.round(preview.offset) + " m de la ligne grise : la coupe se fera là.";
@@ -3179,7 +3205,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 * Le trajet tel qu'il sera publié : l'itinéraire d'origine jusqu'au premier point de divergence, le
 	 * dessin, l'itinéraire jusqu'à la divergence suivante, et ainsi de suite. Un tracé qui ne revient
 	 * pas termine la course : c'est un terminus provisoire, et le trajet s'arrête là — les tracés qui
-	 * suivaient ne sont alors pas atteints.
+	 * suivaient ne sont alors pas atteints. Un tracé déclaré « nouveau début » ou « nouvelle fin » ne
+	 * se raccorde pas de ce côté-là, quoi qu'il touche.
 	 *
 	 * TOUS les tronçons y entrent, dans l'ordre où la course les rencontre et non dans celui où ils ont
 	 * été saisis : c'est un seul trajet qui sera publié pour la course.
@@ -3205,21 +3232,26 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			if (pattern !== null && state.patterns.indexOf(pattern.patternId) === -1) return;
 			var from = nearestIndex(shape.points, segment.path[0]);
 			var to = nearestIndex(shape.points, segment.path[segment.path.length - 1]);
-			// Reprend-on l'itinéraire ? Seulement si le tracé y ramène : cf. spliceShape, côté serveur.
+			// Un tracé qui ouvre la course passe avant tous les autres, et rien ne le précède. Reprend-on
+			// l'itinéraire ? Seulement si le tracé y ramène sans fermer la course : cf. spliceShape.
+			var opens = segment.terminus === "start";
 			drawn.push({
-				path: segment.path, from: from.index, to: to.index, offset: from.offset,
-				rejoins: to.offset <= REJOIN_METRES && to.index > from.index
+				path: segment.path, from: opens ? -1 : from.index, to: to.index, offset: opens ? 0 : from.offset,
+				rejoins: segment.terminus !== "end" && to.offset <= REJOIN_METRES && (opens || to.index > from.index)
 			});
 		});
 		if (drawn.length === 0) return null;
 		drawn.sort(function (a, b) { return a.from - b.from; });
 
-		var preview = [], cursor = -1, open = true, unreachable = 0, offset = 0;
+		var preview = [], cursor = -1, open = true, unreachable = 0, offset = 0, opened = false;
 		drawn.forEach(function (item) {
 			// Un tracé qui diverge avant le point où le précédent a rejoint l'itinéraire ferait remonter la
-			// course : on le laisse de côté, comme le serveur.
+			// course, et un second tracé qui l'ouvre n'est jamais atteint : on les laisse de côté, comme le
+			// serveur.
 			if (!open || item.from < cursor) { unreachable += 1; return; }
-			preview = preview.concat(shape.points.slice(Math.max(cursor, 0), item.from)).concat(item.path);
+			if (item.from === -1) opened = true;
+			else preview = preview.concat(shape.points.slice(Math.max(cursor, 0), item.from));
+			preview = preview.concat(item.path);
 			offset = Math.max(offset, item.offset);
 			if (item.rejoins) cursor = item.to + 1;
 			else open = false;
@@ -3229,7 +3261,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		state.previewLine = L.polyline(preview, { color: "#1f6feb", weight: 3, opacity: .9, dashArray: "6 4" })
 			.addTo(state.base);
 
-		return { offset: offset, rejoined: open, unreachable: unreachable, pattern: pattern };
+		return { offset: offset, rejoined: open, opened: opened, unreachable: unreachable, pattern: pattern };
 	}
 
 	/** Le sommet le plus proche d'un point, et son écart approché en mètres. */
@@ -3280,6 +3312,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 					startStopId: segment.startStopId,
 					endStopId: segment.endStopId,
 					propagatedDelay: segment.propagatedDelay,
+					// Sans tracé, il n'y a pas de bout de course à remplacer.
+					terminus: segment.path.length >= 2 ? segment.terminus : null,
 					stops: segment.stops.map(function (stop) {
 						return { stopId: stop.stopId, travelTime: stop.travelTime };
 					}),
@@ -3352,6 +3386,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	el("draw").onclick = function () { setMode(state.mode === "draw" ? "idle" : "draw"); };
 	el("penRoute").onclick = function () { state.pen = "route"; renderPen(); };
 	el("penFree").onclick = function () { state.pen = "free"; renderPen(); };
+	el("terminusNone").onclick = function () { setTerminus(null); };
+	el("terminusStart").onclick = function () { setTerminus("start"); };
+	el("terminusEnd").onclick = function () { setTerminus("end"); };
 	el("undo").onclick = function () { removeWaypoint(seg().waypoints.length - 1); };
 	el("clearPath").onclick = function () {
 		seg().waypoints = [];

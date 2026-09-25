@@ -384,10 +384,12 @@ export const MAX_DETOUR_JUNCTION_OFFSET = 0.2;
  * Écart, en kilomètres, en deçà duquel on considère qu'un tracé de déviation a REJOINT l'itinéraire
  * d'origine — et donc que la course le reprend au-delà.
  *
- * C'est la seule chose qui décide de la reprise : un tracé qui s'arrête loin de l'itinéraire s'y
- * arrête pour de bon, et le trajet publié s'achève là. Rien n'est relié automatiquement. Un terminus
- * provisoire, une ligne coupée en deux, un demi-tour se dessinent ainsi sans rien déclarer de plus —
- * il suffit de ne pas ramener le tracé sur la ligne.
+ * C'est ce qui décide de la reprise, à moins que le tronçon ne déclare le tracé « nouvelle fin » de
+ * la course (cf. `DetourSegment.terminus`) : un tracé qui s'arrête loin de l'itinéraire s'y arrête
+ * pour de bon, et le trajet publié s'achève là. Un terminus provisoire, une ligne coupée en deux se
+ * dessinent ainsi sans rien déclarer — il suffit de ne pas ramener le tracé sur la ligne. La
+ * déclaration ne sert qu'au cas que la géométrie ne peut pas trancher : une course qui s'arrête SUR
+ * la ligne.
  *
  * Serré à dessein, et bien plus que {@link MAX_DETOUR_JUNCTION_OFFSET} qui ne fait, lui, que
  * SIGNALER un départ éloigné : ici on décide, et se tromper rallonge le trajet publié de tout ce qui

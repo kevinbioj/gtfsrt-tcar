@@ -167,6 +167,11 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 	UPDATE modification_cancelled_departures
 		SET stop_id = 'PROV:' || substr(stop_id, 10) WHERE substr(stop_id, 1, 9) = 'TCAR:DEV:';
 	`,
+	// Un tronçon peut déclarer que son tracé ouvre ou ferme la course (cf. DetourSegment.terminus).
+	// NULL : le raccord se lit de la géométrie, comme avant.
+	`
+	ALTER TABLE segments ADD COLUMN terminus TEXT CHECK (terminus IN ('start', 'end'));
+	`,
 ];
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
@@ -218,6 +223,13 @@ export type DetourSegment = {
 	endStopId: string | null;
 	/** Secondes à répercuter sur tous les horaires suivant la modification. */
 	propagatedDelay: number;
+	/**
+	 * Le bout de la course que le tracé remplace, s'il en remplace un : « start », la course part de
+	 * son premier point ; « end », elle s'achève à son dernier. Rien de l'itinéraire ne s'y raccorde
+	 * alors, quand bien même le tracé y toucherait. `null` : le raccord se lit de la géométrie (cf.
+	 * `spliceShape`).
+	 */
+	terminus: DetourTerminus | null;
 	stops: DetourStop[];
 	/**
 	 * Les points cliqués, et pour chacun le mode de la jambe qui le suit. C'est le PLAN DE MONTAGE du
@@ -234,6 +246,9 @@ export type DetourSegment = {
 
 /** Un point de passage, et le mode de la jambe qui le SUIT. La dernière ne suit rien. */
 export type DetourWaypoint = Coordinates & { mode: DetourLegMode };
+
+/** Le bout de la course qu'un tracé remplace : son début, ou sa fin. */
+export type DetourTerminus = "start" | "end";
 
 /** Accrochée aux rues d'OpenStreetMap, ou tirée droit d'un point de passage au suivant. */
 export type DetourLegMode = "route" | "free";
@@ -406,6 +421,7 @@ export function useDetourStore(path: string) {
 				startStopId: row.start_stop_id,
 				endStopId: row.end_stop_id,
 				propagatedDelay: row.propagated_delay,
+				terminus: row.terminus === "start" || row.terminus === "end" ? row.terminus : null,
 				stops: [],
 				waypoints: [],
 				path: [],
@@ -489,7 +505,7 @@ export function useDetourStore(path: string) {
 	const writeSegments = (uid: number, segments: readonly DetourSegment[]) => {
 		db.prepare("DELETE FROM segments WHERE uid = ?").run(uid);
 		const insertSegment = db.prepare(
-			"INSERT INTO segments (uid, segment, start_stop_id, end_stop_id, propagated_delay) VALUES (?, ?, ?, ?, ?)",
+			"INSERT INTO segments (uid, segment, start_stop_id, end_stop_id, propagated_delay, terminus) VALUES (?, ?, ?, ?, ?, ?)",
 		);
 		const insertStop = db.prepare(
 			"INSERT INTO segment_stops (uid, segment, position, stop_id, travel_time) VALUES (?, ?, ?, ?, ?)",
@@ -502,7 +518,7 @@ export function useDetourStore(path: string) {
 		);
 
 		segments.forEach((segment, rank) => {
-			insertSegment.run(uid, rank, segment.startStopId, segment.endStopId, segment.propagatedDelay);
+			insertSegment.run(uid, rank, segment.startStopId, segment.endStopId, segment.propagatedDelay, segment.terminus);
 			segment.stops.forEach((stop, position) => {
 				insertStop.run(uid, rank, position, stop.stopId, stop.travelTime);
 			});
@@ -785,6 +801,7 @@ type SegmentRow = {
 	start_stop_id: string | null;
 	end_stop_id: string | null;
 	propagated_delay: number;
+	terminus: string | null;
 };
 
 type StopRow = { uid: number; segment: number; position: number; stop_id: string; travel_time: number };
