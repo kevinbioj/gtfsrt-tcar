@@ -307,6 +307,26 @@ export const RELAYED_NETWORKS: RelayedNetwork[] = [
 	},
 ];
 
+/**
+ * Cartouches de ligne de l'interface d'administration dont le nom n'est pas le bout de l'identifiant
+ * de la ligne. Les lignes lettrées de la TAE sont rangées sous des numéros ; ses lignes numérotées,
+ * comme celles de TCAR et de TNI, sous leur propre numéro.
+ *
+ * G et I ne figuraient pas dans la correspondance fournie : leurs numéros ont été lus sur les
+ * cartouches eux-mêmes, dont la lettre et la couleur sont celles du GTFS.
+ */
+export const LINE_CARTRIDGES = new Map([
+	["TAE:A", "111"],
+	["TAE:B", "112"],
+	["TAE:C", "113"],
+	["TAE:F", "115"],
+	["TAE:D1", "116"],
+	["TAE:D2", "117"],
+	["TAE:F9", "118"],
+	["TAE:G", "119"],
+	["TAE:I", "120"],
+]);
+
 export const SERVICE_ALERTS_URL = "https://hexatransit.fr/datasets/services_rt/astuce/service_alerts.pb";
 /**
  * Le GTFS de tout Astuce — TCAR, TAE et TNI —, et non plus celui de la seule TCAR : les modifications

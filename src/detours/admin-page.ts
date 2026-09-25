@@ -798,10 +798,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	/**
 	 * Le cartouche de la ligne, son nom commercial en clair derrière lui si l'image ne vient pas. Les
 	 * images portent le bout de l'identifiant (« 07 »), le texte le nom qu'on lit sur le bus (« F7 »).
-	 * Sans code — lignes hors TCAR, qui n'ont pas de cartouche —, le nom s'affiche d'emblée en clair.
 	 */
 	function lineChip(code, name) {
-		if (code === null) return "<span class='line plain'><span class='code'>" + escapeHtml(name) + "</span></span>";
 		return "<span class='line'><img alt='' onerror='" + PICTO_FALLBACK + "' src='"
 			+ LINE_CARTRIDGE + encodeURIComponent(code) + ".svg'>"
 			+ "<span class='code'>" + escapeHtml(name) + "</span></span>";

@@ -2,7 +2,7 @@ import { type Context, Hono } from "hono";
 import { basicAuth } from "hono/basic-auth";
 
 import type { AlertPeriod } from "../ai/analyze-alert.js";
-import { ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SMOOTHING_TOLERANCE, ROAD_SNAP_RADIUS } from "../config.js";
+import { LINE_CARTRIDGES, ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SMOOTHING_TOLERANCE, ROAD_SNAP_RADIUS } from "../config.js";
 import { serviceDay } from "../gtfs-rt/scheduled-trips.js";
 import { type AnalyzedAlert, hasEnded } from "../gtfs-rt/use-service-alerts.js";
 import { normalizeStopName, type RoutePattern, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
@@ -572,11 +572,12 @@ function lineName(gtfs: StaticGtfs, routeId: string): string {
 }
 
 /**
- * Le bout de l'identifiant de ligne (« TCAR:07 » → « 07 ») : c'est lui qui nomme les cartouches.
- * `null` hors TCAR, dont les cartouches ne sont pas publiés : la ligne s'affiche alors en clair.
+ * Le nom du cartouche de la ligne : le bout de son identifiant (« TCAR:07 » → « 07 », « TNI:530 » →
+ * « 530 »), sauf pour les lignes que {@link LINE_CARTRIDGES} renomme. Un cartouche qui n'existe pas
+ * laisse la page afficher la ligne en clair.
  */
-function lineCode(routeId: string): string | null {
-	return networkOf(routeId) === HOME_NETWORK ? (routeId.split(":").at(-1) ?? routeId) : null;
+function lineCode(routeId: string): string {
+	return LINE_CARTRIDGES.get(routeId) ?? routeId.split(":").at(-1) ?? routeId;
 }
 
 /** Le métro, puis les lignes T, puis les lignes F, puis tout le reste. */
