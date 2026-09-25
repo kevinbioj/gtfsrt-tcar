@@ -1,3 +1,5 @@
+import type { RelayedNetwork } from "./gtfs-rt/use-relayed-networks.js";
+
 /**
  * Lignes dont le temps réel de la source est authentique. Ailleurs, la source rebadge l'horaire
  * théorique en temps réel : ses véhicules ne sont jamais publiés — tout au plus rafraîchit-on la
@@ -271,6 +273,35 @@ export const SERVED_STOPS: ServedStop[] = [
 	{ alertId: "22467", routeId: "TCAR:15", stopIds: ["TCAR:MARTA1"] },
 	{ alertId: "315", routeId: "TCAR:15", stopIds: ["TCAR:MARTA4"] },
 	{ alertId: "22083", routeId: "TCAR:20", stopIds: ["TCAR:BEAU10", "TCAR:BEAU3"] },
+];
+
+/**
+ * Réseaux voisins dont le temps réel est relayé tel quel dans le feed, sous la même nomenclature que
+ * TCAR : `ET:<réseau>:<course>` pour les trip updates, `VM:<réseau>:<véhicule>` pour les positions,
+ * `<réseau>:<véhicule>` pour l'identifiant du véhicule. Courses, lignes et arrêts portent eux aussi
+ * le préfixe du réseau, ajouté quand la source l'omet.
+ *
+ * Aucune vérification ici : ni flux de contrôle, ni girouette, ni suivi des mouvements. Seul le relevé
+ * que la source elle-même a cessé de réhorodater est écarté (cf. {@link VEHICLE_STALENESS}).
+ *
+ *  - TAE passe par Cityway. Attention à l'orthographe : ses positions sont publiées sous
+ *    `vehicule-tc-tr`, là où TCAR les publie sous `vehicle-tc-tr` — l'autre chemin répond 204 ;
+ *  - TNI passe par Hanover, sans préfixe sur ses identifiants. Le numéro de parc y est le `label` du
+ *    véhicule, son `id` étant celui du boîtier embarqué.
+ */
+export const RELAYED_NETWORKS: RelayedNetwork[] = [
+	{
+		provider: "TAE",
+		tripUpdatesUrl: "https://api.mrn.cityway.fr/dataflow/horaire-tc-tr/download?provider=TAE&dataFormat=GTFS-RT",
+		vehiclePositionsUrl: "https://api.mrn.cityway.fr/dataflow/vehicule-tc-tr/download?provider=TAE&dataFormat=GTFS-RT",
+		vehicleNumber: "id",
+	},
+	{
+		provider: "TNI",
+		tripUpdatesUrl: "https://mrn.geo3d.hanoverdisplays.com/api-1.0/gtfs-rt/trip-updates",
+		vehiclePositionsUrl: "https://mrn.geo3d.hanoverdisplays.com/api-1.0/gtfs-rt/vehicle-positions",
+		vehicleNumber: "label",
+	},
 ];
 
 export const SERVICE_ALERTS_URL = "https://hexatransit.fr/datasets/services_rt/astuce/service_alerts.pb";

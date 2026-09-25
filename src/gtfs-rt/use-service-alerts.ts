@@ -342,15 +342,19 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		for (const entity of feed.entity) {
 			const alert = entity.alert;
 			if (!alert) continue;
-			feedAlertIds.add(entity.id);
+			// Le flux préfixe depuis peu ses identifiants d'un « alert: » (« alert:315 ») : on l'ôte dès la
+			// lecture, pour que l'alerte garde l'identifiant que citent déjà la base, le cache d'analyse et
+			// les quais desservis (cf. `SERVED_STOPS`).
+			const alertId = entity.id.replace(/^alert:/, "");
+			feedAlertIds.add(alertId);
 
 			const routeIds = collectNetworkRoutes(alert, gtfs);
 			if (routeIds.size === 0) continue;
 
-			routesById.set(entity.id, routeIds);
-			entities.push({ id: republishedAlertId(entity.id), alert });
+			routesById.set(alertId, routeIds);
+			entities.push({ id: republishedAlertId(alertId), alert });
 			inputs.push({
-				id: entity.id,
+				id: alertId,
 				headerText: joinTranslations(alert.headerText),
 				descriptionText: joinTranslations(alert.descriptionText),
 				routes: buildRouteContext(routeIds, gtfs),

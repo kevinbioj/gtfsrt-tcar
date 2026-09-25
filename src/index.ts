@@ -1,6 +1,6 @@
 import { serve } from "@hono/node-server";
 import GtfsRealtime from "gtfs-realtime-bindings";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { rateLimiter } from "hono-rate-limiter";
 import { loadCache } from "./ai/analyze-alert.js";
 import {
@@ -14,6 +14,7 @@ import {
 	PORT,
 	PREFERRED_POSITION_STALENESS,
 	REALTIME_LINES,
+	RELAYED_NETWORKS,
 	ROAD_GRAPH_PATH,
 	SERVICE_ALERTS_URL,
 	STATE_CACHE_PATH,
@@ -34,6 +35,7 @@ import { handleRequest } from "./gtfs-rt/handle-request.js";
 import { resolveServiceRun, scheduledTripUpdates, serviceDays, tripRun } from "./gtfs-rt/scheduled-trips.js";
 import { type Movement, useMovementTracker } from "./gtfs-rt/use-movement-tracker.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
+import { useRelayedNetworks } from "./gtfs-rt/use-relayed-networks.js";
 import {
 	applySkippedStops,
 	declareCancelled,
@@ -95,6 +97,8 @@ const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL,
 const modificationIndex = useModificationIndex(detourStore, staticGtfs, () => serviceAlerts.alerts);
 // Sa présence est constatée ici, ses octets ne seront lus qu'au premier accrochage.
 const roadGraph = useRoadGraph(ROAD_GRAPH_PATH);
+// TAE et TNI : relayés tels quels, sans rien de la vérification qui s'applique à TCAR.
+const relayedNetworks = useRelayedNetworks(RELAYED_NETWORKS);
 
 const hono = new Hono();
 
@@ -130,23 +134,40 @@ if (ADMIN_USERNAME && ADMIN_PASSWORD) {
 	console.warn("✘ ADMIN_USERNAME/ADMIN_PASSWORD missing — detour administration not mounted.");
 }
 
-/** Les véhicules à émettre à cet instant : le registre écarte lui-même les relevés périmés. */
-const publishedPositions = () => registry.publishable(Math.floor(Date.now() / 1000));
+/**
+ * Vrai quand la requête demande le seul temps réel TCAR (`?tcarOnly`), sans les réseaux relayés. La
+ * seule présence du paramètre suffit, quelle que soit sa valeur.
+ */
+const tcarOnly = (c: Context) => c.req.query("tcarOnly") !== undefined;
 
-hono.get("/vehicle-positions", (c) => handleRequest(c, "protobuf", null, publishedPositions()));
-hono.get("/vehicle-positions.json", (c) => handleRequest(c, "json", null, publishedPositions()));
+/**
+ * Les véhicules à émettre à cet instant : le registre écarte lui-même les relevés TCAR périmés, les
+ * réseaux relayés les leurs.
+ */
+const publishedPositions = (c: Context) => {
+	const nowSeconds = Math.floor(Date.now() / 1000);
+	const positions = registry.publishable(nowSeconds);
+	return tcarOnly(c) ? positions : new Map([...positions, ...relayedNetworks.vehiclePositions(nowSeconds)]);
+};
+
+/** Les trip updates à émettre : ceux de TCAR, puis ceux des réseaux relayés. */
+const publishedTripUpdates = (c: Context) =>
+	tcarOnly(c) ? store.tripUpdates : new Map([...store.tripUpdates, ...relayedNetworks.tripUpdates()]);
+
+hono.get("/vehicle-positions", (c) => handleRequest(c, "protobuf", null, publishedPositions(c)));
+hono.get("/vehicle-positions.json", (c) => handleRequest(c, "json", null, publishedPositions(c)));
 hono.get("/trip-updates", (c) =>
-	handleRequest(c, "protobuf", store.tripUpdates, null, store.detourEntities, serviceAlerts.entities),
+	handleRequest(c, "protobuf", publishedTripUpdates(c), null, store.detourEntities, serviceAlerts.entities),
 );
 hono.get("/trip-updates.json", (c) =>
-	handleRequest(c, "json", store.tripUpdates, null, store.detourEntities, serviceAlerts.entities),
+	handleRequest(c, "json", publishedTripUpdates(c), null, store.detourEntities, serviceAlerts.entities),
 );
 hono.get("/", (c) =>
 	handleRequest(
 		c,
 		c.req.query("format") === "json" ? "json" : "protobuf",
-		store.tripUpdates,
-		publishedPositions(),
+		publishedTripUpdates(c),
+		publishedPositions(c),
 		store.detourEntities,
 		serviceAlerts.entities,
 	),
