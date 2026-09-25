@@ -2073,7 +2073,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				input.onchange = function () {
 					state.removed = state.removed.filter(function (stopId) { return stopId !== stop.stopId; });
 					if (input.checked) state.removed.push(stop.stopId);
-					onRemovedChanged();
+					keepingScroll(box, picker, onRemovedChanged);
 				};
 				label.appendChild(input);
 				label.appendChild(document.createTextNode(stop.name));
@@ -2144,7 +2144,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			input.type = "checkbox";
 			input.checked = cancelled[departureKey(entry)] === true;
 			input.onchange = function () {
-				setCancelled([entry], input.checked);
+				keepingScroll(box, picker, function () { setCancelled([entry], input.checked); });
 			};
 			label.appendChild(input);
 			label.appendChild(document.createTextNode(formatDeparture(entry.departure) + "  " + entry.name
@@ -2166,6 +2166,17 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			entries.forEach(function (entry) { state.cancelled.push({ stopId: entry.stopId, departure: entry.departure }); });
 		}
 		renderCancelled();
+	}
+
+	/**
+	 * Redessine après un clic dans une liste à cocher, sans perdre l'endroit où on la lisait : la liste
+	 * est refaite à neuf, et repartirait sinon en haut.
+	 */
+	function keepingScroll(box, container, redraw) {
+		var top = box.scrollTop;
+		redraw();
+		var list = container.querySelector(".picker");
+		if (list !== null) list.scrollTop = top;
 	}
 
 	/** Un arrêt coché ou décoché : la carte et le tronçon actif se relisent aussitôt. */
