@@ -182,41 +182,32 @@ const publishedDetourEntities = (networks: ReadonlySet<string>) => [
 ];
 
 /**
- * Les infos trafic à émettre : aucune par défaut, celles qui citent une ligne des réseaux demandés sur
- * `alerts=1`. Les modifications, elles, sortent toujours — et leur `serviceAlertId` peut alors citer
- * une info trafic absente du feed, le champ ne valant que renvoi.
+ * Les infos trafic à émettre : celles qui citent une ligne des réseaux demandés. Elles ont leur propre
+ * endpoint, et la racine les reprend avec tout le reste ; `/trip-updates` ne les porte pas — le
+ * `serviceAlertId` de ses modifications y cite alors une info trafic absente, le champ ne valant que
+ * renvoi.
  */
-const publishedAlerts = (c: Context, networks: ReadonlySet<string>) =>
-	!flag(c, "alerts", false)
-		? null
-		: serviceAlerts.entities
-				.filter((alert) => [...alert.networks].some((network) => networks.has(network)))
-				.map((alert) => alert.entity);
+const publishedAlerts = (networks: ReadonlySet<string>) =>
+	serviceAlerts.entities
+		.filter((alert) => [...alert.networks].some((network) => networks.has(network)))
+		.map((alert) => alert.entity);
 
 hono.get("/vehicle-positions", (c) => handleRequest(c, "protobuf", null, publishedPositions(requestedNetworks(c))));
 hono.get("/vehicle-positions.json", (c) => handleRequest(c, "json", null, publishedPositions(requestedNetworks(c))));
 hono.get("/trip-updates", (c) => {
 	const networks = requestedNetworks(c);
-	return handleRequest(
-		c,
-		"protobuf",
-		publishedTripUpdates(networks),
-		null,
-		publishedDetourEntities(networks),
-		publishedAlerts(c, networks),
-	);
+	return handleRequest(c, "protobuf", publishedTripUpdates(networks), null, publishedDetourEntities(networks));
 });
 hono.get("/trip-updates.json", (c) => {
 	const networks = requestedNetworks(c);
-	return handleRequest(
-		c,
-		"json",
-		publishedTripUpdates(networks),
-		null,
-		publishedDetourEntities(networks),
-		publishedAlerts(c, networks),
-	);
+	return handleRequest(c, "json", publishedTripUpdates(networks), null, publishedDetourEntities(networks));
 });
+hono.get("/service-alerts", (c) =>
+	handleRequest(c, "protobuf", null, null, null, publishedAlerts(requestedNetworks(c))),
+);
+hono.get("/service-alerts.json", (c) =>
+	handleRequest(c, "json", null, null, null, publishedAlerts(requestedNetworks(c))),
+);
 hono.get("/", (c) => {
 	const networks = requestedNetworks(c);
 	return handleRequest(
@@ -225,7 +216,7 @@ hono.get("/", (c) => {
 		publishedTripUpdates(networks),
 		publishedPositions(networks),
 		publishedDetourEntities(networks),
-		publishedAlerts(c, networks),
+		publishedAlerts(networks),
 	);
 });
 
