@@ -8,6 +8,7 @@ import { type CancelIndex, isCancelled, republishedAlertId } from "../gtfs-rt/us
 import type { StaticGtfs, TripStop } from "../gtfs-rt/use-static-gtfs.js";
 import { encodePolyline } from "../utils/encode-polyline.js";
 import type { Coordinates } from "../utils/geometry.js";
+import { networkOf } from "../utils/network.js";
 import { removesStops } from "./bounds.js";
 import type { ResolvedModification } from "./modifications.js";
 import { spliceShape } from "./splice-shape.js";
@@ -54,6 +55,8 @@ type Applicable = { candidate: Candidate; startIndex: number; endIndex: number }
  * mêmes déroutements, et le même itinéraire d'origine. Elles sortent en une seule entité.
  */
 type Group = {
+	/** Le réseau de la ligne de ces courses : c'est sous lui que l'entité sort (cf. `networkOf`). */
+	network: string;
 	modifications: Modification[];
 	/** Les tronçons sans suppression : ils ne donnent qu'un tracé, à coudre avec les autres. */
 	reroutes: Applicable[];
@@ -101,6 +104,10 @@ type Modification = {
  * Une entité est émise PAR JOURNÉE DE SERVICE, et non une seule portant plusieurs `service_dates`.
  * Sans cela, les courses de toutes les journées se retrouveraient réunies sous chaque date : une
  * course que son service ne fait rouler que le dimanche serait déclarée modifiée le samedi.
+ *
+ * Le tout est rangé par réseau, celui de la ligne modifiée : le feed ne publie les autres réseaux que
+ * sur demande. Chaque réseau emporte ses tracés et les arrêts provisoires que ses modifications
+ * désignent — un arrêt provisoire qu'en désignent deux figure donc sous chacun.
  */
 export function buildDetourEntities(
 	gtfs: StaticGtfs,
@@ -108,10 +115,10 @@ export function buildDetourEntities(
 	cancelIndex: CancelIndex,
 	provisional: ReadonlyMap<string, ProvisionalStop>,
 	nowSeconds: number,
-): GtfsRealtime.transit_realtime.IFeedEntity[] {
+): Map<string, GtfsRealtime.transit_realtime.IFeedEntity[]> {
 	const stops = new Map<string, GtfsRealtime.transit_realtime.IStop>();
 	const shapes = new Map<string, GtfsRealtime.transit_realtime.IShape>();
-	const entities: GtfsRealtime.transit_realtime.IFeedEntity[] = [];
+	const entities: { network: string; entity: GtfsRealtime.transit_realtime.IFeedEntity }[] = [];
 	/**
 	 * Ce qui a empêché une déclaration de sortir, ou de sortir entière. Un ensemble, et non une liste :
 	 * les mêmes constats se reposent à l'identique sur des centaines de courses, et le journal n'a
@@ -122,11 +129,14 @@ export function buildDetourEntities(
 	const candidates = collectCandidates(gtfs, modifications, provisional, problems);
 	if (candidates.size === 0) {
 		report(modifications.size, 0, stops, shapes, entities, problems);
-		return [];
+		return new Map();
 	}
 
-	/** Les arrêts provisoires qu'une modification publiée désigne — eux seuls entrent dans le feed. */
-	const referenced = new Set<string>();
+	/**
+	 * Les arrêts provisoires qu'une modification publiée désigne — eux seuls entrent dans le feed —, et
+	 * les réseaux de ces modifications.
+	 */
+	const referenced = new Map<string, Set<string>>();
 	/** Les tronçons qui ont fini par s'appliquer à au moins une course. */
 	const applied = new Set<string>();
 	/** Les tracés recousus, par itinéraire d'origine et combinaison de tronçons. */
@@ -177,7 +187,13 @@ export function buildDetourEntities(
 					`|${reroutes.map((entry) => entry.candidate.label).join(";")}`;
 				const group = groups.get(signature);
 				if (group === undefined)
-					groups.set(signature, { modifications: resolved, reroutes, shapeId: meta.shapeId, tripIds: [tripId] });
+					groups.set(signature, {
+						network: networkOf(meta.routeId),
+						modifications: resolved,
+						reroutes,
+						shapeId: meta.shapeId,
+						tripIds: [tripId],
+					});
 				else group.tripIds.push(tripId);
 			}
 		}
@@ -198,29 +214,32 @@ export function buildDetourEntities(
 			if (group.modifications.length === 0 && shapeId === null) continue;
 
 			entities.push({
-				id: `TM:TCAR:${parts}:${day.date}:${fingerprint}`,
-				tripModifications: {
-					selectedTrips: [{ tripIds: group.tripIds, shapeId: shapeId ?? undefined }],
-					serviceDates: [day.date],
-					// `start_times` ne sert qu'à désigner un départ précis d'une course à fréquence. Les
-					// courses sont ici énumérées une à une : une liste non vide ne ferait que restreindre à
-					// tort ce qui est déjà désigné sans ambiguïté.
-					startTimes: [],
-					modifications: group.modifications.map((modification) => ({
-						// Toujours par identifiant d'arrêt, jamais par rang : une même modification couvre
-						// des dizaines de courses dont les `stop_sequence` ne coïncident pas.
-						startStopSelector: { stopId: modification.startStopId },
-						endStopSelector: { stopId: modification.endStopId },
-						propagatedModificationDelay: modification.propagatedDelay,
-						replacementStops: modification.stops.map((stop) => ({
-							stopId: stop.stopId,
-							travelTimeToStop: stop.travelTime,
+				network: group.network,
+				entity: {
+					id: `TM:${group.network}:${parts}:${day.date}:${fingerprint}`,
+					tripModifications: {
+						selectedTrips: [{ tripIds: group.tripIds, shapeId: shapeId ?? undefined }],
+						serviceDates: [day.date],
+						// `start_times` ne sert qu'à désigner un départ précis d'une course à fréquence. Les
+						// courses sont ici énumérées une à une : une liste non vide ne ferait que restreindre à
+						// tort ce qui est déjà désigné sans ambiguïté.
+						startTimes: [],
+						modifications: group.modifications.map((modification) => ({
+							// Toujours par identifiant d'arrêt, jamais par rang : une même modification couvre
+							// des dizaines de courses dont les `stop_sequence` ne coïncident pas.
+							startStopSelector: { stopId: modification.startStopId },
+							endStopSelector: { stopId: modification.endStopId },
+							propagatedModificationDelay: modification.propagatedDelay,
+							replacementStops: modification.stops.map((stop) => ({
+								stopId: stop.stopId,
+								travelTimeToStop: stop.travelTime,
+							})),
+							// Facultatif dans la spécification : une modification sans info trafic n'en cite aucune.
+							// Celle qu'elle cite est republiée dans le même feed, sous l'identifiant préfixé.
+							serviceAlertId: modification.alertId === null ? undefined : republishedAlertId(modification.alertId),
+							lastModifiedTime: modification.lastModifiedTime,
 						})),
-						// Facultatif dans la spécification : une modification sans info trafic n'en cite aucune.
-						// Celle qu'elle cite est republiée dans le même feed, sous l'identifiant préfixé.
-						serviceAlertId: modification.alertId === null ? undefined : republishedAlertId(modification.alertId),
-						lastModifiedTime: modification.lastModifiedTime,
-					})),
+					},
 				},
 			});
 
@@ -229,7 +248,12 @@ export function buildDetourEntities(
 			// restent que les arrêts provisoires, publiés parce qu'une modification les désigne — et non
 			// parce qu'une déviation les posséderait.
 			for (const modification of group.modifications) {
-				for (const stop of modification.stops) if (provisional.has(stop.stopId)) referenced.add(stop.stopId);
+				for (const stop of modification.stops) {
+					if (!provisional.has(stop.stopId)) continue;
+					const networks = referenced.get(stop.stopId);
+					if (networks === undefined) referenced.set(stop.stopId, new Set([group.network]));
+					else networks.add(group.network);
+				}
 			}
 		}
 	}
@@ -249,7 +273,7 @@ export function buildDetourEntities(
 		}
 	}
 
-	for (const stopId of referenced) {
+	for (const stopId of referenced.keys()) {
 		const stop = provisional.get(stopId) as ProvisionalStop;
 		stops.set(stopId, {
 			stopId,
@@ -261,11 +285,22 @@ export function buildDetourEntities(
 
 	report(modifications.size, applied.size, stops, shapes, entities, problems);
 
-	return [
-		...stops.entries().map(([stopId, stop]) => ({ id: `ST:${stopId}`, stop })),
-		...shapes.entries().map(([shapeId, shape]) => ({ id: `SH:${shapeId}`, shape })),
-		...entities,
-	];
+	const byNetwork = new Map<string, GtfsRealtime.transit_realtime.IFeedEntity[]>();
+	for (const network of new Set(entities.map((entry) => entry.network))) {
+		byNetwork.set(network, [
+			...stops
+				.entries()
+				.filter(([stopId]) => referenced.get(stopId)?.has(network))
+				.map(([stopId, stop]) => ({ id: `ST:${stopId}`, stop })),
+			...shapes
+				.entries()
+				.filter(([shapeId]) => networkOf(shapeId) === network)
+				.map(([shapeId, shape]) => ({ id: `SH:${shapeId}`, shape })),
+			...entities.filter((entry) => entry.network === network).map((entry) => entry.entity),
+		]);
+	}
+
+	return byNetwork;
 }
 
 /**
@@ -639,7 +674,7 @@ function buildShape(
 		);
 	}
 
-	const shapeId = `TCAR:DEV:${parts}:${suffixOf(group.shapeId)}:${fingerprint}`;
+	const shapeId = `${group.network}:DEV:${parts}:${suffixOf(group.shapeId)}:${fingerprint}`;
 	shapes.set(shapeId, { shapeId, encodedPolyline: encodePolyline(outcome.points) });
 	return shapeId;
 }

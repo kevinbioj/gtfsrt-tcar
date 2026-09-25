@@ -93,7 +93,8 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 		uid         INTEGER NOT NULL,
 		segment     INTEGER NOT NULL,
 		position    INTEGER NOT NULL,
-		-- Un quai du GTFS, ou « TCAR:DEV:<stop_uid> » : le tronçon ne fait que désigner.
+		-- Un quai du GTFS, ou « PROV:<stop_uid> » (« TCAR:DEV:<stop_uid> » avant la migration qui suit) : le
+		-- tronçon ne fait que désigner.
 		stop_id     TEXT    NOT NULL,
 		-- Secondes depuis l'arrivée à l'arrêt de référence (cf. DetourStop.travelTime).
 		travel_time INTEGER NOT NULL,
@@ -151,11 +152,26 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 		PRIMARY KEY (uid, stop_id, departure)
 	) STRICT;
 	`,
+	// Les arrêts provisoires passent de « TCAR:DEV:<n> » à « PROV:<n> » : ils servent désormais aux
+	// lignes des trois réseaux, et n'appartiennent à aucun. Le numéro ne bouge pas — seul le préfixe
+	// change, partout où un identifiant d'arrêt est rangé. Aucun quai du GTFS ne commence ainsi.
+	`
+	UPDATE segment_stops
+		SET stop_id = 'PROV:' || substr(stop_id, 10) WHERE substr(stop_id, 1, 9) = 'TCAR:DEV:';
+	UPDATE segments
+		SET start_stop_id = 'PROV:' || substr(start_stop_id, 10) WHERE substr(start_stop_id, 1, 9) = 'TCAR:DEV:';
+	UPDATE segments
+		SET end_stop_id = 'PROV:' || substr(end_stop_id, 10) WHERE substr(end_stop_id, 1, 9) = 'TCAR:DEV:';
+	UPDATE modification_removed_stops
+		SET stop_id = 'PROV:' || substr(stop_id, 10) WHERE substr(stop_id, 1, 9) = 'TCAR:DEV:';
+	UPDATE modification_cancelled_departures
+		SET stop_id = 'PROV:' || substr(stop_id, 10) WHERE substr(stop_id, 1, 9) = 'TCAR:DEV:';
+	`,
 ];
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
 export type ProvisionalStop = {
-	/** L'identifiant publié, « TCAR:DEV:<n> ». Il ne se réattribue jamais. */
+	/** L'identifiant publié, « PROV:<n> ». Il ne se réattribue jamais. */
 	stopId: string;
 	name: string;
 	latitude: number;
@@ -164,7 +180,7 @@ export type ProvisionalStop = {
 
 /** Un arrêt que la déviation dessert à la place des arrêts supprimés. */
 export type DetourStop = {
-	/** Un quai du GTFS, ou un arrêt provisoire (« TCAR:DEV:<n> ») — la déviation ne fait que désigner. */
+	/** Un quai du GTFS, ou un arrêt provisoire (« PROV:<n> ») — la déviation ne fait que désigner. */
 	stopId: string;
 	/**
 	 * Secondes écoulées depuis l'arrivée à l'arrêt de référence — l'arrêt desservi juste AVANT la
@@ -700,14 +716,17 @@ export function useDetourStore(path: string) {
 	};
 }
 
-/** L'identifiant publié d'un arrêt provisoire. */
+/**
+ * L'identifiant publié d'un arrêt provisoire. Sans réseau : un arrêt de report peut servir aux lignes
+ * de plusieurs d'entre eux.
+ */
 export function provisionalStopId(stopUid: number): string {
-	return `TCAR:DEV:${stopUid}`;
+	return `PROV:${stopUid}`;
 }
 
 /** Le numéro d'un arrêt provisoire d'après son identifiant publié, ou `undefined` si ce n'en est pas un. */
 export function provisionalStopUid(stopId: string): number | undefined {
-	const match = /^TCAR:DEV:(\d+)$/.exec(stopId);
+	const match = /^PROV:(\d+)$/.exec(stopId);
 	return match === null ? undefined : Number(match[1]);
 }
 

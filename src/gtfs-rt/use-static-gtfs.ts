@@ -520,8 +520,8 @@ function buildStops(csv: string): {
 		if (!stopId || !stopName) continue;
 
 		// Les stations parentes ne sont pas des quais : on les met de côté pour n'indexer que leur
-		// nom (cf. plus bas), jamais leur identifiant.
-		if (stopId.startsWith("TCAR:ST:")) {
+		// nom (cf. plus bas), jamais leur identifiant. Chaque réseau les range sous « <réseau>:ST: ».
+		if (/^[^:]+:ST:/.test(stopId)) {
 			stationNames.set(stopId, stopName);
 			continue;
 		}

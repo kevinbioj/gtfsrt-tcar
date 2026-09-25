@@ -52,6 +52,7 @@ import { useVerificationFeed, type VerifiedVehicle } from "./gtfs-rt/use-verific
 import { isDepotDestination, verifyVehicle } from "./gtfs-rt/verify-vehicle.js";
 import { useRoadGraph } from "./routing/road-graph.js";
 import { loadState, saveState } from "./state-cache.js";
+import { entityNetwork, HOME_NETWORK } from "./utils/network.js";
 import { useVehicleOccupancyStatuses } from "./utils/use-vehicle-occupancy-status.js";
 
 // Charge un fichier .env s'il existe (clé ANTHROPIC_API_KEY notamment).
@@ -134,44 +135,99 @@ if (ADMIN_USERNAME && ADMIN_PASSWORD) {
 	console.warn("✘ ADMIN_USERNAME/ADMIN_PASSWORD missing — detour administration not mounted.");
 }
 
+/** Tous les réseaux que le feed sait publier : TCAR, puis les réseaux relayés. */
+const ALL_NETWORKS: ReadonlySet<string> = new Set([HOME_NETWORK, ...RELAYED_NETWORKS.map(({ provider }) => provider)]);
+
 /**
- * Vrai quand la requête demande le seul temps réel TCAR (`?tcarOnly`), sans les réseaux relayés. La
- * seule présence du paramètre suffit, quelle que soit sa valeur.
+ * Un interrupteur de la requête : `1` l'allume, `0` l'éteint. Absent — ou toute autre valeur —, il
+ * garde sa position par défaut.
  */
-const tcarOnly = (c: Context) => c.req.query("tcarOnly") !== undefined;
+const flag = (c: Context, name: string, fallback: boolean): boolean => {
+	const value = c.req.query(name);
+	return value === "1" ? true : value === "0" ? false : fallback;
+};
+
+/**
+ * Les réseaux que la requête demande, un interrupteur chacun à son nom en minuscules : `tcar`, `tae`,
+ * `tni`. Seul TCAR est allumé par défaut. Ce choix vaut pour tout ce que le feed publie — positions,
+ * trip updates, modifications et infos trafic.
+ */
+const requestedNetworks = (c: Context): ReadonlySet<string> =>
+	new Set([...ALL_NETWORKS].filter((network) => flag(c, network.toLowerCase(), network === HOME_NETWORK)));
+
+/** Les entrées d'une table d'entités dont l'identifiant désigne l'un des réseaux (cf. `entityNetwork`). */
+const ofNetworks = <T>(entries: Iterable<[string, T]>, networks: ReadonlySet<string>) =>
+	new Map([...entries].filter(([id]) => networks.has(entityNetwork(id))));
 
 /**
  * Les véhicules à émettre à cet instant : le registre écarte lui-même les relevés TCAR périmés, les
  * réseaux relayés les leurs.
  */
-const publishedPositions = (c: Context) => {
+const publishedPositions = (networks: ReadonlySet<string>) => {
 	const nowSeconds = Math.floor(Date.now() / 1000);
-	const positions = registry.publishable(nowSeconds);
-	return tcarOnly(c) ? positions : new Map([...positions, ...relayedNetworks.vehiclePositions(nowSeconds)]);
+	return ofNetworks([...registry.publishable(nowSeconds), ...relayedNetworks.vehiclePositions(nowSeconds)], networks);
 };
 
-/** Les trip updates à émettre : ceux de TCAR, puis ceux des réseaux relayés. */
-const publishedTripUpdates = (c: Context) =>
-	tcarOnly(c) ? store.tripUpdates : new Map([...store.tripUpdates, ...relayedNetworks.tripUpdates()]);
+/** Les trip updates à émettre, tous réseaux confondus dans le store (cf. `pollTripUpdates`). */
+const publishedTripUpdates = (networks: ReadonlySet<string>) => ofNetworks(store.tripUpdates, networks);
 
-hono.get("/vehicle-positions", (c) => handleRequest(c, "protobuf", null, publishedPositions(c)));
-hono.get("/vehicle-positions.json", (c) => handleRequest(c, "json", null, publishedPositions(c)));
-hono.get("/trip-updates", (c) =>
-	handleRequest(c, "protobuf", publishedTripUpdates(c), null, store.detourEntities, serviceAlerts.entities),
-);
-hono.get("/trip-updates.json", (c) =>
-	handleRequest(c, "json", publishedTripUpdates(c), null, store.detourEntities, serviceAlerts.entities),
-);
-hono.get("/", (c) =>
-	handleRequest(
+/**
+ * Les modifications à émettre. Un arrêt provisoire que désignent deux réseaux figure sous chacun : il
+ * ne sort qu'une fois.
+ */
+const publishedDetourEntities = (networks: ReadonlySet<string>) => [
+	...new Map(
+		[...networks].flatMap((network) => store.detourEntities.get(network) ?? []).map((entity) => [entity.id, entity]),
+	).values(),
+];
+
+/**
+ * Les infos trafic à émettre : aucune par défaut, celles qui citent une ligne des réseaux demandés sur
+ * `alerts=1`. Les modifications, elles, sortent toujours — et leur `serviceAlertId` peut alors citer
+ * une info trafic absente du feed, le champ ne valant que renvoi.
+ */
+const publishedAlerts = (c: Context, networks: ReadonlySet<string>) =>
+	!flag(c, "alerts", false)
+		? null
+		: serviceAlerts.entities
+				.filter((alert) => [...alert.networks].some((network) => networks.has(network)))
+				.map((alert) => alert.entity);
+
+hono.get("/vehicle-positions", (c) => handleRequest(c, "protobuf", null, publishedPositions(requestedNetworks(c))));
+hono.get("/vehicle-positions.json", (c) => handleRequest(c, "json", null, publishedPositions(requestedNetworks(c))));
+hono.get("/trip-updates", (c) => {
+	const networks = requestedNetworks(c);
+	return handleRequest(
+		c,
+		"protobuf",
+		publishedTripUpdates(networks),
+		null,
+		publishedDetourEntities(networks),
+		publishedAlerts(c, networks),
+	);
+});
+hono.get("/trip-updates.json", (c) => {
+	const networks = requestedNetworks(c);
+	return handleRequest(
+		c,
+		"json",
+		publishedTripUpdates(networks),
+		null,
+		publishedDetourEntities(networks),
+		publishedAlerts(c, networks),
+	);
+});
+hono.get("/", (c) => {
+	const networks = requestedNetworks(c);
+	return handleRequest(
 		c,
 		c.req.query("format") === "json" ? "json" : "protobuf",
-		publishedTripUpdates(c),
-		publishedPositions(c),
-		store.detourEntities,
-		serviceAlerts.entities,
-	),
-);
+		publishedTripUpdates(networks),
+		publishedPositions(networks),
+		publishedDetourEntities(networks),
+		publishedAlerts(c, networks),
+	);
+});
 
 serve({ fetch: hono.fetch, port: PORT });
 console.log(`➔ Listening on :${PORT}`);
@@ -529,14 +585,26 @@ async function pollTripUpdates() {
 		// Les courses dont le flux source parle : celles-là n'ont pas à être reconstruites depuis
 		// l'horaire théorique, ce qu'il en annonce l'emportant toujours.
 		const covered = new Set<string>();
+		/** Réseau → courses que sa source annonce et qui sortent dans le feed. */
+		const sourceTrips = new Map<string, number>();
 		let realtimeTrips = 0;
 		let scheduleOnly = 0;
 		let cancelledTrips = 0;
 		let unresolvedTrips = 0;
 
-		for (const entity of feed.entity) {
-			if (!entity.tripUpdate) continue;
+		// Le flux TCAR, puis ceux des réseaux relayés : tous suivent le même chemin, le GTFS les connaissant
+		// tous. Seul le tri des lignes sans vrai temps réel est propre à TCAR (cf. `REALTIME_LINES`).
+		const entities = [
+			...feed.entity.flatMap(({ id, tripUpdate }) => (tripUpdate ? [{ network: HOME_NETWORK, id, tripUpdate }] : [])),
+			...relayedNetworks
+				.tripUpdates()
+				.flatMap(({ network, tripUpdates }) =>
+					tripUpdates.map((tripUpdate) => ({ network, id: tripUpdate.trip?.tripId ?? "", tripUpdate })),
+				),
+		];
 
+		for (const entity of entities) {
+			const { network } = entity;
 			const tripId = entity.tripUpdate.trip?.tripId;
 
 			// La course qui circule vraiment, et la journée de service dont elle relève — deux choses que le
@@ -580,12 +648,12 @@ async function pollTripUpdates() {
 			});
 
 			const tripRouteId = entity.tripUpdate.trip?.routeId ?? "";
-			const tripLineId = tripRouteId.split(":").at(-1) ?? "";
+			const realtime = network !== HOME_NETWORK || REALTIME_LINES.has(tripRouteId.split(":").at(-1) ?? "");
 
 			// Le départ annoncé pour la course, avant que les suppressions d'arrêt ne remanient l'horaire.
 			// Les lignes sans vrai temps réel n'y ont pas droit : la source y rebadge l'horaire théorique,
 			// son « départ » n'en dirait pas plus que le GTFS statique.
-			if (resolvedTripId && REALTIME_LINES.has(tripLineId)) {
+			if (resolvedTripId && realtime) {
 				const departure = announcedDeparture(entity.tripUpdate, resolvedTripId);
 				if (departure !== undefined) store.tripDepartures.set(resolvedTripId, departure);
 			}
@@ -601,7 +669,7 @@ async function pollTripUpdates() {
 			// d'aujourd'hui qui part à « 25:10 » — et sous un identifiant nu, la seconde écraserait la
 			// première.
 			const tripEntityId = (resolvedTripId ?? entity.id).split(":").at(-1) ?? entity.id;
-			const entityId = `ET:TCAR:${tripEntityId}${startDate ? `:${startDate}` : ""}`;
+			const entityId = `ET:${network}:${tripEntityId}${startDate ? `:${startDate}` : ""}`;
 
 			// Annulée par une modification : ce que la source en dit ne tient plus, temps réel compris.
 			const midnight = candidateDays.find((day) => day.date === startDate)?.midnight;
@@ -612,6 +680,7 @@ async function pollTripUpdates() {
 			) {
 				declareCancelled(entity.tripUpdate);
 				store.tripUpdates.set(entityId, entity.tripUpdate);
+				sourceTrips.set(network, (sourceTrips.get(network) ?? 0) + 1);
 				cancelledTrips += 1;
 				continue;
 			}
@@ -620,7 +689,7 @@ async function pollTripUpdates() {
 
 			// Ligne sans vrai temps réel : on ne relaie pas ses horaires, seulement l'existence de la course
 			// et ses suppressions d'arrêt — la forme même que prennent les courses reconstruites.
-			if (REALTIME_LINES.has(tripLineId)) {
+			if (realtime) {
 				realtimeTrips += 1;
 			} else {
 				// Ni temps réel ni suppression : la course se réduirait au NO_DATA de son premier arrêt, qui
@@ -634,6 +703,7 @@ async function pollTripUpdates() {
 			}
 
 			store.tripUpdates.set(entityId, entity.tripUpdate);
+			sourceTrips.set(network, (sourceTrips.get(network) ?? 0) + 1);
 		}
 
 		// Toutes les autres courses de la journée de service qui n'ont pas fini de circuler : le flux
@@ -648,7 +718,7 @@ async function pollTripUpdates() {
 		for (const [id, tripUpdate] of scheduled) store.tripUpdates.set(id, tripUpdate);
 
 		console.log(
-			`✓ ${store.tripUpdates.size} trip updates (${realtimeTrips} realtime, ${scheduleOnly} source without realtime, ${cancelledTrips} source cancelled, ${scheduled.size} rebuilt from schedule, ${store.tripDepartures.size} departures announced, ${unresolvedTrips} unresolved trips).`,
+			`✓ ${store.tripUpdates.size} trip updates (${[...sourceTrips].map(([network, count]) => `${count} ${network}`).join(", ")} from sources; ${realtimeTrips} realtime, ${scheduleOnly} source without realtime, ${cancelledTrips} source cancelled, ${scheduled.size} rebuilt from schedule, ${store.tripDepartures.size} departures announced, ${unresolvedTrips} unresolved trips).`,
 		);
 
 		rebuildDetourEntities();

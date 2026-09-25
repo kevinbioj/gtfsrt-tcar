@@ -1,10 +1,13 @@
 import type { RelayedNetwork } from "./gtfs-rt/use-relayed-networks.js";
 
 /**
- * Lignes dont le temps réel de la source est authentique. Ailleurs, la source rebadge l'horaire
+ * Lignes TCAR dont le temps réel de la source est authentique. Ailleurs, la source rebadge l'horaire
  * théorique en temps réel : ses véhicules ne sont jamais publiés — tout au plus rafraîchit-on la
  * position d'un véhicule déjà connu — et ses trip updates sont réduits aux seules suppressions
  * d'arrêt (cf. `keepOnlySkippedStops`).
+ *
+ * Les réseaux relayés (cf. {@link RELAYED_NETWORKS}) n'y sont pas soumis : leur temps réel passe tel
+ * quel, sur toutes leurs lignes.
  */
 export const REALTIME_LINES = new Set([
 	"90",
@@ -305,7 +308,12 @@ export const RELAYED_NETWORKS: RelayedNetwork[] = [
 ];
 
 export const SERVICE_ALERTS_URL = "https://hexatransit.fr/datasets/services_rt/astuce/service_alerts.pb";
-export const STATIC_GTFS_URL = "https://gtfs.bus-tracker.fr/astuce-tcar.zip";
+/**
+ * Le GTFS de tout Astuce — TCAR, TAE et TNI —, et non plus celui de la seule TCAR : les modifications
+ * se saisissent et se publient sur les lignes des trois réseaux. Ses identifiants portent tous le
+ * préfixe de leur réseau (cf. `networkOf`).
+ */
+export const STATIC_GTFS_URL = "https://gtfs.bus-tracker.fr/astuce-global.zip";
 
 export const ALERTS_POLL_INTERVAL = Temporal.Duration.from({ minutes: 5 }).total("milliseconds");
 /**

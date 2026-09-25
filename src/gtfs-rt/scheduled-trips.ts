@@ -1,5 +1,5 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
-
+import { networkOf } from "../utils/network.js";
 import {
 	applySkippedStops,
 	type CancelIndex,
@@ -122,7 +122,8 @@ export function tripRun(tripId: string, date: string): string {
  * Les trip updates des courses dont le flux source ne parle pas, reconstruits depuis le seul horaire
  * théorique. Le flux du SAEIV ne porte que ses propres lignes — les scolaires, les Filo'r et
  * quelques lignes régulières lui échappent — et une suppression d'arrêt qui les touche n'aurait
- * sinon aucune course où s'annoncer.
+ * sinon aucune course où s'annoncer. Il en va de même des réseaux relayés, dont le GTFS porte aussi
+ * les courses : chacune sort sous son réseau (cf. `networkOf`).
  *
  * Une course annulée par une modification y figure toujours, annulée (cf. `isCancelled`).
  *
@@ -172,7 +173,7 @@ export function scheduledTripUpdates(
 				// deux occurrences d'une même course peuvent circuler ensemble — celle d'hier qui s'achève
 				// après minuit et celle d'aujourd'hui qui part à « 25:10 » — et sous un identifiant nu, la
 				// seconde écraserait la première.
-				tripUpdates.set(`ET:TCAR:${tripId.split(":").at(-1)}:${date}`, tripUpdate);
+				tripUpdates.set(`ET:${networkOf(tripId)}:${tripId.split(":").at(-1)}:${date}`, tripUpdate);
 			}
 		}
 	}

@@ -10,6 +10,7 @@ import {
 	type RemovedStop,
 } from "../ai/analyze-alert.js";
 import { SERVED_STOPS } from "../config.js";
+import { networkOf } from "../utils/network.js";
 import {
 	normalizeStopName,
 	type OrderedStop,
@@ -96,10 +97,13 @@ export type AlertContribution = { routeId: string; directionId: number | null; s
 /** Numéro d'info trafic → routeId → quais que cette alerte ne doit PAS faire sauter. */
 type ServedStopIndex = Map<string, Map<string, Set<string>>>;
 
+/** Une info trafic prête à être republiée, et les réseaux dont elle cite des lignes. */
+export type AlertEntity = { networks: ReadonlySet<string>; entity: GtfsRealtime.transit_realtime.IFeedEntity };
+
 type AlertsState = { headerTimestamp: string | null };
 type PollResult = {
 	alerts: AnalyzedAlert[];
-	entities: GtfsRealtime.transit_realtime.IFeedEntity[];
+	entities: AlertEntity[];
 	headerTimestamp: string | null;
 };
 
@@ -134,7 +138,7 @@ export function useServiceAlerts(
 		 * {@link republishedAlertId}). L'analyse n'y est pour rien : une alerte que l'IA n'a pas su lire
 		 * reste une info trafic du réseau.
 		 */
-		entities: [] as GtfsRealtime.transit_realtime.IFeedEntity[],
+		entities: [] as AlertEntity[],
 		importedAt: Temporal.Now.instant(),
 	};
 	let running = false;
@@ -337,7 +341,7 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 
 		// 1. Collecte des alertes touchant une ligne du réseau.
 		const inputs: AlertInput[] = [];
-		const entities: GtfsRealtime.transit_realtime.IFeedEntity[] = [];
+		const entities: AlertEntity[] = [];
 		const routesById = new Map<string, Set<string>>();
 		for (const entity of feed.entity) {
 			const alert = entity.alert;
@@ -352,7 +356,10 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 			if (routeIds.size === 0) continue;
 
 			routesById.set(alertId, routeIds);
-			entities.push({ id: republishedAlertId(alertId), alert });
+			entities.push({
+				networks: new Set([...routeIds].map(networkOf)),
+				entity: { id: republishedAlertId(alertId), alert },
+			});
 			inputs.push({
 				id: alertId,
 				headerText: joinTranslations(alert.headerText),
@@ -539,8 +546,8 @@ function plainDate(value: string): Temporal.PlainDate | null {
 }
 
 /**
- * Routes du réseau touchées par l'alerte. Le flux couvre plusieurs opérateurs (TAE…) : on ne
- * retient que les routes présentes dans notre GTFS, seules exploitables en aval.
+ * Routes touchées par l'alerte. On ne retient que celles que notre GTFS connaît, seules exploitables
+ * en aval.
  */
 function collectNetworkRoutes(alert: GtfsRealtime.transit_realtime.IAlert, gtfs: StaticGtfs): Set<string> {
 	const routeIds = new Set<string>();
@@ -591,11 +598,12 @@ function resolveRemovedStop(
 
 	const startName = normalizeStopName(removedStop.stopName);
 	const directions = directionId === null ? [0, 1] : [directionId];
+	const network = networkOf(routeId);
 
 	// Arrêt seul.
 	if (!removedStop.toStopName) {
-		// Match global, exact puis tolérant (chemin rapide).
-		const resolved = resolveStopIds(gtfs, startName);
+		// Match sur tout le réseau de la ligne, exact puis tolérant (chemin rapide).
+		const resolved = resolveStopIds(gtfs, startName, network);
 		if (resolved !== undefined) {
 			contribute(directionId, resolved);
 			return contributions;
@@ -604,7 +612,7 @@ function resolveRemovedStop(
 		for (const dir of directions) {
 			const stops = (gtfs.routeStopSequences.get(routeId)?.get(dir) ?? []).flat();
 			const canonical = stops[findStopIndex(stops, startName)]?.name;
-			const stopIds = canonical ? gtfs.stopNameIndex.get(canonical) : undefined;
+			const stopIds = canonical ? inNetwork(gtfs.stopNameIndex.get(canonical), network) : undefined;
 			if (stopIds && stopIds.size > 0) contribute(dir, stopIds);
 		}
 		return contributions;
@@ -651,7 +659,7 @@ function resolveRemovedStop(
 
 	const stopIds = new Set<string>();
 	for (const name of names) {
-		for (const id of resolveStopIds(gtfs, name) ?? []) stopIds.add(id);
+		for (const id of resolveStopIds(gtfs, name, network) ?? []) stopIds.add(id);
 	}
 	if (stopIds.size === 0) return contributions;
 
@@ -722,18 +730,29 @@ function keepUnlessServed(stopIds: Set<string>, served: ReadonlySet<string>): Se
 }
 
 /**
- * Quais portant ce nom (déjà normalisé) : match exact, sinon rapprochement tolérant aux
+ * Quais de ce réseau portant ce nom (déjà normalisé) : match exact, sinon rapprochement tolérant aux
  * approximations de la source (« Champs de Mars » → « Champ de Mars »). Une clé tolérante qui
  * recouvre plusieurs arrêts distincts est écartée — mieux vaut ne rien supprimer et laisser le
  * repli par itinéraire trancher que supprimer le mauvais arrêt.
+ *
+ * Le GTFS porte trois réseaux, qui partagent bien des noms d'arrêt (« Hôtel de Ville ») : seul compte
+ * celui de la ligne, sans quoi un homonyme d'Elbeuf rendrait ambigu un arrêt de Rouen.
  */
-function resolveStopIds(gtfs: StaticGtfs, normalizedName: string): Set<string> | undefined {
-	const exact = gtfs.stopNameIndex.get(normalizedName);
+function resolveStopIds(gtfs: StaticGtfs, normalizedName: string, network: string): Set<string> | undefined {
+	const exact = inNetwork(gtfs.stopNameIndex.get(normalizedName), network);
 	if (exact !== undefined) return exact;
 
-	const names = gtfs.stopKeyIndex.get(stopNameKey(normalizedName));
-	if (names === undefined || names.size !== 1) return undefined;
-	return gtfs.stopNameIndex.get([...names][0] as string);
+	const names = [...(gtfs.stopKeyIndex.get(stopNameKey(normalizedName)) ?? [])].filter(
+		(name) => inNetwork(gtfs.stopNameIndex.get(name), network) !== undefined,
+	);
+	if (names.length !== 1) return undefined;
+	return inNetwork(gtfs.stopNameIndex.get(names[0] as string), network);
+}
+
+/** Les quais de ce réseau parmi `stopIds`, ou `undefined` s'il n'y en a aucun. */
+function inNetwork(stopIds: ReadonlySet<string> | undefined, network: string): Set<string> | undefined {
+	const kept = new Set([...(stopIds ?? [])].filter((stopId) => networkOf(stopId) === network));
+	return kept.size === 0 ? undefined : kept;
 }
 
 /**

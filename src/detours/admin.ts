@@ -9,6 +9,7 @@ import { normalizeStopName, type RoutePattern, type StaticGtfs } from "../gtfs-r
 import type { RoadGraph, RoadGraphHandle } from "../routing/road-graph.js";
 import { routeOnRoad } from "../routing/route-on-road.js";
 import { encodePolyline } from "../utils/encode-polyline.js";
+import { HOME_NETWORK, networkOf } from "../utils/network.js";
 import { sanitizeHtml } from "../utils/sanitize-html.js";
 import { ADMIN_PAGE } from "./admin-page.js";
 import { deduceBounds, overlappingSegments, removesStops, type SegmentBounds } from "./bounds.js";
@@ -559,14 +560,23 @@ function compareRows(
 	return 0;
 }
 
-/** Le nom commercial d'une ligne (« F7 », « Métro »), ou à défaut le bout de son identifiant. */
+/**
+ * Le nom commercial d'une ligne (« F7 », « Métro »), ou à défaut le bout de son identifiant. Hors
+ * TCAR, il est précédé de son réseau (« TAE 311 ») : les trois réseaux partagent des numéros, et la
+ * 311 d'Elbeuf n'est pas celle de Rouen.
+ */
 function lineName(gtfs: StaticGtfs, routeId: string): string {
-	return gtfs.routeNames.get(routeId) ?? lineCode(routeId);
+	const name = gtfs.routeNames.get(routeId) ?? routeId.split(":").at(-1) ?? routeId;
+	const network = networkOf(routeId);
+	return network === HOME_NETWORK ? name : `${network} ${name}`;
 }
 
-/** Le bout de l'identifiant de ligne (« TCAR:07 » → « 07 ») : c'est lui qui nomme les cartouches. */
-function lineCode(routeId: string): string {
-	return routeId.split(":").at(-1) ?? routeId;
+/**
+ * Le bout de l'identifiant de ligne (« TCAR:07 » → « 07 ») : c'est lui qui nomme les cartouches.
+ * `null` hors TCAR, dont les cartouches ne sont pas publiés : la ligne s'affiche alors en clair.
+ */
+function lineCode(routeId: string): string | null {
+	return networkOf(routeId) === HOME_NETWORK ? (routeId.split(":").at(-1) ?? routeId) : null;
 }
 
 /** Le métro, puis les lignes T, puis les lignes F, puis tout le reste. */
@@ -577,8 +587,18 @@ function lineRank(name: string): number {
 	return 3;
 }
 
-/** L'ordre du réseau : par rang, puis par nom, les nombres comparés comme tels (F2 avant F10). */
+/**
+ * TCAR d'abord, puis les autres réseaux ; dans chacun, par rang puis par nom, les nombres comparés
+ * comme tels (F2 avant F10).
+ */
 function compareLines(gtfs: StaticGtfs, a: string, b: string): number {
+	const networkA = networkOf(a);
+	const networkB = networkOf(b);
+	if (networkA !== networkB) {
+		if (networkA === HOME_NETWORK || networkB === HOME_NETWORK) return networkA === HOME_NETWORK ? -1 : 1;
+		return networkA.localeCompare(networkB);
+	}
+
 	const nameA = lineName(gtfs, a);
 	const nameB = lineName(gtfs, b);
 	return lineRank(nameA) - lineRank(nameB) || nameA.localeCompare(nameB, "fr", { numeric: true });

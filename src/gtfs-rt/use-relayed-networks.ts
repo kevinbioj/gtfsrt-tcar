@@ -10,13 +10,21 @@ export type RelayedNetwork = {
 	vehicleNumber: "id" | "label";
 };
 
+/** Les trip updates d'un réseau relayé, identifiants préfixés comme ceux du GTFS. */
+export type RelayedTripUpdates = { network: string; tripUpdates: GtfsRealtime.transit_realtime.ITripUpdate[] };
+
 /**
  * Relaie le temps réel des réseaux voisins (cf. `RELAYED_NETWORKS`). Chaque relevé remplace le
  * précédent, flux par flux : un échec ponctuel laisse en place ce qu'on savait, et les positions qui
  * vieillissent sortent d'elles-mêmes du feed à la lecture.
+ *
+ * Les positions sortent telles quelles. Les trip updates, eux, passent ensuite par le même traitement
+ * que ceux de TCAR — journée de service, annulations, arrêts supprimés — qui les remanie en place :
+ * c'est pourquoi on garde le flux brut, et qu'on en redonne une copie neuve à chaque lecture. Une
+ * annulation levée entre-temps ne doit rien avoir effacé de ce que la source annonçait.
  */
 export function useRelayedNetworks(networks: readonly RelayedNetwork[]) {
-	const tripUpdates = new Map<string, Map<string, GtfsRealtime.transit_realtime.ITripUpdate>>();
+	const tripFeeds = new Map<string, Uint8Array>();
 	const vehiclePositions = new Map<string, Map<string, GtfsRealtime.transit_realtime.IVehiclePosition>>();
 
 	async function poll() {
@@ -28,12 +36,12 @@ export function useRelayedNetworks(networks: readonly RelayedNetwork[]) {
 					loadFeed(provider, "vehicle positions", vehiclePositionsUrl),
 				]);
 
-				if (tripFeed !== undefined) tripUpdates.set(provider, relayTripUpdates(network, tripFeed));
-				if (vehicleFeed !== undefined) vehiclePositions.set(provider, relayVehiclePositions(network, vehicleFeed));
+				if (tripFeed !== undefined) tripFeeds.set(provider, tripFeed);
+				if (vehicleFeed !== undefined) {
+					vehiclePositions.set(provider, relayVehiclePositions(network, decode(vehicleFeed)));
+				}
 
-				console.log(
-					`✓ ${provider}: ${tripUpdates.get(provider)?.size ?? 0} trip updates, ${vehiclePositions.get(provider)?.size ?? 0} vehicle positions.`,
-				);
+				console.log(`✓ ${provider}: ${vehiclePositions.get(provider)?.size ?? 0} vehicle positions.`);
 			}),
 		);
 	}
@@ -42,9 +50,14 @@ export function useRelayedNetworks(networks: readonly RelayedNetwork[]) {
 	void poll();
 
 	return {
-		/** Les trip updates de tous les réseaux relayés. */
-		tripUpdates(): Map<string, GtfsRealtime.transit_realtime.ITripUpdate> {
-			return new Map([...tripUpdates.values()].flatMap((entries) => [...entries]));
+		/** Les trip updates de chaque réseau relayé, dans une copie que l'appelant peut remanier. */
+		tripUpdates(): RelayedTripUpdates[] {
+			return networks.flatMap((network) => {
+				const feed = tripFeeds.get(network.provider);
+				return feed === undefined
+					? []
+					: [{ network: network.provider, tripUpdates: relayTripUpdates(network, decode(feed)) }];
+			});
 		},
 
 		/** Les positions de tous les réseaux relayés, hormis celles que la source a cessé de réhorodater. */
@@ -68,11 +81,17 @@ async function loadFeed(provider: string, label: string, url: string) {
 			return undefined;
 		}
 
-		return GtfsRealtime.transit_realtime.FeedMessage.decode(Buffer.from(await response.arrayBuffer()));
+		const bytes = new Uint8Array(await response.arrayBuffer());
+		decode(bytes); // un flux illisible est un échec comme un autre : on garde le précédent
+		return bytes;
 	} catch (cause) {
 		console.error(`✘ ${provider} ${label} poll error:`, cause);
 		return undefined;
 	}
+}
+
+function decode(bytes: Uint8Array) {
+	return GtfsRealtime.transit_realtime.FeedMessage.decode(bytes);
 }
 
 /** L'identifiant, préfixé du réseau quand la source l'omet (« 307 » → « TNI:307 »). */
@@ -102,12 +121,11 @@ function prefixTrip(provider: string, trip: GtfsRealtime.transit_realtime.ITripD
 
 function relayTripUpdates(network: RelayedNetwork, feed: GtfsRealtime.transit_realtime.FeedMessage) {
 	const { provider } = network;
-	const relayed = new Map<string, GtfsRealtime.transit_realtime.ITripUpdate>();
+	const relayed: GtfsRealtime.transit_realtime.ITripUpdate[] = [];
 
 	for (const entity of feed.entity) {
 		const tripUpdate = entity.tripUpdate;
-		const tripId = tripUpdate?.trip?.tripId;
-		if (!tripUpdate?.trip || !tripId) continue;
+		if (!tripUpdate?.trip?.tripId) continue;
 
 		prefixTrip(provider, tripUpdate.trip);
 		for (const stopTimeUpdate of tripUpdate.stopTimeUpdate ?? []) {
@@ -118,7 +136,7 @@ function relayTripUpdates(network: RelayedNetwork, feed: GtfsRealtime.transit_re
 		const number = vehicleNumber(network, tripUpdate.vehicle);
 		tripUpdate.vehicle = number === undefined ? undefined : { id: `${provider}:${number}` };
 
-		relayed.set(`ET:${provider}:${tripId.split(":").at(-1)}`, tripUpdate);
+		relayed.push(tripUpdate);
 	}
 
 	return relayed;

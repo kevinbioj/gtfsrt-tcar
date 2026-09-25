@@ -9,9 +9,10 @@ export function useRealtimeStore() {
 		tripUpdates: new Map<string, GtfsRealtime.transit_realtime.ITripUpdate>(),
 		/**
 		 * Les entités des déviations déclarées, reconstruites au même rythme que les trip updates : elles
-		 * dépendent des journées de service et du GTFS statique, pas de l'instant de la requête.
+		 * dépendent des journées de service et du GTFS statique, pas de l'instant de la requête. Rangées
+		 * par réseau (cf. `buildDetourEntities`).
 		 */
-		detourEntities: [] as GtfsRealtime.transit_realtime.IFeedEntity[],
+		detourEntities: new Map<string, GtfsRealtime.transit_realtime.IFeedEntity[]>(),
 		/**
 		 * tripId → départ annoncé pour cette course, en secondes epoch. Il n'y figure que lorsque le
 		 * flux couvre bien le premier arrêt de la course : passé le départ, il n'en parle plus, et le
