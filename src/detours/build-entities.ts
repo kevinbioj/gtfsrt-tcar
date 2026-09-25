@@ -4,7 +4,7 @@ import type GtfsRealtime from "gtfs-realtime-bindings";
 
 import { MAX_DETOUR_JUNCTION_OFFSET } from "../config.js";
 import { serviceDays } from "../gtfs-rt/scheduled-trips.js";
-import { type CancelIndex, isCancelled } from "../gtfs-rt/use-service-alerts.js";
+import { type CancelIndex, isCancelled, republishedAlertId } from "../gtfs-rt/use-service-alerts.js";
 import type { StaticGtfs, TripStop } from "../gtfs-rt/use-static-gtfs.js";
 import { encodePolyline } from "../utils/encode-polyline.js";
 import type { Coordinates } from "../utils/geometry.js";
@@ -217,7 +217,8 @@ export function buildDetourEntities(
 							travelTimeToStop: stop.travelTime,
 						})),
 						// Facultatif dans la spécification : une modification sans info trafic n'en cite aucune.
-						serviceAlertId: modification.alertId ?? undefined,
+						// Celle qu'elle cite est republiée dans le même feed, sous l'identifiant préfixé.
+						serviceAlertId: modification.alertId === null ? undefined : republishedAlertId(modification.alertId),
 						lastModifiedTime: modification.lastModifiedTime,
 					})),
 				},

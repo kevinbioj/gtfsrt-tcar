@@ -11,6 +11,11 @@ export function createFeed(
 	 * elles disent ce que les arrêts supprimés ne disent pas — par où passe le véhicule à la place.
 	 */
 	detourEntities: readonly GtfsRealtime.transit_realtime.IFeedEntity[] | null = null,
+	/**
+	 * Les infos trafic du réseau, republiées sous un identifiant préfixé (cf. `republishedAlertId`) :
+	 * ce sont elles que citent les `serviceAlertId` des modifications.
+	 */
+	alertEntities: readonly GtfsRealtime.transit_realtime.IFeedEntity[] | null = null,
 ) {
 	return GtfsRealtime.transit_realtime.FeedMessage.create({
 		header: {
@@ -37,6 +42,7 @@ export function createFeed(
 						.toArray()
 				: []),
 			...(detourEntities ?? []),
+			...(alertEntities ?? []),
 		],
 	});
 }

@@ -135,8 +135,12 @@ const publishedPositions = () => registry.publishable(Math.floor(Date.now() / 10
 
 hono.get("/vehicle-positions", (c) => handleRequest(c, "protobuf", null, publishedPositions()));
 hono.get("/vehicle-positions.json", (c) => handleRequest(c, "json", null, publishedPositions()));
-hono.get("/trip-updates", (c) => handleRequest(c, "protobuf", store.tripUpdates, null, store.detourEntities));
-hono.get("/trip-updates.json", (c) => handleRequest(c, "json", store.tripUpdates, null, store.detourEntities));
+hono.get("/trip-updates", (c) =>
+	handleRequest(c, "protobuf", store.tripUpdates, null, store.detourEntities, serviceAlerts.entities),
+);
+hono.get("/trip-updates.json", (c) =>
+	handleRequest(c, "json", store.tripUpdates, null, store.detourEntities, serviceAlerts.entities),
+);
 hono.get("/", (c) =>
 	handleRequest(
 		c,
@@ -144,6 +148,7 @@ hono.get("/", (c) =>
 		store.tripUpdates,
 		publishedPositions(),
 		store.detourEntities,
+		serviceAlerts.entities,
 	),
 );
 

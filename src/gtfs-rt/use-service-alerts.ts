@@ -97,7 +97,19 @@ export type AlertContribution = { routeId: string; directionId: number | null; s
 type ServedStopIndex = Map<string, Map<string, Set<string>>>;
 
 type AlertsState = { headerTimestamp: string | null };
-type PollResult = { alerts: AnalyzedAlert[]; headerTimestamp: string | null };
+type PollResult = {
+	alerts: AnalyzedAlert[];
+	entities: GtfsRealtime.transit_realtime.IFeedEntity[];
+	headerTimestamp: string | null;
+};
+
+/**
+ * L'identifiant sous lequel une info trafic est republiée dans nos trip updates, et que citent donc
+ * nos `serviceAlertId` : celui du flux amont, préfixé pour ne jamais rencontrer ceux de nos entités.
+ */
+export function republishedAlertId(alertId: string): string {
+	return `SA:${alertId}`;
+}
 
 let currentInterval: NodeJS.Timeout | undefined;
 
@@ -117,6 +129,12 @@ export function useServiceAlerts(
 	const resource = {
 		/** Les infos trafic analysées (cf. {@link AnalyzedAlert}). */
 		alerts: [] as AnalyzedAlert[],
+		/**
+		 * Les infos trafic du réseau telles que le flux amont les publie, prêtes à être republiées (cf.
+		 * {@link republishedAlertId}). L'analyse n'y est pour rien : une alerte que l'IA n'a pas su lire
+		 * reste une info trafic du réseau.
+		 */
+		entities: [] as GtfsRealtime.transit_realtime.IFeedEntity[],
 		importedAt: Temporal.Now.instant(),
 	};
 	let running = false;
@@ -130,6 +148,7 @@ export function useServiceAlerts(
 			const next = await pollAlerts(url, gtfs.data, state);
 			if (!next) return; // flux inchangé, erreur, ou GTFS indisponible → on garde l'index courant
 			resource.alerts = next.alerts;
+			resource.entities = next.entities;
 			onAnalyzed();
 			resource.importedAt = Temporal.Now.instant();
 			state.headerTimestamp = next.headerTimestamp;
@@ -318,6 +337,7 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 
 		// 1. Collecte des alertes touchant une ligne du réseau.
 		const inputs: AlertInput[] = [];
+		const entities: GtfsRealtime.transit_realtime.IFeedEntity[] = [];
 		const routesById = new Map<string, Set<string>>();
 		for (const entity of feed.entity) {
 			const alert = entity.alert;
@@ -328,6 +348,7 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 			if (routeIds.size === 0) continue;
 
 			routesById.set(entity.id, routeIds);
+			entities.push({ id: republishedAlertId(entity.id), alert });
 			inputs.push({
 				id: entity.id,
 				headerText: joinTranslations(alert.headerText),
@@ -387,7 +408,7 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		pruneCache(feedAlertIds);
 		flushCache();
 
-		return { alerts, headerTimestamp };
+		return { alerts, entities, headerTimestamp };
 	} catch (cause) {
 		console.error("✘ Failed to load service alerts!", cause);
 		return null;

@@ -10,8 +10,9 @@ export function handleRequest(
 	tripUpdates: Map<string, GtfsRealtime.transit_realtime.ITripUpdate> | null,
 	vehiclePositions: Map<string, GtfsRealtime.transit_realtime.IVehiclePosition> | null,
 	detourEntities: readonly GtfsRealtime.transit_realtime.IFeedEntity[] | null = null,
+	alertEntities: readonly GtfsRealtime.transit_realtime.IFeedEntity[] | null = null,
 ) {
-	const feed = createFeed(tripUpdates, vehiclePositions, detourEntities);
+	const feed = createFeed(tripUpdates, vehiclePositions, detourEntities, alertEntities);
 
 	if (output === "json") {
 		c.header("Content-Type", "application/json");
