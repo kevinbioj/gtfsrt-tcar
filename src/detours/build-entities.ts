@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type GtfsRealtime from "gtfs-realtime-bindings";
 
 import type { AlertPeriod } from "../ai/analyze-alert.js";
-import { MAX_DETOUR_JUNCTION_OFFSET, TRIP_MODIFICATIONS_HORIZON } from "../config.js";
+import { FINISHED_TRIP_RETENTION, MAX_DETOUR_JUNCTION_OFFSET, TRIP_MODIFICATIONS_HORIZON } from "../config.js";
 import { serviceDaysBetween } from "../gtfs-rt/scheduled-trips.js";
 import {
 	type CancelIndex,
@@ -133,10 +133,22 @@ export function buildDetourEntities(
 	 */
 	const problems = new Set<string>();
 
-	// Toute course qui n'a pas fini de circuler et part dans les sept jours (cf. `TRIP_MODIFICATIONS_HORIZON`).
+	// Toute course qui part dans les sept jours (cf. `TRIP_MODIFICATIONS_HORIZON`) et n'est pas arrivée
+	// à son terminus depuis plus d'une heure (cf. `FINISHED_TRIP_RETENTION`).
 	const horizon = nowSeconds + TRIP_MODIFICATIONS_HORIZON;
+	const retainedSince = nowSeconds - FINISHED_TRIP_RETENTION;
+	const days = serviceDaysBetween(gtfs, retainedSince, horizon);
 
-	const candidates = collectCandidates(gtfs, modifications, provisional, problems, nowSeconds, horizon);
+	// Les tronçons se jaugent au départ des courses, qui peut remonter à la veille : la première journée
+	// candidate borne donc les périodes à considérer, et non l'instant présent.
+	const candidates = collectCandidates(
+		gtfs,
+		modifications,
+		provisional,
+		problems,
+		days[0]?.midnight ?? retainedSince,
+		horizon,
+	);
 	if (candidates.size === 0) {
 		report(modifications.size, 0, stops, shapes, entities, problems);
 		return new Map();
@@ -154,7 +166,7 @@ export function buildDetourEntities(
 	/** Les tracés recousus, par itinéraire d'origine et combinaison de tronçons. */
 	const splicedShapes = new Map<string, string | null>();
 
-	for (const day of serviceDaysBetween(gtfs, nowSeconds, horizon)) {
+	for (const day of days) {
 		/** Les courses du jour qui reçoivent exactement les mêmes modifications et le même itinéraire. */
 		const groups = new Map<string, Group>();
 
@@ -166,12 +178,12 @@ export function buildDetourEntities(
 				const applicable = candidates.get(`${meta.routeId}:${meta.directionId}`);
 				if (applicable === undefined) continue;
 
-				// La course a fini de circuler, ou part au-delà de l'horizon : la fenêtre glisse, elle la
-				// rattrapera.
+				// La course a fini de circuler depuis plus d'une heure, ou part au-delà de l'horizon : la
+				// fenêtre glisse, elle la rattrapera.
 				const departure = gtfs.tripDepartures.get(tripId);
 				const arrival = gtfs.tripArrivals.get(tripId);
 				if (departure === undefined || arrival === undefined) continue;
-				if (day.midnight + arrival < nowSeconds || day.midnight + departure >= horizon) continue;
+				if (day.midnight + arrival < retainedSince || day.midnight + departure >= horizon) continue;
 
 				// Annulée, la course ne roule pas : elle n'a pas d'itinéraire à modifier.
 				if (isCancelled(cancelIndex, gtfs, tripId, day.midnight)) continue;
@@ -339,8 +351,9 @@ export function countSelectableTrips(
 ): Map<string, number> {
 	const counts = new Map<string, number>();
 	const horizon = nowSeconds + TRIP_MODIFICATIONS_HORIZON;
+	const retainedSince = nowSeconds - FINISHED_TRIP_RETENTION;
 
-	for (const day of serviceDaysBetween(gtfs, nowSeconds, horizon)) {
+	for (const day of serviceDaysBetween(gtfs, retainedSince, horizon)) {
 		for (const serviceId of day.services) {
 			for (const tripId of gtfs.serviceTrips.get(serviceId) ?? []) {
 				const meta = gtfs.trips.get(tripId);
@@ -349,7 +362,7 @@ export function countSelectableTrips(
 				const departure = gtfs.tripDepartures.get(tripId);
 				const arrival = gtfs.tripArrivals.get(tripId);
 				if (departure === undefined || arrival === undefined) continue;
-				if (day.midnight + arrival < nowSeconds || day.midnight + departure >= horizon) continue;
+				if (day.midnight + arrival < retainedSince || day.midnight + departure >= horizon) continue;
 
 				const schedule = gtfs.tripStopSequences.get(tripId);
 				const patternId = gtfs.tripPatterns.get(tripId);
@@ -375,11 +388,11 @@ function collectCandidates(
 	modifications: ReadonlyMap<number, ResolvedModification>,
 	provisional: ReadonlyMap<string, ProvisionalStop>,
 	problems: Set<string>,
-	nowSeconds: number,
+	from: number,
 	horizon: number,
 ): Map<string, Candidate[]> {
 	const candidates = new Map<string, Candidate[]>();
-	const window: AlertPeriod[] = [{ start: minuteOf(nowSeconds), end: minuteOf(horizon), dailyWindow: null }];
+	const window: AlertPeriod[] = [{ start: minuteOf(from), end: minuteOf(horizon), dailyWindow: null }];
 
 	for (const modification of modifications.values()) {
 		// Invisible, ou sans période dans les jours à venir, la modification ne s'annonce pas : c'est un

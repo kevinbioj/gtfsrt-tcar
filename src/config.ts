@@ -343,6 +343,12 @@ export const STATIC_GTFS_URL = "https://gtfs.bus-tracker.fr/astuce-global.zip";
 export const TRIP_UPDATES_HORIZON = Temporal.Duration.from({ hours: 24 }).total("seconds");
 /** Même fenêtre glissante pour les modifications de course, sur les sept jours à venir. */
 export const TRIP_MODIFICATIONS_HORIZON = Temporal.Duration.from({ hours: 7 * 24 }).total("seconds");
+/**
+ * Durée pendant laquelle une course arrivée à son terminus garde, dans les deux fenêtres, ses arrêts
+ * supprimés, son annulation et sa modification : le consommateur qui relit le feed juste après la fin
+ * de la course doit encore y trouver ce qui l'a touchée.
+ */
+export const FINISHED_TRIP_RETENTION = Temporal.Duration.from({ hours: 1 }).total("seconds");
 
 export const ALERTS_POLL_INTERVAL = Temporal.Duration.from({ minutes: 5 }).total("milliseconds");
 /**

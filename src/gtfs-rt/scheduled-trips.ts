@@ -1,5 +1,5 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
-import { TRIP_UPDATES_HORIZON } from "../config.js";
+import { FINISHED_TRIP_RETENTION, TRIP_UPDATES_HORIZON } from "../config.js";
 import { networkOf } from "../utils/network.js";
 import {
 	applySkippedStops,
@@ -144,9 +144,9 @@ export function tripRun(tripId: string, date: string): string {
  *
  * Une course annulée par une modification y figure toujours, annulée (cf. `isCancelled`).
  *
- * Est retenue toute course qui n'a pas fini de circuler et part dans les vingt-quatre heures (cf.
- * {@link TRIP_UPDATES_HORIZON}) : la fenêtre glisse, et le soir porte déjà les courses du lendemain
- * matin. Ce qui s'est déjà achevé est écarté, n'ayant plus rien à annoncer. `covered` porte les courses que
+ * Est retenue toute course qui part dans les vingt-quatre heures (cf. {@link TRIP_UPDATES_HORIZON})
+ * et n'est pas arrivée à son terminus depuis plus d'une heure (cf. {@link FINISHED_TRIP_RETENTION}) :
+ * la fenêtre glisse, et le soir porte déjà les courses du lendemain matin. `covered` porte les courses que
  * le flux source a déjà servies, journée de service comprise (cf. {@link tripRun}) : ce qu'il annonce
  * l'emporte toujours sur ce qu'on déduit du théorique, mais seulement pour la journée qu'il sert —
  * celle d'hier qui roule encore après minuit n'est pas couverte par son homonyme d'aujourd'hui.
@@ -171,19 +171,20 @@ export function scheduledTripUpdates(
 ): Map<string, GtfsRealtime.transit_realtime.ITripUpdate> {
 	const tripUpdates = new Map<string, GtfsRealtime.transit_realtime.ITripUpdate>();
 	const horizon = nowSeconds + TRIP_UPDATES_HORIZON;
+	const retainedSince = nowSeconds - FINISHED_TRIP_RETENTION;
 
-	for (const { date, midnight, services } of serviceDaysBetween(gtfs, nowSeconds, horizon)) {
+	for (const { date, midnight, services } of serviceDaysBetween(gtfs, retainedSince, horizon)) {
 		for (const serviceId of services) {
 			for (const tripId of gtfs.serviceTrips.get(serviceId) ?? []) {
 				if (covered.has(tripRun(tripId, date))) continue;
 
 				// La dernière arrivée, et non le départ : une course commencée il y a vingt minutes dessert
-				// encore des arrêts. Seule celle qui est arrivée à son terminus est passée pour de bon.
+				// encore des arrêts. Arrivée à son terminus, elle reste encore une heure dans le feed.
 				// Au-delà de l'horizon, elle attendra que la fenêtre la rattrape.
 				const departure = gtfs.tripDepartures.get(tripId);
 				const arrival = gtfs.tripArrivals.get(tripId);
 				if (departure === undefined || arrival === undefined) continue;
-				if (midnight + arrival < nowSeconds || midnight + departure >= horizon) continue;
+				if (midnight + arrival < retainedSince || midnight + departure >= horizon) continue;
 
 				const tripUpdate = isCancelled(cancelIndex, gtfs, tripId, midnight)
 					? buildCancellation(gtfs, tripId, date, nowSeconds)
