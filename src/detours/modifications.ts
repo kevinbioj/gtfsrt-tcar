@@ -78,6 +78,8 @@ export function useModificationIndex(
 		modifications: new Map<number, ResolvedModification>(),
 		/** Les trios à accepter ou à ignorer. */
 		suggestions: [] as Suggestion[],
+		/** Les modifications saisies dont l'info trafic a quitté le flux : à rattacher, ou à supprimer. */
+		orphans: [] as Modification[],
 		/** Les quais à sauter dans les trip updates. */
 		skipIndex: new Map() as SkipIndex,
 		/** Les courses à annuler, par clé de course. */
@@ -87,10 +89,7 @@ export function useModificationIndex(
 			const nowSeconds = Math.floor(now.epochMilliseconds / 1000);
 			const current = alerts();
 
-			store.recordAlerts(
-				current.map((alert) => alert.alertNumber),
-				nowSeconds,
-			);
+			store.recordAlerts(current, nowSeconds);
 
 			const reading = readAnalysis(current, gtfs.data);
 			store.syncAi(reading.proposals, nowSeconds);
@@ -98,6 +97,7 @@ export function useModificationIndex(
 			const indexed = indexModifications(current, reading, store, now);
 			resource.modifications = indexed.modifications;
 			resource.suggestions = indexed.suggestions;
+			resource.orphans = indexed.orphans;
 			resource.skipIndex = indexed.skipIndex;
 			resource.cancelIndex = indexed.cancelIndex;
 		},
@@ -219,8 +219,10 @@ function runsOf(stops: readonly OrderedStop[], removed: ReadonlySet<string>): st
  * Résout les modifications, et en tire les suggestions et les arrêts à sauter.
  *
  * Une modification rattachée à une info trafic qui n'est plus au flux reste en base, mais n'a plus
- * de perturbation à porter : elle n'est ni affichée ni publiée — les travaux reprennent souvent, et
- * le numéro avec eux.
+ * de perturbation à porter : elle n'est pas publiée — les travaux reprennent souvent, et le numéro
+ * avec eux. Si elle porte une saisie, elle est mise de côté : le réseau remplace souvent une info
+ * trafic par une autre, sous un autre numéro, avant la fin de la perturbation (« reprise du parcours
+ * le … »), et ce qui a été saisi se rattache alors à la nouvelle plutôt que de se refaire.
  */
 function indexModifications(
 	alerts: readonly AnalyzedAlert[],
@@ -234,10 +236,14 @@ function indexModifications(
 	const cancelIndex: CancelIndex = new Map();
 	/** Les trios qui portent une modification : ils ne se suggèrent plus. */
 	const covered = new Set<string>();
+	const orphans: Modification[] = [];
 
 	for (const record of store.modifications.values()) {
 		const alert = record.alertNumber === null ? undefined : byNumber.get(record.alertNumber);
-		if (record.alertNumber !== null && alert === undefined) continue;
+		if (record.alertNumber !== null && alert === undefined) {
+			if (hasInput(record)) orphans.push(record);
+			continue;
+		}
 
 		const key = alert === undefined ? null : scopeKey(alert.alertNumber, record.routeId, record.directionId);
 		if (key !== null) covered.add(key);
@@ -320,5 +326,19 @@ function indexModifications(
 		`✓ ${modifications.size} modifications indexed (${skipIndex.size} routes with skipped stops, ${cancelIndex.size} cancelled departures, ${suggestions.length} suggestions).`,
 	);
 
-	return { modifications, suggestions, skipIndex, cancelIndex };
+	return { modifications, suggestions, orphans, skipIndex, cancelIndex };
+}
+
+/**
+ * La modification porte-t-elle quelque chose que l'info trafic ne redonnerait pas ? Sans rien de
+ * saisi, elle n'est que ce que l'analyse de la nouvelle info trafic recrée d'elle-même.
+ */
+function hasInput(record: Modification): boolean {
+	return (
+		record.segments.length > 0 ||
+		record.cancelledDepartures.length > 0 ||
+		record.label !== null ||
+		record.period !== null ||
+		record.removedStopIds !== null
+	);
 }

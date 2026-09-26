@@ -19,6 +19,7 @@ import type {
 	CancelledDeparture,
 	DetourSegment,
 	DetourStore,
+	Modification,
 	ModificationInput,
 	ModificationPeriod,
 	Scope,
@@ -87,8 +88,9 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 	admin.get("/", (c) => c.html(ADMIN_PAGE));
 
 	/**
-	 * Le tableau : les modifications, et les suggestions à accepter ou à ignorer. Tout part, en vigueur
-	 * ou non ; c'est l'interface qui range en onglets ce qui vient, ce qui court et ce qui est fini.
+	 * Le tableau : les modifications, les suggestions à accepter ou à ignorer, et les modifications
+	 * dont l'info trafic a quitté le flux. Tout part, en vigueur ou non ; c'est l'interface qui range en
+	 * onglets ce qui vient, ce qui court, ce qui est fini et ce qui est à rattacher.
 	 */
 	admin.get("/api/modifications", (c) => {
 		const gtfs = deps.gtfs.data;
@@ -99,8 +101,11 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		const suggestions = [...deps.modificationIndex.suggestions]
 			.sort((a, b) => compareRows(a, b, gtfs))
 			.map((suggestion) => summarizeSuggestion(suggestion, deps, now));
+		const orphans = [...deps.modificationIndex.orphans]
+			.sort((a, b) => compareRows({ ...a, active: false }, { ...b, active: false }, gtfs))
+			.map((record) => summarizeOrphan(record, deps));
 
-		return c.json({ modifications, suggestions });
+		return c.json({ modifications, suggestions, orphans });
 	});
 
 	admin.get("/api/modifications/:uid", (c) => {
@@ -197,7 +202,7 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		const modification = resolve(c);
 		if (modification === undefined) return c.json({ code: 404, message: "Modification inconnue." }, 404);
 
-		discard(deps, [modification], []);
+		discard(deps, [modification], [], []);
 		refresh();
 		return c.json({ code: 200, message: "Modification supprimée." });
 	});
@@ -205,7 +210,8 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 	/**
 	 * Une action sur les lignes cochées du tableau, d'un bloc : les masquer, les afficher, ou les
 	 * écarter — supprimer les modifications, ignorer les suggestions. Masquer ou afficher ne vaut que
-	 * pour les modifications ; une suggestion ne publie rien, elle ne s'ignore que.
+	 * pour les modifications au flux ; une suggestion ne publie rien, elle ne s'ignore que, et une
+	 * modification dont l'info trafic est sortie du flux ne publie rien non plus.
 	 *
 	 * Ce qui a disparu entre l'affichage et le clic est passé sous silence : le résultat est le même.
 	 */
@@ -225,9 +231,10 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 			return modification === undefined ? [] : [modification];
 		});
 		const suggestions = deps.modificationIndex.suggestions.filter((suggestion) => keys.includes(suggestion.key));
+		const orphans = deps.modificationIndex.orphans.filter((record) => uids.map(Number).includes(record.uid));
 
 		if (action === "discard") {
-			discard(deps, modifications, suggestions);
+			discard(deps, modifications, suggestions, orphans);
 		} else {
 			deps.store.setDisabled(
 				modifications.map((modification) => modification.uid),
@@ -236,7 +243,40 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		}
 
 		refresh();
-		return c.json({ code: 200, message: `${modifications.length + suggestions.length} ligne(s) traitée(s).` });
+		const count = modifications.length + suggestions.length + (action === "discard" ? orphans.length : 0);
+		return c.json({ code: 200, message: `${count} ligne(s) traitée(s).` });
+	});
+
+	/**
+	 * Rattache des modifications dont l'info trafic a quitté le flux à une info trafic qui y est : celle
+	 * qui lui succède, le plus souvent. Ce qui y a été saisi reste, le reste suit la nouvelle.
+	 */
+	admin.post("/api/orphans/reattach", async (c) => {
+		const payload = await readObject(c);
+		if ("message" in payload) return c.json({ code: 400, message: payload.message }, 400);
+
+		const alertNumber = payload.alertNumber;
+		if (
+			typeof alertNumber !== "string" ||
+			!deps.serviceAlerts.alerts.some((alert) => alert.alertNumber === alertNumber)
+		) {
+			return c.json({ code: 400, message: `Aucune info trafic ${String(alertNumber)} au flux courant.` }, 400);
+		}
+
+		const uids = Array.isArray(payload.uids) ? payload.uids.map(Number) : [];
+		const orphans = deps.modificationIndex.orphans.filter((record) => uids.includes(record.uid));
+		if (orphans.length === 0) return c.json({ code: 404, message: "Aucune modification à rattacher." }, 404);
+
+		deps.store.reattach(
+			orphans.map((record) => record.uid),
+			alertNumber,
+			nowSeconds(),
+		);
+		refresh();
+		return c.json({
+			code: 200,
+			message: `${orphans.length} modification(s) rattachée(s) à l'info trafic ${alertNumber}.`,
+		});
 	});
 
 	/**
@@ -281,7 +321,7 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		const suggestion = deps.modificationIndex.suggestions.find((candidate) => candidate.key === c.req.param("key"));
 		if (suggestion === undefined) return c.json({ code: 404, message: "Suggestion inconnue." }, 404);
 
-		discard(deps, [], [suggestion]);
+		discard(deps, [], [suggestion], []);
 		refresh();
 		return c.json({ code: 200, message: "Suggestion ignorée." });
 	});
@@ -312,7 +352,12 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 	/** Les infos trafic du flux, pour y rattacher une modification. */
 	admin.get("/api/alerts", (c) => {
 		const alerts = deps.serviceAlerts.alerts
-			.map((alert) => ({ alertNumber: alert.alertNumber, headerText: alert.headerText, periods: alert.periods }))
+			.map((alert) => ({
+				alertNumber: alert.alertNumber,
+				headerText: alert.headerText,
+				periods: alert.periods,
+				routeIds: alert.routeIds,
+			}))
 			.sort((a, b) => a.alertNumber.localeCompare(b.alertNumber, "fr", { numeric: true }));
 		return c.json(alerts);
 	});
@@ -503,11 +548,15 @@ function nowSeconds(): number {
  * Supprime ou ignore, selon ce que c'est. Une modification saisie se supprime, rien de plus : la
  * suggestion qu'elle couvrait peut reparaître. Une modification de l'IA s'efface ET son trio s'écarte,
  * sans quoi le relevé suivant la recréerait ; une suggestion, elle, n'a que son trio à écarter.
+ *
+ * Une modification dont l'info trafic a quitté le flux s'efface sans rien écarter : aucun relevé ne
+ * peut la recréer tant que le numéro est absent, et s'il revient, c'est une nouvelle perturbation.
  */
 function discard(
 	deps: AdminDependencies,
 	modifications: readonly ResolvedModification[],
 	suggestions: readonly Suggestion[],
+	orphans: readonly Modification[],
 ) {
 	const scopes: Scope[] = [...suggestions];
 	for (const modification of modifications) {
@@ -520,7 +569,7 @@ function discard(
 	}
 
 	deps.store.discard(
-		modifications.map((modification) => modification.uid),
+		[...modifications, ...orphans].map((modification) => modification.uid),
 		scopes,
 		nowSeconds(),
 	);
@@ -682,6 +731,41 @@ function summarizeSuggestion(suggestion: Suggestion, deps: AdminDependencies, no
 		phase: phaseOf(suggestion.periods, suggestion.active, now),
 		removedStopCount: suggestion.removedStopIds.length,
 		firstSeenAt: suggestion.firstSeenAt,
+	};
+}
+
+/**
+ * Ce que le tableau affiche d'une modification dont l'info trafic a quitté le flux. Il n'y a plus
+ * d'analyse pour résoudre ce qui n'a pas été saisi : on s'en tient à ce qui l'a été, et au dernier
+ * titre relevé de l'info trafic, qui la nomme encore.
+ */
+function summarizeOrphan(record: Modification, deps: AdminDependencies) {
+	const gtfs = deps.gtfs.data;
+	const alertNumber = record.alertNumber as string;
+	const alertHeader = deps.store.alertHeaders.get(alertNumber) ?? "";
+
+	return {
+		kind: "orphan" as const,
+		uid: record.uid,
+		origin: record.origin,
+		alertNumber,
+		alertHeader,
+		label: record.label ?? alertHeader,
+		routeId: record.routeId,
+		line: lineName(gtfs, record.routeId),
+		lineCode: lineCode(record.routeId),
+		directionId: record.directionId,
+		headsigns: headsignsOf(gtfs, record.routeId, record.directionId),
+		periods: record.period === null ? [] : [{ start: record.period.start, end: record.period.end, dailyWindow: null }],
+		phase: "orphan" as const,
+		disabled: record.disabled,
+		removedStopCount: record.removedStopIds?.length ?? 0,
+		patternCount: record.patternIds.length,
+		patternTotal: patternsFor(gtfs, record.routeId, record.directionId).length,
+		segmentCount: record.segments.length,
+		cancelledCount: record.cancelledDepartures.length,
+		stopCount: record.segments.reduce((total, segment) => total + segment.stops.length, 0),
+		firstSeenAt: deps.store.alertFirstSeen.get(alertNumber) ?? record.createdAt,
 	};
 }
 

@@ -172,6 +172,11 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 	`
 	ALTER TABLE segments ADD COLUMN terminus TEXT CHECK (terminus IN ('start', 'end'));
 	`,
+	// Le dernier titre relevé de chaque info trafic. Il la nomme encore une fois sortie du flux : ses
+	// modifications restent, et se rattachent à celle qui lui succède (cf. `reattach`).
+	`
+	ALTER TABLE alert_first_seen ADD COLUMN header_text TEXT;
+	`,
 ];
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
@@ -357,12 +362,14 @@ export function useDetourStore(path: string) {
 	const provisional = new Map<string, ProvisionalStop>();
 	const dismissed = new Set<string>();
 	const firstSeen = new Map<string, number>();
+	const headers = new Map<string, string>();
 
 	const reload = () => {
 		modifications.clear();
 		provisional.clear();
 		dismissed.clear();
 		firstSeen.clear();
+		headers.clear();
 
 		for (const row of db.prepare("SELECT * FROM provisional_stops ORDER BY stop_uid").all() as ProvisionalRow[]) {
 			const stopId = provisionalStopId(row.stop_uid);
@@ -375,6 +382,7 @@ export function useDetourStore(path: string) {
 
 		for (const row of db.prepare("SELECT * FROM alert_first_seen").all() as FirstSeenRow[]) {
 			firstSeen.set(row.alert_number, row.first_seen_at);
+			if (row.header_text !== null) headers.set(row.alert_number, row.header_text);
 		}
 
 		for (const row of db.prepare("SELECT * FROM modifications ORDER BY uid").all() as ModificationRow[]) {
@@ -547,18 +555,25 @@ export function useDetourStore(path: string) {
 		/** Numéro d'info trafic → premier relevé où elle a été vue, en secondes epoch. */
 		alertFirstSeen: firstSeen as ReadonlyMap<string, number>,
 
+		/** Numéro d'info trafic → dernier titre relevé, qu'elle soit encore au flux ou non. */
+		alertHeaders: headers as ReadonlyMap<string, string>,
+
 		/**
-		 * Retient la première apparition des infos trafic du flux. Une info trafic déjà vue garde sa
-		 * date : c'est l'ordre dans lequel elles sont arrivées, pas celui de leur dernier passage.
+		 * Retient la première apparition des infos trafic du flux, et leur dernier titre. Une info trafic
+		 * déjà vue garde sa date : c'est l'ordre dans lequel elles sont arrivées, pas celui de leur
+		 * dernier passage.
 		 */
-		recordAlerts(alertNumbers: Iterable<string>, nowSeconds: number) {
-			const insert = db.prepare(
-				"INSERT INTO alert_first_seen (alert_number, first_seen_at) VALUES (?, ?) ON CONFLICT DO NOTHING",
+		recordAlerts(alerts: Iterable<{ alertNumber: string; headerText: string }>, nowSeconds: number) {
+			const upsert = db.prepare(
+				`INSERT INTO alert_first_seen (alert_number, first_seen_at, header_text) VALUES (?, ?, ?)
+				 ON CONFLICT (alert_number) DO UPDATE SET header_text = excluded.header_text`,
 			);
-			for (const alertNumber of alertNumbers) {
-				if (firstSeen.has(alertNumber)) continue;
-				insert.run(alertNumber, nowSeconds);
-				firstSeen.set(alertNumber, nowSeconds);
+			for (const { alertNumber, headerText } of alerts) {
+				if (firstSeen.has(alertNumber) && headers.get(alertNumber) === headerText) continue;
+				const seenAt = firstSeen.get(alertNumber) ?? nowSeconds;
+				upsert.run(alertNumber, seenAt, headerText);
+				firstSeen.set(alertNumber, seenAt);
+				headers.set(alertNumber, headerText);
 			}
 		},
 
@@ -639,6 +654,20 @@ export function useDetourStore(path: string) {
 			});
 
 			return modifications.get(uid);
+		},
+
+		/**
+		 * Rattache des modifications à une autre info trafic — celle qui succède à la leur, sortie du
+		 * flux. Rien de ce qui y a été saisi ne bouge ; ce qui ne l'a pas été suit la nouvelle. Elles
+		 * sont réhorodatées : l'info trafic qu'elles citent vient de changer.
+		 */
+		reattach(uids: Iterable<number>, alertNumber: string, nowSeconds: number): number {
+			return transaction(() => {
+				const update = db.prepare("UPDATE modifications SET alert_number = ?, updated_at = ? WHERE uid = ?");
+				let changes = 0;
+				for (const uid of uids) changes += Number(update.run(alertNumber, nowSeconds, uid).changes);
+				return changes;
+			});
 		},
 
 		/** Rend des modifications visibles ou invisibles. Invisible, rien de ce qu'elle déclare ne sort. */
@@ -791,7 +820,7 @@ type RemovedRow = { uid: number; stop_id: string };
 
 type DismissedRow = { alert_number: string; route_id: string; direction_id: number; dismissed_at: number };
 
-type FirstSeenRow = { alert_number: string; first_seen_at: number };
+type FirstSeenRow = { alert_number: string; first_seen_at: number; header_text: string | null };
 
 type ProvisionalRow = { stop_uid: number; name: string; latitude: number; longitude: number; created_at: number };
 

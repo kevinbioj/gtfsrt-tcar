@@ -302,6 +302,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			<span class="note" id="bulkCount"></span>
 			<button id="bulkHide">Masquer</button>
 			<button id="bulkShow">Afficher</button>
+			<button id="bulkAttach">Rattacher…</button>
 			<button id="bulkDiscard" class="danger"></button>
 		</span>
 		<span class="grow"></span>
@@ -501,7 +502,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	var state = {
 		detail: null, rows: [], alerts: [], routes: [], segments: [], active: 0, mode: "idle",
-		// L'onglet du tableau : « current », « upcoming » ou « ended ».
+		// L'onglet du tableau : « current », « upcoming », « ended » ou « orphan ».
 		phase: "current",
 		// Les lignes cochées du tableau, par identifiant (cf. rowId).
 		selected: new Set(),
@@ -718,8 +719,11 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	/** L'adresse des cartouches de ligne du réseau. */
 	var LINE_CARTRIDGE = "https://storage.googleapis.com/bus-tracker-assets/line-cartridges/astuce/";
 
-	/** Les trois onglets du tableau : ce qui court, ce qui vient, ce qui est fini. */
-	var PHASES = [["current", "En cours"], ["upcoming", "À venir"], ["ended", "Terminées"]];
+	/**
+	 * Les onglets du tableau : ce qui court, ce qui vient, ce qui est fini, et ce dont l'info trafic a
+	 * quitté le flux — à rattacher à celle qui lui succède, ou à supprimer.
+	 */
+	var PHASES = [["current", "En cours"], ["upcoming", "À venir"], ["ended", "Terminées"], ["orphan", "Info trafic retirée"]];
 
 	/**
 	 * Les colonnes que le tableau sait rendre. Chaque groupement choisit les siennes : ce qui est commun
@@ -741,7 +745,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		} },
 		stops: { label: "Arrêts", className: "num", cell: function (row) { return String(row.removedStopCount); } },
 		period: { label: "Période", className: "note", cell: function (row) {
-			return escapeHtml(describePeriodsShort(row.periods));
+			return escapeHtml(periodText(row));
 		} },
 		status: { label: "Déclaration", cell: statusBadges },
 		actions: { label: "", action: true },
@@ -772,7 +776,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 					+ "<span class='title'>" + escapeHtml(row.alertNumber !== null ? row.alertHeader : row.label) + "</span>"
 					+ "<span class='grow'></span>"
 					+ "<span class='note'>" + countLabel(rows) + "</span>"
-					+ "<span class='note'>" + escapeHtml(describePeriodsShort(row.periods)) + "</span>";
+					+ "<span class='note'>" + escapeHtml(periodText(row)) + "</span>";
 			}
 		}
 	};
@@ -791,6 +795,14 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		name: function (a, b) { return groupTitle(a).localeCompare(groupTitle(b), "fr"); },
 		chrono: function (a, b) { return b.firstSeenAt - a.firstSeenAt; }
 	};
+
+	/**
+	 * La période d'une ligne du tableau. Celle d'une modification dont l'info trafic a quitté le flux,
+	 * si elle n'a pas été saisie, n'est plus connue : elle suivra l'info trafic à laquelle on la rattache.
+	 */
+	function periodText(row) {
+		return row.kind === "orphan" && row.periods.length === 0 ? "—" : describePeriodsShort(row.periods);
+	}
 
 	function groupTitle(row) { return row.alertNumber !== null ? row.alertHeader : row.label; }
 
@@ -847,7 +859,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		if (row.segmentCount === 0) {
 			// Une modification qui ne fait qu'annuler des courses n'a pas de tronçon à déclarer.
 			if (row.cancelledCount === 0) badges.push('<span class="badge off">sans tronçon</span>');
-		} else if (row.publishableSegments < row.segmentCount) {
+		} else if (row.kind === "modification" && row.publishableSegments < row.segmentCount) {
+			// Sans info trafic, rien ne dit encore quels arrêts ses tronçons suppriment : ce qui les
+			// rend publiables se jugera une fois rattachée.
 			badges.push('<span class="badge warn">incomplète</span>');
 		} else {
 			// Ce qu'il y a de plus parlant, et rien de plus : le nombre de tronçons quand il y en a
@@ -872,7 +886,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	function loadList() {
 		request(API + "/api/modifications").then(function (answer) {
-			state.rows = answer.modifications.concat(answer.suggestions);
+			state.rows = answer.modifications.concat(answer.suggestions, answer.orphans);
 			renderList();
 		}).catch(function (error) { alert(error.message); });
 	}
@@ -987,28 +1001,38 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	/**
 	 * La barre des actions de masse. Chaque bouton dit ce qu'il fera à la sélection : masquer ce qui est
-	 * visible, afficher ce qui est masqué, supprimer les modifications — de l'IA ou saisies — et
-	 * ignorer les suggestions.
+	 * visible, afficher ce qui est masqué, rattacher ce dont l'info trafic a quitté le flux, supprimer
+	 * les modifications — de l'IA ou saisies — et ignorer les suggestions.
 	 */
 	function renderBulk() {
 		var rows = selectedRows();
 		el("bulkBar").className = rows.length > 0 ? "bulk" : "bulk hidden";
 		if (rows.length === 0) return;
 
-		var modifications = rows.filter(function (row) { return row.kind === "modification"; });
-		var hidden = modifications.filter(function (row) { return row.disabled; }).length;
+		var published = rows.filter(function (row) { return row.kind === "modification"; });
+		var hidden = published.filter(function (row) { return row.disabled; }).length;
+		var orphans = rows.filter(function (row) { return row.kind === "orphan"; }).length;
+		var suggestions = rows.filter(function (row) { return row.kind === "suggestion"; }).length;
 
 		el("bulkCount").textContent = rows.length + (rows.length > 1 ? " cochées" : " cochée");
-		el("bulkHide").disabled = modifications.length - hidden === 0;
+		el("bulkHide").className = orphans === rows.length ? "hidden" : "";
+		el("bulkShow").className = orphans === rows.length ? "hidden" : "";
+		el("bulkHide").disabled = published.length - hidden === 0;
 		el("bulkShow").disabled = hidden === 0;
-		el("bulkDiscard").textContent = modifications.length === 0 ? "Ignorer"
-			: modifications.length === rows.length ? "Supprimer" : "Ignorer / supprimer";
+		el("bulkAttach").className = orphans > 0 ? "" : "hidden";
+		el("bulkAttach").disabled = orphans !== rows.length;
+		el("bulkDiscard").textContent = suggestions === rows.length ? "Ignorer"
+			: suggestions === 0 ? "Supprimer" : "Ignorer / supprimer";
 	}
 
-	/** Applique une action de masse aux lignes cochées, puis relit le tableau. */
+	/**
+	 * Applique une action de masse aux lignes cochées, puis relit le tableau. Une modification dont
+	 * l'info trafic a quitté le flux se supprime comme les autres, sans rien écarter : l'IA n'a rien à
+	 * y recréer.
+	 */
 	function bulk(action) {
 		var rows = selectedRows();
-		var modifications = rows.filter(function (row) { return row.kind === "modification"; });
+		var modifications = rows.filter(function (row) { return row.kind !== "suggestion"; });
 
 		if (action === "discard") {
 			var removed = modifications.length;
@@ -1016,7 +1040,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			var parts = [];
 			if (removed > 0) parts.push("supprimer " + removed + (removed > 1 ? " modifications" : " modification"));
 			if (ignored > 0) parts.push("ignorer " + ignored + (ignored > 1 ? " suggestions" : " suggestion"));
-			var fromAi = ignored + modifications.filter(function (row) { return row.origin === "ai"; }).length;
+			var fromAi = ignored + modifications.filter(function (row) {
+				return row.kind === "modification" && row.origin === "ai";
+			}).length;
 			var question = parts.join(" et ") + " ?";
 			question = question.charAt(0).toUpperCase() + question.slice(1);
 			if (fromAi > 0) question += "\n\nC'est définitif : l'IA ne recréera ni ne proposera ce qui vient d'elle.";
@@ -1040,12 +1066,13 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	/**
 	 * Une ligne du tableau. Une modification s'ouvre d'un clic n'importe où sur la ligne — chaque
 	 * cellule est un lien, qui s'ouvre aussi bien dans un autre onglet. Une suggestion n'a rien à
-	 * ouvrir : elle s'accepte ou s'ignore. La première cellule coche la ligne, pour les actions de masse.
+	 * ouvrir : elle s'accepte ou s'ignore. Une modification dont l'info trafic a quitté le flux non plus :
+	 * elle se rattache ou se supprime. La première cellule coche la ligne, pour les actions de masse.
 	 */
 	function listRow(row, grouping) {
 		var tr = document.createElement("tr");
 		var href = row.kind === "modification" ? "#/modification/" + row.uid : null;
-		tr.className = row.kind === "suggestion" ? "suggestion" : row.disabled ? "muted" : "";
+		tr.className = row.kind === "suggestion" ? "suggestion" : row.kind === "orphan" || row.disabled ? "muted" : "";
 
 		tr.innerHTML = grouping.columns.map(function (column) {
 			var definition = COLUMNS[column[0]];
@@ -1066,6 +1093,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		if (row.kind === "suggestion") {
 			cell.appendChild(actionButton("Accepter", "", function () { acceptSuggestion(row); }));
 			cell.appendChild(actionButton("Ignorer", "danger", function () { dismissSuggestion(row); }));
+		} else if (row.kind === "orphan") {
+			cell.appendChild(actionButton("Rattacher…", "", function () { reattach([row]); }));
+			cell.appendChild(actionButton("Supprimer", "danger", function () { removeOrphan(row); }));
 		} else {
 			var edit = document.createElement("a");
 			edit.className = "button";
@@ -1104,6 +1134,63 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		request(API + "/api/suggestions/" + encodeURIComponent(row.key) + "/dismiss", { method: "POST" })
 			.then(loadList)
 			.catch(function (error) { alert(error.message); });
+	}
+
+	/**
+	 * Rattache des modifications dont l'info trafic a quitté le flux à une info trafic qui y est. Celles
+	 * qui citent toutes leurs lignes viennent en tête : c'est là qu'est, le plus souvent, celle qui
+	 * succède à l'ancienne.
+	 */
+	function reattach(rows) {
+		request(API + "/api/alerts").then(function (alerts) {
+			var routeIds = rows.map(function (row) { return row.routeId; });
+			var citing = alerts.filter(function (alert) {
+				return routeIds.every(function (routeId) { return alert.routeIds.indexOf(routeId) !== -1; });
+			});
+			var others = alerts.filter(function (alert) { return citing.indexOf(alert) === -1; });
+			var options = function (list) {
+				return list.map(function (alert) {
+					return "<option value='" + escapeHtml(alert.alertNumber) + "'>"
+						+ escapeHtml(alert.alertNumber + " — " + alert.headerText) + "</option>";
+				}).join("");
+			};
+			var lines = Array.from(new Set(rows.map(function (row) { return row.line; })));
+
+			openDialog({
+				title: rows.length > 1 ? "Rattacher " + rows.length + " modifications" : "Rattacher la modification "
+					+ rows[0].line + " " + towardOf(rows[0]),
+				body: "<div class='field'><label>Info trafic</label><select id='attachAlert' class='grow'>"
+					+ (citing.length > 0 ? "<optgroup label='Citent " + escapeHtml(lines.length > 1 ? "les lignes " : "la ligne ")
+						+ escapeHtml(lines.join(", ")) + "'>" + options(citing) + "</optgroup>" : "")
+					+ (others.length > 0 ? "<optgroup label='Autres'>" + options(others) + "</optgroup>" : "")
+					+ "</select></div>"
+					+ "<p class='note'>Tronçons, départs annulés et champs saisis restent ; le reste suit la nouvelle info trafic.</p>",
+				confirmText: "Rattacher",
+				confirm: function () {
+					return request(API + "/api/orphans/reattach", {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({
+							alertNumber: el("attachAlert").value,
+							uids: rows.map(function (row) { return row.uid; })
+						})
+					}).then(function () {
+						state.selected.clear();
+						loadList();
+					});
+				}
+			});
+		}).catch(function (error) { alert(error.message); });
+	}
+
+	/** Supprime une modification dont l'info trafic a quitté le flux, et tout ce qui y a été saisi. */
+	function removeOrphan(row) {
+		if (!confirm("Supprimer la modification " + row.line + " " + towardOf(row) + " et tout ce qui y a été saisi ?")) return;
+		request(API + "/api/bulk", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ action: "discard", uids: [row.uid], suggestions: [] })
+		}).then(loadList).catch(function (error) { alert(error.message); });
 	}
 
 	/** Rend une modification visible ou invisible. */
@@ -3413,6 +3500,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	el("bulkHide").onclick = function () { bulk("hide"); };
 	el("bulkShow").onclick = function () { bulk("show"); };
 	el("bulkDiscard").onclick = function () { bulk("discard"); };
+	el("bulkAttach").onclick = function () {
+		reattach(selectedRows().filter(function (row) { return row.kind === "orphan"; }));
+	};
 	el("remove").onclick = remove;
 	el("create").onclick = createModification;
 	el("placeNewStop").onclick = function () {
