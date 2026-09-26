@@ -1,4 +1,5 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
+import { TRIP_UPDATES_HORIZON } from "../config.js";
 import { networkOf } from "../utils/network.js";
 import {
 	applySkippedStops,
@@ -15,12 +16,6 @@ const TIME_ZONE = "Europe/Paris";
 
 const SCHEDULED = GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SCHEDULED;
 
-/**
- * Journées de service susceptibles de porter une course qui n'a pas fini de circuler. La veille en
- * fait partie : une course partie à « 25:10:00 » appartient à la journée d'hier et roule ce matin.
- */
-const CANDIDATE_DAYS = [-1, 0];
-
 /** Une journée de service : sa date au format GTFS, son minuit, et les services qui y circulent. */
 export type ServiceDay = { date: string; midnight: number; services: Set<string> };
 
@@ -33,6 +28,28 @@ export type ServiceDay = { date: string; midnight: number; services: Set<string>
 export function serviceDays(gtfs: StaticGtfs, offsets: readonly number[]): ServiceDay[] {
 	const today = Temporal.Now.plainDateISO(TIME_ZONE);
 	return offsets.map((offset) => serviceDay(gtfs, today.add({ days: offset })));
+}
+
+/**
+ * Les journées de service susceptibles de porter une course qui circule entre `from` et `to`
+ * (secondes epoch) : de la veille de `from` — une course partie à « 25:10:00 » appartient à la
+ * journée d'hier et roule ce matin — jusqu'à celle de `to`.
+ */
+export function serviceDaysBetween(gtfs: StaticGtfs, from: number, to: number): ServiceDay[] {
+	const dateOf = (seconds: number) =>
+		Temporal.Instant.fromEpochMilliseconds(seconds * 1000)
+			.toZonedDateTimeISO(TIME_ZONE)
+			.toPlainDate();
+
+	const last = dateOf(to);
+	const days: ServiceDay[] = [];
+	for (
+		let date = dateOf(from).subtract({ days: 1 });
+		Temporal.PlainDate.compare(date, last) <= 0;
+		date = date.add({ days: 1 })
+	)
+		days.push(serviceDay(gtfs, date));
+	return days;
 }
 
 /** La journée de service d'une date donnée. */
@@ -127,17 +144,17 @@ export function tripRun(tripId: string, date: string): string {
  *
  * Une course annulée par une modification y figure toujours, annulée (cf. `isCancelled`).
  *
- * Est retenue toute course de la journée de service en cours qui n'a pas fini de circuler : le reste
- * de la journée est publié d'un bloc — une suppression d'arrêt de ce soir se lit dès ce matin — et
- * ce qui s'est déjà achevé est écarté, n'ayant plus rien à annoncer. `covered` porte les courses que
+ * Est retenue toute course qui n'a pas fini de circuler et part dans les vingt-quatre heures (cf.
+ * {@link TRIP_UPDATES_HORIZON}) : la fenêtre glisse, et le soir porte déjà les courses du lendemain
+ * matin. Ce qui s'est déjà achevé est écarté, n'ayant plus rien à annoncer. `covered` porte les courses que
  * le flux source a déjà servies, journée de service comprise (cf. {@link tripRun}) : ce qu'il annonce
  * l'emporte toujours sur ce qu'on déduit du théorique, mais seulement pour la journée qu'il sert —
  * celle d'hier qui roule encore après minuit n'est pas couverte par son homonyme d'aujourd'hui.
  *
  * Chaque course déclare la journée de service dont elle relève. Sans elle, le consommateur doit la
  * deviner, et à minuit passé la journée d'hier est encore ouverte — une course reconstruite pour ce
- * soir passerait alors pour avoir roulé la veille au soir, tout le reste de la journée étant publié
- * d'un bloc dès sa première seconde.
+ * soir passerait alors pour avoir roulé la veille au soir, les vingt-quatre heures à venir étant
+ * publiées d'un bloc.
  *
  * Chaque course en ressort réduite à ce qu'on en sait de sûr (cf. {@link declareNoRealtime}) : son
  * premier arrêt en NO_DATA, puis ses arrêts supprimés — la forme même que prennent les courses du
@@ -153,20 +170,24 @@ export function scheduledTripUpdates(
 	nowSeconds: number,
 ): Map<string, GtfsRealtime.transit_realtime.ITripUpdate> {
 	const tripUpdates = new Map<string, GtfsRealtime.transit_realtime.ITripUpdate>();
+	const horizon = nowSeconds + TRIP_UPDATES_HORIZON;
 
-	for (const { date, midnight, services } of serviceDays(gtfs, CANDIDATE_DAYS)) {
+	for (const { date, midnight, services } of serviceDaysBetween(gtfs, nowSeconds, horizon)) {
 		for (const serviceId of services) {
 			for (const tripId of gtfs.serviceTrips.get(serviceId) ?? []) {
 				if (covered.has(tripRun(tripId, date))) continue;
 
 				// La dernière arrivée, et non le départ : une course commencée il y a vingt minutes dessert
 				// encore des arrêts. Seule celle qui est arrivée à son terminus est passée pour de bon.
+				// Au-delà de l'horizon, elle attendra que la fenêtre la rattrape.
+				const departure = gtfs.tripDepartures.get(tripId);
 				const arrival = gtfs.tripArrivals.get(tripId);
-				if (arrival === undefined || midnight + arrival < nowSeconds) continue;
+				if (departure === undefined || arrival === undefined) continue;
+				if (midnight + arrival < nowSeconds || midnight + departure >= horizon) continue;
 
 				const tripUpdate = isCancelled(cancelIndex, gtfs, tripId, midnight)
 					? buildCancellation(gtfs, tripId, date, nowSeconds)
-					: buildTripUpdate(gtfs, skipIndex, tripId, date, nowSeconds);
+					: buildTripUpdate(gtfs, skipIndex, tripId, date, midnight + departure, nowSeconds);
 				if (tripUpdate === undefined) continue;
 
 				// L'identifiant porte la journée de service comme le descripteur, et pour la même raison :
@@ -237,6 +258,7 @@ function buildTripUpdate(
 	skipIndex: SkipIndex,
 	tripId: string,
 	startDate: string,
+	departsAt: number,
 	nowSeconds: number,
 ): GtfsRealtime.transit_realtime.ITripUpdate | undefined {
 	const meta = gtfs.trips.get(tripId);
@@ -262,7 +284,13 @@ function buildTripUpdate(
 		timestamp: nowSeconds,
 	};
 
-	applySkippedStops(tripUpdate, meta.routeId, skipIndex, gtfs);
+	applySkippedStops(
+		tripUpdate,
+		meta.routeId,
+		skipIndex,
+		gtfs,
+		Temporal.Instant.fromEpochMilliseconds(departsAt * 1000),
+	);
 	if (!hasSkippedStops(tripUpdate)) return undefined;
 
 	declareNoRealtime(tripUpdate, schedule);

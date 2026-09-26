@@ -32,8 +32,15 @@ const EMPTY_SERVED: ReadonlySet<string> = new Set();
 /**
  * Des quais à sauter sur une ligne, dans un sens, pour les courses de certains tracés seulement —
  * ou de tous (`null`) : une modification restreinte à un tracé ne touche pas les courses des autres.
+ * Seulement pour les courses qui partent pendant l'une des périodes, comme les annulations (cf.
+ * `isCancelled`) : une déviation qui commence ce soir se lit dès ce matin sur les courses de ce soir.
  */
-export type SkipBucket = { directionId: number; patternIds: ReadonlySet<string> | null; stopIds: ReadonlySet<string> };
+export type SkipBucket = {
+	directionId: number;
+	patternIds: ReadonlySet<string> | null;
+	periods: AlertPeriod[];
+	stopIds: ReadonlySet<string>;
+};
 /** routeId → buckets d'arrêts à sauter (SKIPPED), par sens et par tracé. */
 export type SkipIndex = Map<string, SkipBucket[]>;
 
@@ -172,14 +179,16 @@ export function useServiceAlerts(
 }
 
 /**
- * Renvoie l'ensemble des stopId à sauter pour une course de cette ligne, dans ce sens, sur ce tracé.
- * Un tracé inconnu — course absente du GTFS — ne voit que les suppressions qui visent tous les tracés.
+ * Renvoie l'ensemble des stopId à sauter pour une course de cette ligne, dans ce sens, sur ce tracé,
+ * qui part à `departsAt`. Un tracé inconnu — course absente du GTFS — ne voit que les suppressions qui
+ * visent tous les tracés.
  */
 export function skippedStopIds(
 	skipIndex: SkipIndex,
 	routeId: string,
 	directionId: number,
 	patternId: string | undefined,
+	departsAt: Temporal.Instant,
 ): Set<string> {
 	const buckets = skipIndex.get(routeId);
 	if (buckets === undefined) return new Set();
@@ -188,13 +197,14 @@ export function skippedStopIds(
 	for (const bucket of buckets) {
 		if (bucket.directionId !== directionId) continue;
 		if (bucket.patternIds !== null && (patternId === undefined || !bucket.patternIds.has(patternId))) continue;
+		if (!isActive(bucket.periods, departsAt)) continue;
 		for (const stopId of bucket.stopIds) stopIds.add(stopId);
 	}
 	return stopIds;
 }
 
 /**
- * Marque en SKIPPED les arrêts supprimés d'un trip. Deux cas :
+ * Marque en SKIPPED les arrêts supprimés d'un trip, jaugés à son départ `departsAt`. Deux cas :
  *  1. arrêt présent dans le GTFS-RT → on le bascule en SKIPPED (temps retirés) ;
  *  2. arrêt supprimé mais ABSENT du GTFS-RT (la source l'a retiré) → on le réinsère comme entrée
  *     SKIPPED, à sa position (stop_sequence issu de l'horaire théorique du trip).
@@ -207,13 +217,20 @@ export function applySkippedStops(
 	routeId: string,
 	skipIndex: SkipIndex,
 	gtfs: StaticGtfs,
+	departsAt: Temporal.Instant,
 ) {
 	const stopTimeUpdates = tripUpdate.stopTimeUpdate;
 	if (!stopTimeUpdates?.length) return;
 
 	const directionId = tripUpdate.trip?.directionId ?? 0;
 	const tripId = tripUpdate.trip?.tripId;
-	let stopIds = skippedStopIds(skipIndex, routeId, directionId, tripId ? gtfs.tripPatterns.get(tripId) : undefined);
+	let stopIds = skippedStopIds(
+		skipIndex,
+		routeId,
+		directionId,
+		tripId ? gtfs.tripPatterns.get(tripId) : undefined,
+		departsAt,
+	);
 	if (stopIds.size === 0) return;
 
 	// L'horaire théorique sert au garde-fou (terminus de la course) puis à la réinsertion.

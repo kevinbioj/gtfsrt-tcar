@@ -335,6 +335,15 @@ export const SERVICE_ALERTS_URL = "https://hexatransit.fr/datasets/services_rt/a
  */
 export const STATIC_GTFS_URL = "https://gtfs.bus-tracker.fr/astuce-global.zip";
 
+/**
+ * Fenêtre glissante des trip updates reconstruits depuis l'horaire théorique : toute course qui n'a
+ * pas fini de circuler et part dans les vingt-quatre heures y annonce ses arrêts supprimés ou son
+ * annulation. Le soir, elle porte donc déjà les courses du lendemain.
+ */
+export const TRIP_UPDATES_HORIZON = Temporal.Duration.from({ hours: 24 }).total("seconds");
+/** Même fenêtre glissante pour les modifications de course, sur les sept jours à venir. */
+export const TRIP_MODIFICATIONS_HORIZON = Temporal.Duration.from({ hours: 7 * 24 }).total("seconds");
+
 export const ALERTS_POLL_INTERVAL = Temporal.Duration.from({ minutes: 5 }).total("milliseconds");
 /**
  * Intervalle de vérification de fraîcheur du GTFS statique : une simple requête HEAD compare la

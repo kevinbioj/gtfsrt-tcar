@@ -1956,7 +1956,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			note.textContent = "Aucun tracé coché : la modification ne vise aucune course.";
 			note.style.color = "var(--danger)";
 		} else {
-			note.textContent = bounded ? "Courses d'ici la fin du service entre les bornes du tronçon " + (state.active + 1) + "." : "";
+			note.textContent = bounded ? "Courses des sept jours à venir entre les bornes du tronçon " + (state.active + 1) + "." : "";
 			note.style.color = "var(--muted)";
 		}
 	}
@@ -2073,7 +2073,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var count = matchingTrips(seg());
 		var note = el("tripCount");
 		note.textContent = count > 0
-			? count + " courses concernées d'ici la fin du service."
+			? count + " courses concernées dans les sept jours à venir."
 			: state.patterns.length === 0
 				? "Aucun tracé coché : ce tronçon ne sera pas publié."
 				: "Aucune course des tracés cochés ne dessert ces bornes : ce tronçon ne sera pas publié.";

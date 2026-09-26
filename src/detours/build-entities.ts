@@ -2,9 +2,16 @@ import { createHash } from "node:crypto";
 
 import type GtfsRealtime from "gtfs-realtime-bindings";
 
-import { MAX_DETOUR_JUNCTION_OFFSET } from "../config.js";
-import { serviceDays } from "../gtfs-rt/scheduled-trips.js";
-import { type CancelIndex, isCancelled, republishedAlertId } from "../gtfs-rt/use-service-alerts.js";
+import type { AlertPeriod } from "../ai/analyze-alert.js";
+import { MAX_DETOUR_JUNCTION_OFFSET, TRIP_MODIFICATIONS_HORIZON } from "../config.js";
+import { serviceDaysBetween } from "../gtfs-rt/scheduled-trips.js";
+import {
+	type CancelIndex,
+	isActive,
+	isCancelled,
+	periodsOverlap,
+	republishedAlertId,
+} from "../gtfs-rt/use-service-alerts.js";
 import type { StaticGtfs, TripStop } from "../gtfs-rt/use-static-gtfs.js";
 import { encodePolyline } from "../utils/encode-polyline.js";
 import type { Coordinates } from "../utils/geometry.js";
@@ -13,12 +20,6 @@ import { removesStops } from "./bounds.js";
 import type { ResolvedModification } from "./modifications.js";
 import { type DrawnPath, spliceShape } from "./splice-shape.js";
 import { type DetourTerminus, type ProvisionalStop, provisionalStopUid } from "./store.js";
-
-/**
- * Les journées de service qu'une déviation couvre. La veille en fait partie pour la même raison que
- * dans `scheduledTripUpdates` : une course partie à « 25:10 » appartient à hier et roule ce matin.
- */
-const CANDIDATE_DAYS = [-1, 0] as const;
 
 /**
  * Un tronçon dévié prêt à être appliqué : un segment d'une déclaration, dont l'info trafic est en
@@ -39,6 +40,8 @@ type Candidate = {
 	directionId: number;
 	/** Les tracés visés, ou `null` pour tous (cf. `DetourSegment.patternIds`). */
 	patternIds: ReadonlySet<string> | null;
+	/** Les périodes de sa modification : il ne s'applique qu'aux courses qui partent pendant l'une d'elles. */
+	periods: AlertPeriod[];
 	/** Les tracés sur lesquels un tronçon plus prioritaire l'écrase (cf. `resolveOverrides`). */
 	overriddenOn: ReadonlySet<string>;
 	startStopId: string;
@@ -130,7 +133,10 @@ export function buildDetourEntities(
 	 */
 	const problems = new Set<string>();
 
-	const candidates = collectCandidates(gtfs, modifications, provisional, problems);
+	// Toute course qui n'a pas fini de circuler et part dans les sept jours (cf. `TRIP_MODIFICATIONS_HORIZON`).
+	const horizon = nowSeconds + TRIP_MODIFICATIONS_HORIZON;
+
+	const candidates = collectCandidates(gtfs, modifications, provisional, problems, nowSeconds, horizon);
 	if (candidates.size === 0) {
 		report(modifications.size, 0, stops, shapes, entities, problems);
 		return new Map();
@@ -143,10 +149,12 @@ export function buildDetourEntities(
 	const referenced = new Map<string, Set<string>>();
 	/** Les tronçons qui ont fini par s'appliquer à au moins une course. */
 	const applied = new Set<string>();
+	/** Les tronçons dont au moins une course porte les bornes, en vigueur à son départ ou non. */
+	const served = new Set<string>();
 	/** Les tracés recousus, par itinéraire d'origine et combinaison de tronçons. */
 	const splicedShapes = new Map<string, string | null>();
 
-	for (const day of serviceDays(gtfs, CANDIDATE_DAYS)) {
+	for (const day of serviceDaysBetween(gtfs, nowSeconds, horizon)) {
 		/** Les courses du jour qui reçoivent exactement les mêmes modifications et le même itinéraire. */
 		const groups = new Map<string, Group>();
 
@@ -158,10 +166,12 @@ export function buildDetourEntities(
 				const applicable = candidates.get(`${meta.routeId}:${meta.directionId}`);
 				if (applicable === undefined) continue;
 
-				// La course a fini de circuler : on publie le reste de la journée d'un bloc, comme pour les
-				// trip updates reconstruits.
+				// La course a fini de circuler, ou part au-delà de l'horizon : la fenêtre glisse, elle la
+				// rattrapera.
+				const departure = gtfs.tripDepartures.get(tripId);
 				const arrival = gtfs.tripArrivals.get(tripId);
-				if (arrival === undefined || day.midnight + arrival < nowSeconds) continue;
+				if (departure === undefined || arrival === undefined) continue;
+				if (day.midnight + arrival < nowSeconds || day.midnight + departure >= horizon) continue;
 
 				// Annulée, la course ne roule pas : elle n'a pas d'itinéraire à modifier.
 				if (isCancelled(cancelIndex, gtfs, tripId, day.midnight)) continue;
@@ -169,7 +179,12 @@ export function buildDetourEntities(
 				const schedule = gtfs.tripStopSequences.get(tripId);
 				if (schedule === undefined) continue;
 
-				const matched = matchOnTrip(applicable, schedule, gtfs.tripPatterns.get(tripId));
+				// Chaque tronçon se jauge au départ de la course, comme les annulations et les arrêts supprimés
+				// des trip updates : une déviation de ce soir se lit dès ce matin, sur les courses de ce soir.
+				const placed = matchOnTrip(applicable, schedule, gtfs.tripPatterns.get(tripId));
+				for (const entry of placed) served.add(entry.candidate.label);
+				const departsAt = Temporal.Instant.fromEpochMilliseconds((day.midnight + departure) * 1000);
+				const matched = placed.filter((entry) => isActive(entry.candidate.periods, departsAt));
 				if (matched.length === 0) continue;
 
 				// Les deux natures de tronçon se séparent ici, et ne se revoient qu'au tracé. Un tronçon
@@ -268,11 +283,11 @@ export function buildDetourEntities(
 	// Un tronçon écrasé sur l'un de ses tracés n'a pas à s'y appliquer : son silence est voulu.
 	for (const list of candidates.values()) {
 		for (const candidate of list) {
-			if (applied.has(candidate.label) || candidate.overriddenOn.size > 0) continue;
+			if (served.has(candidate.label) || candidate.overriddenOn.size > 0) continue;
 			problems.add(
 				`${candidate.label} — aucune course de ${lineOf(gtfs, candidate.routeId)} sens ${candidate.directionId} ` +
 					(candidate.patternIds === null ? "" : `sur ${[...candidate.patternIds].join(", ")} `) +
-					`ne dessert ${candidate.startStopId} puis ${candidate.endStopId} d'ici la fin du service : ` +
+					`ne dessert ${candidate.startStopId} puis ${candidate.endStopId} dans les sept jours à venir : ` +
 					(candidate.patternIds === null ? "vérifier les bornes." : "vérifier les bornes et les tracés visés."),
 			);
 		}
@@ -309,8 +324,8 @@ export function buildDetourEntities(
 }
 
 /**
- * Le nombre de courses qu'un tronçon modifierait avec ces bornes, toutes journées de service
- * confondues, par tracé emprunté. L'interface s'en sert pour le dire AVANT l'enregistrement : des
+ * Le nombre de courses qu'un tronçon modifierait avec ces bornes dans les sept jours à venir, par
+ * tracé emprunté. L'interface s'en sert pour le dire AVANT l'enregistrement : des
  * bornes que l'horaire théorique ne porte pas ne sélectionnent rien, et le tronçon n'entre alors pas
  * dans le feed. Le détail par tracé dit en plus lesquels desservent ces bornes.
  */
@@ -323,15 +338,18 @@ export function countSelectableTrips(
 	nowSeconds: number,
 ): Map<string, number> {
 	const counts = new Map<string, number>();
+	const horizon = nowSeconds + TRIP_MODIFICATIONS_HORIZON;
 
-	for (const day of serviceDays(gtfs, CANDIDATE_DAYS)) {
+	for (const day of serviceDaysBetween(gtfs, nowSeconds, horizon)) {
 		for (const serviceId of day.services) {
 			for (const tripId of gtfs.serviceTrips.get(serviceId) ?? []) {
 				const meta = gtfs.trips.get(tripId);
 				if (meta === undefined || meta.routeId !== routeId || meta.directionId !== directionId) continue;
 
+				const departure = gtfs.tripDepartures.get(tripId);
 				const arrival = gtfs.tripArrivals.get(tripId);
-				if (arrival === undefined || day.midnight + arrival < nowSeconds) continue;
+				if (departure === undefined || arrival === undefined) continue;
+				if (day.midnight + arrival < nowSeconds || day.midnight + departure >= horizon) continue;
 
 				const schedule = gtfs.tripStopSequences.get(tripId);
 				const patternId = gtfs.tripPatterns.get(tripId);
@@ -357,14 +375,17 @@ function collectCandidates(
 	modifications: ReadonlyMap<number, ResolvedModification>,
 	provisional: ReadonlyMap<string, ProvisionalStop>,
 	problems: Set<string>,
+	nowSeconds: number,
+	horizon: number,
 ): Map<string, Candidate[]> {
 	const candidates = new Map<string, Candidate[]>();
+	const window: AlertPeriod[] = [{ start: minuteOf(nowSeconds), end: minuteOf(horizon), dailyWindow: null }];
 
 	for (const modification of modifications.values()) {
-		// Hors période ou invisible, la modification ne s'annonce pas : c'est un choix ou un calendrier,
-		// pas un problème, et le journal n'a rien à en dire. Celles dont l'info trafic a quitté le flux
-		// ne sont pas même indexées.
-		if (!modification.active || modification.disabled) continue;
+		// Invisible, ou sans période dans les jours à venir, la modification ne s'annonce pas : c'est un
+		// choix ou un calendrier, pas un problème, et le journal n'a rien à en dire. Celles dont l'info
+		// trafic a quitté le flux ne sont pas même indexées.
+		if (modification.disabled || !periodsOverlap(modification.periods, window)) continue;
 		const record = modification.record;
 
 		record.segments.forEach((segment, rank) => {
@@ -431,6 +452,7 @@ function collectCandidates(
 				label,
 				removes,
 				alertId: modification.alertId,
+				periods: modification.periods,
 				routeId: record.routeId,
 				directionId: record.directionId,
 				patternIds: record.patternIds.length === 0 ? null : new Set(record.patternIds),
@@ -712,6 +734,14 @@ function report(
 /** Le nom commercial de la ligne (« TCAR:07 » → « F7 »), ou à défaut le bout de son identifiant. */
 function lineOf(gtfs: StaticGtfs, routeId: string): string {
 	return gtfs.routeNames.get(routeId) ?? routeId.split(":").at(-1) ?? routeId;
+}
+
+/** Un instant au format des bornes de période, à la minute : « AAAA-MM-JJTHH:MM ». */
+function minuteOf(seconds: number): string {
+	return Temporal.Instant.fromEpochMilliseconds(seconds * 1000)
+		.toZonedDateTimeISO("Europe/Paris")
+		.toPlainDateTime()
+		.toString({ smallestUnit: "minute" });
 }
 
 /** La part distinctive d'un identifiant d'itinéraire, pour en dériver celui du tracé recousu. */

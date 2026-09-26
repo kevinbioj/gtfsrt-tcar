@@ -676,7 +676,17 @@ async function pollTripUpdates() {
 				continue;
 			}
 
-			applySkippedStops(entity.tripUpdate, tripRouteId, modificationIndex.skipIndex, staticGtfs.data);
+			// Les suppressions se jaugent au départ de la course, comme les annulations ; faute de le
+			// connaître, à l'instant du relevé.
+			const departure = resolvedTripId ? staticGtfs.data.tripDepartures.get(resolvedTripId) : undefined;
+			const departsAt = midnight !== undefined && departure !== undefined ? midnight + departure : nowSeconds;
+			applySkippedStops(
+				entity.tripUpdate,
+				tripRouteId,
+				modificationIndex.skipIndex,
+				staticGtfs.data,
+				Temporal.Instant.fromEpochMilliseconds(departsAt * 1000),
+			);
 
 			// Ligne sans vrai temps réel : on ne relaie pas ses horaires, seulement l'existence de la course
 			// et ses suppressions d'arrêt — la forme même que prennent les courses reconstruites.
@@ -697,8 +707,8 @@ async function pollTripUpdates() {
 			sourceTrips.set(network, (sourceTrips.get(network) ?? 0) + 1);
 		}
 
-		// Toutes les autres courses de la journée de service qui n'ont pas fini de circuler : le flux
-		// source les ignore, l'horaire théorique les connaît (cf. `scheduledTripUpdates`).
+		// Toutes les autres courses des vingt-quatre heures à venir qui n'ont pas fini de circuler : le
+		// flux source les ignore, l'horaire théorique les connaît (cf. `scheduledTripUpdates`).
 		const scheduled = scheduledTripUpdates(
 			staticGtfs.data,
 			modificationIndex.skipIndex,

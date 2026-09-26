@@ -85,7 +85,7 @@ export function useModificationIndex(
 		suggestions: [] as Suggestion[],
 		/** Les modifications saisies dont l'info trafic a quitté le flux : à rattacher, ou à supprimer. */
 		orphans: [] as Modification[],
-		/** Les quais à sauter dans les trip updates. */
+		/** Les quais à sauter dans les trip updates, chacun avec ses périodes (cf. `SkipBucket`). */
 		skipIndex: new Map() as SkipIndex,
 		/** Les courses à annuler, par clé de course. */
 		cancelIndex: new Map() as CancelIndex,
@@ -299,15 +299,17 @@ function indexModifications(
 	const yielded = resolveOverrides(contenders, gtfs);
 
 	for (const modification of modifications.values()) {
-		const { record, active, periods, removedStopIds } = modification;
-		// Invisible ou hors période, elle ne fait rien sauter.
-		if (active && !record.disabled && removedStopIds.size > 0) {
+		const { record, periods, removedStopIds } = modification;
+		// Invisible, elle ne fait rien sauter. Hors période, si : ses arrêts ne sautent que sur les courses
+		// qui partent pendant l'une de ses périodes, et le feed porte les vingt-quatre heures à venir.
+		if (!record.disabled && removedStopIds.size > 0) {
 			const buckets = skipIndex.get(record.routeId) ?? [];
 			const ceded = yielded.get(record.uid);
 			if (ceded === undefined) {
 				buckets.push({
 					directionId: record.directionId,
 					patternIds: record.patternIds.length === 0 ? null : new Set(record.patternIds),
+					periods,
 					stopIds: removedStopIds,
 				});
 			} else {
@@ -318,7 +320,12 @@ function indexModifications(
 					const stopIds =
 						zone === undefined ? removedStopIds : new Set([...removedStopIds].filter((stopId) => !zone.has(stopId)));
 					if (stopIds.size === 0) continue;
-					buckets.push({ directionId: record.directionId, patternIds: new Set([pattern.patternId]), stopIds });
+					buckets.push({
+						directionId: record.directionId,
+						patternIds: new Set([pattern.patternId]),
+						periods,
+						stopIds,
+					});
 				}
 			}
 			if (buckets.length > 0) skipIndex.set(record.routeId, buckets);
