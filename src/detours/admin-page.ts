@@ -384,6 +384,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				<div class="fields">
 					<div class="field"><label>Raison</label><input id="label"></div>
 					<div id="period"></div>
+					<div class="field"><label>Priorité</label><input id="priority" type="number" step="1" value="0"></div>
+					<p class="note">En vigueur, ses tronçons écrasent ceux, de priorité moindre, qu'ils recouvrent. Le reste des modifications écrasées s'applique toujours.</p>
+					<div id="overrides"></div>
 				</div>
 				<h3>Tracés concernés</h3>
 				<div class="patterns" id="patternList"></div>
@@ -850,6 +853,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 		var badges = [];
 		if (row.disabled) badges.push('<span class="badge warn">invisible</span>');
+		if (row.overriddenCount > 0) {
+			badges.push('<span class="badge warn">' + row.overriddenCount
+				+ (row.overriddenCount > 1 ? " tronçons écrasés" : " tronçon écrasé") + "</span>");
+		}
 
 		if (row.cancelledCount > 0) {
 			badges.push('<span class="badge warn">' + row.cancelledCount
@@ -872,6 +879,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		}
 
 		if (row.patternCount > 0) badges.push('<span class="badge">' + row.patternCount + "/" + row.patternTotal + " tracés</span>");
+		if (row.priority) badges.push('<span class="badge">priorité ' + row.priority + "</span>");
 		return badges.join(" ");
 	}
 
@@ -1732,7 +1740,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			path: segment.path.map(asPair),
 			waypoints: [], legs: [],
 			publishable: segment.publishable,
-			tripsByPattern: segment.tripsByPattern || {}
+			tripsByPattern: segment.tripsByPattern || {},
+			overriddenOn: segment.overriddenOn || []
 		};
 
 		adoptDrawing(adopted, (segment.waypoints || []).map(function (waypoint) {
@@ -1840,6 +1849,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		applyRemoved();
 		renderHeading();
 		renderHeader();
+		renderOverrides();
 		renderRemoved();
 		renderCancelled();
 		renderPublication();
@@ -2021,7 +2031,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			var what = segment.stops.length > 0 ? segment.stops.length + " arrêts"
 				: segment.path.length >= 2 ? (removesStops(segment) ? "tracé seul" : "chemin")
 				: "vide";
-			button.textContent = "Tronçon " + (index + 1) + " · " + what;
+			button.textContent = "Tronçon " + (index + 1) + " · " + what
+				+ (segment.overriddenOn && segment.overriddenOn.length > 0 ? " · écrasé" : "");
 			button.className = index === state.active ? "active" : "";
 			button.onclick = function () { selectSegment(index); };
 			bar.appendChild(button);
@@ -2038,9 +2049,12 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		el("segmentFoot").className = state.segments.length > 1 ? "actions divided" : "actions divided hidden";
 
 		// À un seul tronçon il n'y a rien à dire : la barre le montre déjà.
-		el("segmentNote").textContent = state.segments.length === 1
+		var overridden = seg().overriddenOn ? seg().overriddenOn.length : 0;
+		el("segmentNote").textContent = (state.segments.length === 1
 			? ""
-			: state.segments.length + " tronçons, publiés ensemble sur chaque course.";
+			: state.segments.length + " tronçons, publiés ensemble sur chaque course. ")
+			+ (overridden === 0 ? "" : "Ce tronçon est écrasé en ce moment par un tronçon plus prioritaire sur "
+				+ (overridden > 1 ? overridden + " tracés" : "1 tracé") + " : il n'y est pas publié.");
 	}
 
 	function selectSegment(index) {
@@ -2283,6 +2297,34 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		renderSegment();
 	}
 
+	// --- priorité ---
+
+	/**
+	 * Ce que la priorité fait, sur la période : les modifications qu'elle écrase, et celles qui
+	 * l'écrasent. Chacune s'ouvre d'un clic.
+	 */
+	function renderOverrides() {
+		var detail = state.detail;
+		function list(title, others) {
+			if (others.length === 0) return "";
+			return "<h3>" + title + "</h3>" + others.map(function (other) {
+				return "<p style='margin:4px 0'><a href='#/modification/" + other.uid + "'>" + describeOther(other) + "</a></p>";
+			}).join("");
+		}
+		el("priority").value = String(detail.priority);
+		el("overrides").innerHTML = list("Écrase", detail.overrides) + list("Écrasée par", detail.overriddenBy);
+	}
+
+	/** Une autre modification, en une ligne : son info trafic, sa raison, sa période, et où elle en est. */
+	function describeOther(other) {
+		var what = other.segmentCount > 1 ? other.segmentCount + " tronçons"
+			: other.segmentCount === 1 ? "1 tronçon" : other.removedStopCount + " arrêts supprimés";
+		return perturbationRef(other) + escapeHtml(other.label)
+			+ " <span class='note'>· " + escapeHtml(describePeriodsShort(other.periods)) + " · " + what
+			+ " · priorité " + other.priority + "</span> "
+			+ phaseBadge(other) + (other.disabled ? ' <span class="badge warn">invisible</span>' : "");
+	}
+
 	// --- en-tête et publication ---
 
 	/** Où en est la période : ce qui court, ce qui vient, ce qui est fini. */
@@ -2298,6 +2340,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var heading = "<div class='heading'>" + lineChip(detail.lineCode, detail.line)
 			+ "<span class='toward'>" + escapeHtml(towardOf(detail)) + "</span>"
 			+ "<span class='badges'><div>" + (detail.disabled ? '<span class="badge warn">invisible</span>' : "")
+			+ (detail.overriddenCount > 0 ? '<span class="badge warn">écrasée en partie</span>' : "")
 			+ phaseBadge(detail) + "</div><div>" + originBadge(detail) + "</div></span></div>";
 
 		// Le texte de l'info trafic est long, plans compris : il se déplie à la demande.
@@ -3394,6 +3437,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			patternIds: state.patterns.length === state.detail.patterns.length ? [] : state.patterns,
 			removedStopIds: state.removed,
 			cancelledDepartures: state.cancelled,
+			priority: Number(el("priority").value) || 0,
 			segments: kept.map(function (segment) {
 				return {
 					startStopId: segment.startStopId,

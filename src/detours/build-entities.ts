@@ -39,6 +39,8 @@ type Candidate = {
 	directionId: number;
 	/** Les tracés visés, ou `null` pour tous (cf. `DetourSegment.patternIds`). */
 	patternIds: ReadonlySet<string> | null;
+	/** Les tracés sur lesquels un tronçon plus prioritaire l'écrase (cf. `resolveOverrides`). */
+	overriddenOn: ReadonlySet<string>;
 	startStopId: string;
 	endStopId: string;
 	propagatedDelay: number;
@@ -263,9 +265,10 @@ export function buildDetourEntities(
 	// Un tronçon dont aucune course ne relève ne laisse rien dans le feed, pas même ses arrêts. C'est le
 	// cas à surveiller — des bornes qui ne figurent pas sur l'horaire théorique des courses, parce
 	// qu'elles ont été prises sur une autre branche ou que le GTFS a renuméroté ses quais.
+	// Un tronçon écrasé sur l'un de ses tracés n'a pas à s'y appliquer : son silence est voulu.
 	for (const list of candidates.values()) {
 		for (const candidate of list) {
-			if (applied.has(candidate.label)) continue;
+			if (applied.has(candidate.label) || candidate.overriddenOn.size > 0) continue;
 			problems.add(
 				`${candidate.label} — aucune course de ${lineOf(gtfs, candidate.routeId)} sens ${candidate.directionId} ` +
 					(candidate.patternIds === null ? "" : `sur ${[...candidate.patternIds].join(", ")} `) +
@@ -431,6 +434,7 @@ function collectCandidates(
 				routeId: record.routeId,
 				directionId: record.directionId,
 				patternIds: record.patternIds.length === 0 ? null : new Set(record.patternIds),
+				overriddenOn: modification.overridden.get(rank) ?? new Set(),
 				startStopId,
 				endStopId,
 				propagatedDelay: removes ? segment.propagatedDelay : 0,
@@ -452,7 +456,8 @@ function collectCandidates(
  *
  * Un tronçon n'est retenu que si l'horaire porte ses DEUX bornes, dans l'ordre : c'est ce qui écarte
  * les branches et les services partiels qui ne passent pas par le segment dévié, sans avoir à les
- * deviner. S'il nomme des tracés, la course doit en plus emprunter l'un d'eux.
+ * deviner. S'il nomme des tracés, la course doit en plus emprunter l'un d'eux — et ne pas être de
+ * ceux où un tronçon plus prioritaire l'écrase.
  */
 function matchOnTrip(
 	candidates: readonly Candidate[],
@@ -463,6 +468,7 @@ function matchOnTrip(
 
 	for (const candidate of candidates) {
 		if (candidate.patternIds !== null && (patternId === undefined || !candidate.patternIds.has(patternId))) continue;
+		if (patternId !== undefined && candidate.overriddenOn.has(patternId)) continue;
 		const bounds = boundsOn(schedule, candidate.startStopId, candidate.endStopId);
 		if (bounds !== undefined) matched.push({ candidate, ...bounds });
 	}

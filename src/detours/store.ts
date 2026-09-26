@@ -177,6 +177,12 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 	`
 	ALTER TABLE alert_first_seen ADD COLUMN header_text TEXT;
 	`,
+	// La priorité d'une modification : en vigueur et visible, elle écrase celles de priorité moindre
+	// qui touchent les mêmes courses (cf. `indexModifications`). 0 pour toutes au départ : rien ne
+	// change tant qu'on n'en relève pas une.
+	`
+	ALTER TABLE modifications ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+	`,
 ];
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
@@ -292,6 +298,11 @@ export type Modification = {
 	removedStopIds: string[] | null;
 	/** Invisible : ni publiée, ni ses arrêts sautés. */
 	disabled: boolean;
+	/**
+	 * Plus elle est élevée, plus la modification l'emporte : en vigueur et visible, elle écrase celles
+	 * de priorité moindre qui touchent les mêmes courses. 0 par défaut.
+	 */
+	priority: number;
 	createdAt: number;
 	/** Date du dernier enregistrement, en secondes epoch — c'est le `last_modified_time` publié. */
 	updatedAt: number;
@@ -311,7 +322,7 @@ export type CancelledDeparture = { stopId: string; departure: number };
 /** Ce qu'un enregistrement porte : tout ce qui se saisit, d'un bloc. */
 export type ModificationInput = Pick<
 	Modification,
-	"label" | "period" | "patternIds" | "removedStopIds" | "segments" | "cancelledDepartures"
+	"label" | "period" | "patternIds" | "removedStopIds" | "segments" | "cancelledDepartures" | "priority"
 >;
 
 /** Ce qu'il faut pour créer une modification à la main. Le reste se saisit ensuite. */
@@ -403,6 +414,7 @@ export function useDetourStore(path: string) {
 				patternIds: [],
 				removedStopIds: row.removed_overridden === 1 ? [] : null,
 				disabled: row.disabled === 1,
+				priority: row.priority,
 				createdAt: row.created_at,
 				updatedAt: row.updated_at,
 				segments: [],
@@ -644,9 +656,9 @@ export function useDetourStore(path: string) {
 			transaction(() => {
 				db.prepare(
 					`UPDATE modifications
-					 SET label = ?, start_date = ?, start_time = ?, end_date = ?, end_time = ?, updated_at = ?
+					 SET label = ?, start_date = ?, start_time = ?, end_date = ?, end_time = ?, priority = ?, updated_at = ?
 					 WHERE uid = ?`,
-				).run(input.label, ...periodColumns(input.period), nowSeconds, uid);
+				).run(input.label, ...periodColumns(input.period), input.priority, nowSeconds, uid);
 				writePatterns(uid, input.patternIds);
 				writeRemoved(uid, input.removedStopIds);
 				writeSegments(uid, input.segments);
@@ -810,6 +822,7 @@ type ModificationRow = {
 	end_time: string | null;
 	removed_overridden: number;
 	disabled: number;
+	priority: number;
 	created_at: number;
 	updated_at: number;
 };

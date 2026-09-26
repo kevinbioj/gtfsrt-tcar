@@ -4,7 +4,7 @@ import { basicAuth } from "hono/basic-auth";
 import type { AlertPeriod } from "../ai/analyze-alert.js";
 import { LINE_CARTRIDGES, ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SMOOTHING_TOLERANCE, ROAD_SNAP_RADIUS } from "../config.js";
 import { serviceDay } from "../gtfs-rt/scheduled-trips.js";
-import { type AnalyzedAlert, hasEnded } from "../gtfs-rt/use-service-alerts.js";
+import { type AnalyzedAlert, hasEnded, periodsOverlap } from "../gtfs-rt/use-service-alerts.js";
 import { normalizeStopName, type RoutePattern, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
 import type { RoadGraph, RoadGraphHandle } from "../routing/road-graph.js";
 import { routeOnRoad } from "../routing/route-on-road.js";
@@ -14,7 +14,7 @@ import { sanitizeHtml } from "../utils/sanitize-html.js";
 import { ADMIN_PAGE } from "./admin-page.js";
 import { deduceBounds, overlappingSegments, removesStops, type SegmentBounds } from "./bounds.js";
 import { countSelectableTrips } from "./build-entities.js";
-import type { ModificationIndex, ResolvedModification, Suggestion } from "./modifications.js";
+import { collides, type ModificationIndex, type ResolvedModification, type Suggestion } from "./modifications.js";
 import type {
 	CancelledDeparture,
 	DetourSegment,
@@ -689,6 +689,9 @@ function summarize(modification: ResolvedModification, deps: AdminDependencies, 
 		periods: modification.periods,
 		phase: phaseOf(modification.periods, modification.active, now),
 		disabled: modification.disabled,
+		priority: record.priority,
+		// Les tronçons écrasés en ce moment par un tronçon plus prioritaire, sur au moins un tracé.
+		overriddenCount: modification.overridden.size,
 		removedStopCount: removedOnCourse(modification, gtfs).length,
 		patternCount: record.patternIds.length,
 		patternTotal: patternsFor(gtfs, modification.routeId, modification.directionId).length,
@@ -882,10 +885,18 @@ function detail(modification: ResolvedModification, deps: AdminDependencies) {
 		// Les départs qu'on peut annuler, et ceux qui le sont.
 		departures: departuresOf(modification, gtfs),
 		cancelledDepartures: record.cancelledDepartures,
+		// Les modifications dont un tronçon recouvre l'un des siens, sur la période : celles que sa
+		// priorité écrase, et celles qui l'écrasent. À priorité égale, les tronçons se fusionnent.
+		overrides: rivals(modification, deps)
+			.filter((other) => other.record.priority < record.priority)
+			.map((other) => describeOther(other, deps)),
+		overriddenBy: rivals(modification, deps)
+			.filter((other) => other.record.priority > record.priority)
+			.map((other) => describeOther(other, deps)),
 		// Un arrêt n'est que désigné : son libellé et sa position se relisent à l'affichage, du GTFS ou de
 		// la base provisoire. `tripsByPattern` dit combien de courses ces bornes-là modifieraient sur
 		// chaque tracé — zéro partout, et le tronçon ne sortira pas du tout dans le feed.
-		segments: segments.map((segment) => ({
+		segments: segments.map((segment, rank) => ({
 			startStopId: segment.startStopId,
 			endStopId: segment.endStopId,
 			propagatedDelay: segment.propagatedDelay,
@@ -895,8 +906,25 @@ function detail(modification: ResolvedModification, deps: AdminDependencies) {
 			path: segment.path,
 			publishable: isSegmentPublishable(segment, modification, gtfs),
 			tripsByPattern: Object.fromEntries(countTripsByPattern(segment, modification, deps)),
+			// Les tracés où un tronçon plus prioritaire l'écrase en ce moment.
+			overriddenOn: [...(modification.overridden.get(rank) ?? [])],
 		})),
 	};
+}
+
+/**
+ * Les modifications visibles dont un tronçon recouvre l'un de ceux-ci, et dont la période croise
+ * celle-ci. Invisible, celle-ci n'en a aucune : elle ne publie rien qui puisse se recouvrir.
+ */
+function rivals(modification: ResolvedModification, deps: AdminDependencies): ResolvedModification[] {
+	if (modification.disabled) return [];
+	return [...deps.modificationIndex.modifications.values()].filter(
+		(other) =>
+			other.uid !== modification.uid &&
+			!other.disabled &&
+			periodsOverlap(modification.periods, other.periods) &&
+			collides(modification, other, deps.gtfs.data),
+	);
 }
 
 /**
@@ -1127,6 +1155,9 @@ function parseInput(
 		segments.push(parsed.segment);
 	}
 
+	const priority = payload.priority ?? modification.record.priority;
+	if (!Number.isInteger(priority)) return { message: "Priorité attendue : un nombre entier." };
+
 	const overlap = overlappingSegments(gtfs, modification.routeId, modification.directionId, patternIds.ids, segments);
 	if (overlap !== undefined) {
 		return {
@@ -1144,7 +1175,25 @@ function parseInput(
 			removedStopIds,
 			segments,
 			cancelledDepartures,
+			priority: priority as number,
 		},
+	};
+}
+
+/** Une modification telle que l'édition d'une autre la cite : de quoi la reconnaître, et l'ouvrir. */
+function describeOther(modification: ResolvedModification, deps: AdminDependencies) {
+	const now = Temporal.Now.instant();
+	return {
+		uid: modification.uid,
+		origin: modification.origin,
+		alertNumber: modification.alertNumber,
+		label: modification.label,
+		periods: modification.periods,
+		phase: phaseOf(modification.periods, modification.active, now),
+		disabled: modification.disabled,
+		priority: modification.record.priority,
+		segmentCount: modification.record.segments.length,
+		removedStopCount: removedOnCourse(modification, deps.gtfs.data).length,
 	};
 }
 

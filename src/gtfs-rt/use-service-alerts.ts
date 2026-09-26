@@ -449,6 +449,25 @@ export function hasEnded(periods: AlertPeriod[], now: Temporal.Instant): boolean
 }
 
 /**
+ * Deux listes de périodes ont-elles un instant en commun ? Chaque période se prend de sa borne de
+ * début à sa borne de fin, tranche horaire comprise : c'est l'enveloppe qui compte ici. Aucune
+ * période du tout veut dire « sans borne », et croise donc tout.
+ */
+export function periodsOverlap(a: AlertPeriod[], b: AlertPeriod[]): boolean {
+	const spans = (periods: AlertPeriod[]) =>
+		periods.length === 0
+			? [{ start: null, end: null }]
+			: periods.map((period) => ({
+					start: period.start ? periodStart(period.start) : null,
+					end: period.end ? periodEnd(period.end) : null,
+				}));
+	const before = (from: Temporal.Instant | null, until: Temporal.Instant | null) =>
+		from === null || until === null || Temporal.Instant.compare(from, until) < 0;
+
+	return spans(a).some((x) => spans(b).some((y) => before(x.start, y.end) && before(y.start, x.end)));
+}
+
+/**
  * Une perturbation récurrente n'est active que pendant sa tranche horaire, chaque jour de l'enveloppe
  * `start`/`end` ; sinon, la période va de `start` à `end`, avec des bornes à la journée ou à la minute
  * selon ce que le texte de l'alerte précisait (cf. {@link AlertPeriod}).
