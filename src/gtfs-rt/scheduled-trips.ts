@@ -130,6 +130,82 @@ export function resolveServiceRun(
 	return best;
 }
 
+/**
+ * La course du jour la plus proche de celle qu'annonce l'ancien GTFS-RT, et la journée de service dont
+ * elle relève. `undefined` lorsque la course annoncée est inconnue du GTFS, ou qu'aucune course
+ * rattachable ne partage sa ligne, son sens, son origine et sa destination.
+ *
+ * L'ancien GTFS-RT se trompe de grille, et pas seulement d'exemplaire : il fait rouler le dimanche le
+ * 08:51 du samedi, quand le dimanche n'a qu'un 08:39 et un 09:04. La course annoncée n'a alors aucune
+ * version qui circule (cf. `resolveServiceRun`), et on ne retient plus d'elle que ce qui la situe sur
+ * la ligne — sens, quai d'origine, quai de destination — et son horaire, pour choisir parmi les
+ * courses qui circulent celle qui part au plus près.
+ *
+ * L'horaire annoncé se pose sur la journée où la course annoncée encadrerait `reference`, qu'elle y
+ * circule ou non : c'est de ce départ-là que la course retenue doit être la plus proche. Une course
+ * annoncée qui circule bel et bien est à distance nulle d'elle-même, et reste donc retenue.
+ */
+export function resolveNearestRun(
+	gtfs: StaticGtfs,
+	days: readonly ServiceDay[],
+	tripId: string,
+	reference: number,
+): ServiceRun | undefined {
+	const announced = gtfs.trips.get(tripId);
+	const schedule = gtfs.tripStopSequences.get(tripId);
+	const departure = gtfs.tripDepartures.get(tripId);
+	const arrival = gtfs.tripArrivals.get(tripId);
+	const origin = schedule?.[0]?.stopId;
+	const destination = schedule?.at(-1)?.stopId;
+	if (
+		announced === undefined ||
+		departure === undefined ||
+		arrival === undefined ||
+		origin === undefined ||
+		destination === undefined
+	)
+		return undefined;
+
+	// Le départ annoncé, posé sur la journée où la course encadrerait `reference`.
+	let announcedDeparture: number | undefined;
+	let announcedDistance = Number.POSITIVE_INFINITY;
+	for (const { midnight } of days) {
+		const distance = Math.max(0, midnight + departure - reference, reference - (midnight + arrival));
+		if (distance < announcedDistance) {
+			announcedDistance = distance;
+			announcedDeparture = midnight + departure;
+		}
+	}
+	if (announcedDeparture === undefined) return undefined;
+
+	let best: ServiceRun | undefined;
+	let bestDistance = Number.POSITIVE_INFINITY;
+
+	for (const { date, midnight, services } of days) {
+		for (const serviceId of services) {
+			for (const candidate of gtfs.serviceTrips.get(serviceId) ?? []) {
+				const meta = gtfs.trips.get(candidate);
+				if (meta?.routeId !== announced.routeId || meta.directionId !== announced.directionId) continue;
+
+				const candidateSchedule = gtfs.tripStopSequences.get(candidate);
+				if (candidateSchedule?.[0]?.stopId !== origin || candidateSchedule.at(-1)?.stopId !== destination) continue;
+
+				const candidateDeparture = gtfs.tripDepartures.get(candidate);
+				if (candidateDeparture === undefined) continue;
+
+				// À égalité, on garde celle que la source annonce, comme `resolveServiceRun`.
+				const distance = Math.abs(midnight + candidateDeparture - announcedDeparture);
+				if (distance < bestDistance || (distance === bestDistance && candidate === tripId)) {
+					bestDistance = distance;
+					best = { tripId: candidate, date };
+				}
+			}
+		}
+	}
+
+	return best;
+}
+
 /** La clé sous laquelle une course est dite servie par le flux source (cf. `covered`). */
 export function tripRun(tripId: string, date: string): string {
 	return `${tripId}:${date}`;

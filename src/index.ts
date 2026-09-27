@@ -32,7 +32,13 @@ import { buildDetourEntities } from "./detours/build-entities.js";
 import { useModificationIndex } from "./detours/modifications.js";
 import { useDetourStore } from "./detours/store.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
-import { resolveServiceRun, scheduledTripUpdates, serviceDays, tripRun } from "./gtfs-rt/scheduled-trips.js";
+import {
+	resolveNearestRun,
+	resolveServiceRun,
+	scheduledTripUpdates,
+	serviceDays,
+	tripRun,
+} from "./gtfs-rt/scheduled-trips.js";
 import { type Movement, useMovementTracker } from "./gtfs-rt/use-movement-tracker.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
 import { useRelayedNetworks } from "./gtfs-rt/use-relayed-networks.js";
@@ -283,6 +289,7 @@ async function poll() {
 	// figé — quand l'ancien GTFS-RT les voit encore. Ceux-là rejoignent le relevé tels qu'Astuce les
 	// décrit, et suivent le même chemin que les autres.
 	const legacyOnly = legacyOnlyVehicles(feed, nowSeconds);
+	const legacyVehicles = new Set(legacyOnly);
 	const vehicles = [...feed.entity.map((entity) => entity.vehicle), ...legacyOnly];
 
 	for (const vehicle of vehicles) {
@@ -316,7 +323,12 @@ async function poll() {
 		// course une fois par service, et le SAE se trompe d'exemplaire — il sort le samedi un vendredi.
 		// On rattache donc l'annonce à la version du jour. Le flux ne parle que de courses en train de
 		// rouler : l'instant du relevé suffit à les situer.
-		const run = resolveServiceRun(staticGtfs.data, candidateDays, vehicle.trip.tripId, nowSeconds);
+		//
+		// L'ancien GTFS-RT, lui, se trompe de grille : la course qu'il annonce peut n'avoir aucune version
+		// ce jour-là. On se contente alors de la plus proche qui circule (cf. `resolveNearestRun`).
+		const run = legacyVehicles.has(vehicle)
+			? resolveNearestRun(staticGtfs.data, candidateDays, vehicle.trip.tripId, nowSeconds)
+			: resolveServiceRun(staticGtfs.data, candidateDays, vehicle.trip.tripId, nowSeconds);
 		if (run === undefined) unresolvedTrips += 1;
 		const tripId = run?.tripId ?? vehicle.trip.tripId;
 
