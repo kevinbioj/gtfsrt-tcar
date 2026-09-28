@@ -346,7 +346,8 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		const buffer = Buffer.from(await response.arrayBuffer());
 		const feed = GtfsRealtime.transit_realtime.FeedMessage.decode(buffer);
 		const headerTimestamp = feed.header?.timestamp != null ? String(feed.header.timestamp) : null;
-		const today = Temporal.Now.plainDateISO(TIME_ZONE).toString();
+		const now = Temporal.Now.instant();
+		const today = now.toZonedDateTimeISO(TIME_ZONE).toPlainDate().toString();
 
 		// L'analyse est TOUJOURS rejouée, même à flux inchangé : les périodes qu'elle porte ont des heures
 		// (travaux de nuit), et l'indexation qui suit doit les re-jauger. Aucun réappel IA n'en découle :
@@ -363,6 +364,8 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		const inputs: AlertInput[] = [];
 		const entities: AlertEntity[] = [];
 		const routesById = new Map<string, Set<string>>();
+		/** Les alertes telles que republiées : l'analyse leur ajoute leur période d'impact. */
+		const republishedById = new Map<string, GtfsRealtime.transit_realtime.IAlert>();
 		for (const entity of feed.entity) {
 			const alert = entity.alert;
 			if (!alert) continue;
@@ -376,9 +379,15 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 			if (routeIds.size === 0) continue;
 
 			routesById.set(alertId, routeIds);
+			// La période active du flux amont est sa fenêtre de publication — des mois, souvent jusqu'à la
+			// fin de l'année —, et non celle de la perturbation : c'est la période de communication. La
+			// période d'impact vient de l'analyse, une fois qu'elle a tourné (cf. étape 3).
+			const republished = withAccessibilityStops(plainAlert(alert), routeIds, gtfs);
+			republished.communicationPeriod = alert.activePeriod ?? [];
+			republishedById.set(alertId, republished);
 			entities.push({
 				networks: new Set([...routeIds].map(networkOf)),
-				entity: { id: republishedAlertId(alertId), alert: withAccessibilityStops(plainAlert(alert), routeIds, gtfs) },
+				entity: { id: republishedAlertId(alertId), alert: republished },
 			});
 			inputs.push({
 				id: alertId,
@@ -401,6 +410,11 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		for (const input of inputs) {
 			const analysis = analyses.get(input.id);
 			if (!analysis) continue;
+
+			const republished = republishedById.get(input.id);
+			if (republished !== undefined) {
+				republished.impactPeriod = impactPeriods(analysis.periods, republished.communicationPeriod ?? [], now);
+			}
 
 			const routeIds = routesById.get(input.id) ?? new Set();
 			const served = servedStops.get(alertNumber(input.id));
@@ -485,6 +499,104 @@ export function periodsOverlap(a: AlertPeriod[], b: AlertPeriod[]): boolean {
 		from === null || until === null || Temporal.Instant.compare(from, until) < 0;
 
 	return spans(a).some((x) => spans(b).some((y) => before(x.start, y.end) && before(y.start, x.end)));
+}
+
+/** Un intervalle en secondes epoch, fin exclue ; `null` pour une borne ouverte. */
+type Span = { start: number | null; end: number | null };
+
+/**
+ * La période d'impact d'une alerte, tirée des périodes que l'analyse lit dans son texte.
+ *
+ * Une période simple donne un intervalle. Une tranche horaire donne un intervalle PAR JOUR, de la
+ * veille — une tranche de nuit ouverte hier court encore — jusqu'au bout de son enveloppe, rognée
+ * d'abord sur la communication : c'est ce qui la borne en pratique. Sans fin connue d'aucun côté, les
+ * jours ne s'énumèrent pas, et c'est l'enveloppe entière qui sort.
+ *
+ * Tout est ensuite rogné sur la communication : la spec veut chaque intervalle d'impact contenu dans
+ * l'un des siens. Aucune période lue ne dit rien de la perturbation : la liste reste vide, et le
+ * champ absent.
+ */
+function impactPeriods(
+	periods: AlertPeriod[],
+	communication: GtfsRealtime.transit_realtime.ITimeRange[],
+	now: Temporal.Instant,
+): GtfsRealtime.transit_realtime.ITimeRange[] {
+	const bounds: Span[] = communication.map((range) => ({
+		start: range.start ? Number(range.start) : null,
+		end: range.end ? Number(range.end) : null,
+	}));
+	const hull: Span =
+		bounds.length === 0
+			? { start: null, end: null }
+			: {
+					start: bounds.some((span) => span.start === null) ? null : Math.min(...bounds.map((span) => span.start ?? 0)),
+					end: bounds.some((span) => span.end === null) ? null : Math.max(...bounds.map((span) => span.end ?? 0)),
+				};
+	const yesterday = now.toZonedDateTimeISO(TIME_ZONE).toPlainDate().subtract({ days: 1 });
+
+	return periods
+		.flatMap((period) =>
+			period.dailyWindow ? dailySpans(period, period.dailyWindow, hull, yesterday) : [spanOf(period)],
+		)
+		.flatMap((span) => (bounds.length === 0 ? [span] : bounds.flatMap((bound) => intersect(span, bound) ?? [])))
+		.sort((a, b) => (a.start ?? 0) - (b.start ?? 0))
+		.map((span) => ({
+			...(span.start !== null && { start: span.start }),
+			...(span.end !== null && { end: span.end }),
+		}));
+}
+
+/** Un intervalle par jour de la tranche horaire, de `from` au bout de l'enveloppe rognée sur `hull`. */
+function dailySpans(period: AlertPeriod, window: DailyWindow, hull: Span, from: Temporal.PlainDate): Span[] {
+	const dayOf = (seconds: number) =>
+		Temporal.Instant.fromEpochMilliseconds(seconds * 1000)
+			.toZonedDateTimeISO(TIME_ZONE)
+			.toPlainDate();
+	const latest = (dates: (Temporal.PlainDate | null)[]) =>
+		dates.reduce<Temporal.PlainDate | null>(
+			(a, b) => (a === null || (b !== null && Temporal.PlainDate.compare(b, a) > 0) ? b : a),
+			null,
+		);
+	const earliest = (dates: (Temporal.PlainDate | null)[]) =>
+		dates.reduce<Temporal.PlainDate | null>(
+			(a, b) => (a === null || (b !== null && Temporal.PlainDate.compare(b, a) < 0) ? b : a),
+			null,
+		);
+
+	const first = latest([
+		from,
+		period.start ? plainDate(period.start) : null,
+		hull.start === null ? null : dayOf(hull.start),
+	]);
+	const last = earliest([period.end ? plainDate(period.end) : null, hull.end === null ? null : dayOf(hull.end)]);
+	if (first === null || last === null) return [spanOf(period)];
+
+	const spansMidnight = window.to <= window.from;
+	const spans: Span[] = [];
+	for (let day = first; Temporal.PlainDate.compare(day, last) <= 0; day = day.add({ days: 1 })) {
+		const start = atTime(day, window.from);
+		const end = atTime(spansMidnight ? day.add({ days: 1 }) : day, window.to);
+		if (start !== null && end !== null) spans.push({ start: secondsOf(start), end: secondsOf(end) });
+	}
+	return spans;
+}
+
+/** L'enveloppe d'une période, tranche horaire ignorée : bornes à la journée ou à la minute. */
+function spanOf(period: AlertPeriod): Span {
+	const start = period.start ? periodStart(period.start) : null;
+	const end = period.end ? periodEnd(period.end) : null;
+	return { start: start === null ? null : secondsOf(start), end: end === null ? null : secondsOf(end) };
+}
+
+/** Ce que deux intervalles ont en commun, ou `null` s'ils ne se croisent pas. */
+function intersect(a: Span, b: Span): Span | null {
+	const start = a.start === null ? b.start : b.start === null ? a.start : Math.max(a.start, b.start);
+	const end = a.end === null ? b.end : b.end === null ? a.end : Math.min(a.end, b.end);
+	return start !== null && end !== null && start >= end ? null : { start, end };
+}
+
+function secondsOf(instant: Temporal.Instant): number {
+	return Math.floor(instant.epochMilliseconds / 1000);
 }
 
 /**
