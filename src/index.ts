@@ -10,7 +10,6 @@ import {
 	ALERTS_POLL_INTERVAL,
 	DETOURS_DB_PATH,
 	GTFS_CHECK_INTERVAL,
-	POLL_INTERVAL,
 	PORT,
 	PREFERRED_POSITION_STALENESS,
 	REALTIME_LINES,
@@ -19,9 +18,11 @@ import {
 	SERVICE_ALERTS_URL,
 	STATE_CACHE_PATH,
 	STATIC_GTFS_URL,
+	TRIP_UPDATES_INTERVAL,
 	TRIP_UPDATES_URL,
 	VEHICLE_MONITORING_INTERVAL,
 	VEHICLE_MONITORING_URL,
+	VEHICLE_POSITIONS_INTERVAL,
 	VEHICLE_POSITIONS_URL,
 	VEHICLE_STALENESS,
 	VEHICLES_INTERVAL,
@@ -803,7 +804,7 @@ function announcedDeparture(tripUpdate: GtfsRealtime.transit_realtime.ITripUpdat
 	return departure === 0 ? undefined : departure;
 }
 
-setInterval(poll, POLL_INTERVAL);
-setInterval(pollTripUpdates, POLL_INTERVAL);
+setInterval(poll, VEHICLE_POSITIONS_INTERVAL);
+setInterval(pollTripUpdates, TRIP_UPDATES_INTERVAL);
 await poll();
 await pollTripUpdates();

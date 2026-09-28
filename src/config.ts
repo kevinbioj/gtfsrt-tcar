@@ -34,10 +34,11 @@ export const REALTIME_LINES = new Set([
 ]);
 
 export const PORT = 3000;
-export const POLL_INTERVAL = 20_000;
 /** Source des positions et des courses : le GTFS-RT du SAE, compact et gzippé (~7 Ko). */
 export const VEHICLE_POSITIONS_URL =
 	"https://api.mrn.cityway.fr/dataflow/vehicle-tc-tr/download?provider=TCAR&dataFormat=GTFS-RT";
+/** Rafraîchissement des positions, relevés TCAR comme réseaux relayés. */
+export const VEHICLE_POSITIONS_INTERVAL = Temporal.Duration.from({ seconds: 10 }).total("milliseconds");
 /**
  * La même donnée SAE, en JSON non compressé (~190 Ko) mais complète : elle seule porte la girouette
  * du véhicule. On ne s'en sert que pour vérifier la ligne du flux source, en confrontant cette
@@ -49,6 +50,8 @@ export const VEHICLE_MONITORING_URL =
 export const VEHICLE_MONITORING_INTERVAL = Temporal.Duration.from({ minutes: 5 }).total("milliseconds");
 export const TRIP_UPDATES_URL =
 	"https://api.mrn.cityway.fr/dataflow/horaire-tc-tr/download?provider=TCAR&dataFormat=GTFS-RT";
+/** Rafraîchissement des trip updates, TCAR comme réseaux relayés. */
+export const TRIP_UPDATES_INTERVAL = Temporal.Duration.from({ seconds: 20 }).total("milliseconds");
 /**
  * L'ancien GTFS-RT du réseau. Il tranche la ligne et le sens du véhicule, mais il fournit aussi et
  * surtout la position qu'on publie : celle du flux SAE part parfois à l'autre bout du monde, quand
@@ -58,9 +61,9 @@ export const VERIFICATION_FEED_URL = "https://reseau-astuce.fr/ftp/gtfsrt/Astuce
 /**
  * Rafraîchissement du flux de vérification. Il republie ses relevés à la minute, mais il est devenu
  * la source des positions publiées : l'interroger moins souvent que le flux SAE ferait traîner tout
- * le feed d'autant. D'où le même rythme que {@link POLL_INTERVAL} — c'est un fichier statique léger.
+ * le feed d'autant. D'où le même rythme que {@link VEHICLE_POSITIONS_INTERVAL} — c'est un fichier statique léger.
  */
-export const VERIFICATION_FEED_INTERVAL = POLL_INTERVAL;
+export const VERIFICATION_FEED_INTERVAL = VEHICLE_POSITIONS_INTERVAL;
 /**
  * Âge au-delà duquel la position du flux Astuce cesse d'être préférée à celle du flux SAE.
  *

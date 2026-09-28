@@ -1,6 +1,6 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
 
-import { POLL_INTERVAL, VEHICLE_STALENESS } from "../config.js";
+import { TRIP_UPDATES_INTERVAL, VEHICLE_POSITIONS_INTERVAL, VEHICLE_STALENESS } from "../config.js";
 
 export type RelayedNetwork = {
 	provider: string;
@@ -27,16 +27,11 @@ export function useRelayedNetworks(networks: readonly RelayedNetwork[]) {
 	const tripFeeds = new Map<string, Uint8Array>();
 	const vehiclePositions = new Map<string, Map<string, GtfsRealtime.transit_realtime.IVehiclePosition>>();
 
-	async function poll() {
+	async function pollVehiclePositions() {
 		await Promise.all(
 			networks.map(async (network) => {
-				const { provider, tripUpdatesUrl, vehiclePositionsUrl } = network;
-				const [tripFeed, vehicleFeed] = await Promise.all([
-					loadFeed(provider, "trip updates", tripUpdatesUrl),
-					loadFeed(provider, "vehicle positions", vehiclePositionsUrl),
-				]);
-
-				if (tripFeed !== undefined) tripFeeds.set(provider, tripFeed);
+				const { provider, vehiclePositionsUrl } = network;
+				const vehicleFeed = await loadFeed(provider, "vehicle positions", vehiclePositionsUrl);
 				if (vehicleFeed !== undefined) {
 					vehiclePositions.set(provider, relayVehiclePositions(network, decode(vehicleFeed)));
 				}
@@ -46,8 +41,19 @@ export function useRelayedNetworks(networks: readonly RelayedNetwork[]) {
 		);
 	}
 
-	setInterval(poll, POLL_INTERVAL);
-	void poll();
+	async function pollTripUpdates() {
+		await Promise.all(
+			networks.map(async ({ provider, tripUpdatesUrl }) => {
+				const tripFeed = await loadFeed(provider, "trip updates", tripUpdatesUrl);
+				if (tripFeed !== undefined) tripFeeds.set(provider, tripFeed);
+			}),
+		);
+	}
+
+	setInterval(pollVehiclePositions, VEHICLE_POSITIONS_INTERVAL);
+	setInterval(pollTripUpdates, TRIP_UPDATES_INTERVAL);
+	void pollVehiclePositions();
+	void pollTripUpdates();
 
 	return {
 		/** Les trip updates de chaque réseau relayé, dans une copie que l'appelant peut remanier. */
