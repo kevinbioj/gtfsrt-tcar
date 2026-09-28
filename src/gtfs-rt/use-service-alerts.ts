@@ -11,18 +11,21 @@ import {
 } from "../ai/analyze-alert.js";
 import { SERVED_STOPS } from "../config.js";
 import { networkOf } from "../utils/network.js";
+import { firstImage, htmlToText } from "../utils/sanitize-html.js";
 import {
 	normalizeStopName,
 	type OrderedStop,
 	type StaticGtfs,
 	stopNameKey,
 	stopNameMatches,
+	stopNamePosition,
 	stopNameTokens,
 	type TripStop,
 } from "./use-static-gtfs.js";
 
 const SKIPPED = GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SKIPPED;
 const NO_DATA = GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.NO_DATA;
+const ACCESSIBILITY_ISSUE = GtfsRealtime.transit_realtime.Alert.Effect.ACCESSIBILITY_ISSUE;
 
 const TIME_ZONE = "Europe/Paris";
 
@@ -375,7 +378,7 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 			routesById.set(alertId, routeIds);
 			entities.push({
 				networks: new Set([...routeIds].map(networkOf)),
-				entity: { id: republishedAlertId(alertId), alert },
+				entity: { id: republishedAlertId(alertId), alert: withAccessibilityStops(plainAlert(alert), routeIds, gtfs) },
 			});
 			inputs.push({
 				id: alertId,
@@ -906,6 +909,143 @@ function findStopIndex(sequence: OrderedStop[], normalizedName: string): number 
 	if (whole !== -1) return whole;
 
 	return sequence.findIndex((stop) => stopNameMatches(normalizedName, stop.name));
+}
+
+/**
+ * Pose une info trafic d'accessibilité sur les quais de la station qu'elle concerne : un ascenseur ou
+ * un escalator en panne ne touche pas toute la ligne, mais une station — et le flux amont ne cite que
+ * la ligne.
+ *
+ * La station est celle que le texte cite EN PREMIER, titre puis description. Le titre la nomme
+ * toujours d'emblée (« INFO ASCENSEURS THEATRE DES ARTS VERS BOULINGRIN HS »), quand la description
+ * l'omet parfois pour ne citer que la direction du quai (« l'escalator permettant de descendre sur le
+ * quai direction Boulingrin ») : chercher dans la description seule y verrait Boulingrin.
+ *
+ * Seuls comptent les quais des lignes que l'alerte cite, dans les deux sens et sur tous leurs tracés :
+ * l'équipement dessert la station, pas un sens de circulation, et une station de métro partage son nom
+ * avec les arrêts de bus voisins, qui n'y sont pour rien.
+ */
+function withAccessibilityStops(
+	alert: GtfsRealtime.transit_realtime.IAlert,
+	routeIds: ReadonlySet<string>,
+	gtfs: StaticGtfs,
+): GtfsRealtime.transit_realtime.IAlert {
+	if (alert.effect !== ACCESSIBILITY_ISSUE) return alert;
+
+	const informed = alert.informedEntity ?? [];
+
+	// Libellé de station → ses quais sur les lignes citées, chacun avec l'agence que l'alerte donne à
+	// sa ligne.
+	const stations = new Map<string, Map<string, string>>();
+	for (const routeId of routeIds) {
+		const agencyId = informed.find((entity) => entity.routeId === routeId)?.agencyId || networkOf(routeId);
+		for (const patterns of gtfs.routePatterns.get(routeId)?.values() ?? []) {
+			for (const { stopId } of patterns.flatMap((pattern) => pattern.stops)) {
+				const label = gtfs.stopNames.get(stopId);
+				if (label === undefined) continue;
+
+				const stopIds = stations.get(label);
+				if (stopIds === undefined) stations.set(label, new Map([[stopId, agencyId]]));
+				else stopIds.set(stopId, agencyId);
+			}
+		}
+	}
+
+	const text = `${joinTranslations(alert.headerText)} ${joinTranslations(alert.descriptionText)}`;
+	let cited: { position: number; stopIds: Map<string, string> } | undefined;
+	for (const [label, stopIds] of stations) {
+		// Un libellé à rallonge se cite par l'une de ses parties : « Palais de Justice » pour
+		// « Palais de Justice - Gisèle Halimi ».
+		for (const name of [label, ...label.split(" - ")]) {
+			const position = stopNamePosition(name, text);
+			if (position !== -1 && (cited === undefined || position < cited.position)) cited = { position, stopIds };
+		}
+	}
+	if (cited === undefined) return alert;
+
+	const added = [...cited.stopIds]
+		.filter(([stopId]) => !informed.some((entity) => entity.stopId === stopId && !entity.routeId))
+		.map(([stopId, agencyId]) => ({ agencyId, stopId }));
+	return { ...alert, informedEntity: [...informed, ...added] };
+}
+
+/** Les types d'image qu'on sait nommer, par extension : le champ `media_type` est obligatoire. */
+const IMAGE_MEDIA_TYPES = new Map([
+	["png", "image/png"],
+	["jpg", "image/jpeg"],
+	["jpeg", "image/jpeg"],
+	["gif", "image/gif"],
+	["webp", "image/webp"],
+]);
+
+/**
+ * L'info trafic telle qu'on la republie : ses textes ramenés à du texte brut, et l'image que sa
+ * description portait versée dans le champ `image` — la spécification GTFS-RT ne veut ni balise ni
+ * image dans une `description_text`, quand le flux amont y verse le HTML de son CMS.
+ *
+ * Une copie : l'alerte décodée reste en HTML pour l'analyse, dont le cache et le découpage en
+ * éléments tiennent au texte d'origine (cf. `analyzeAlerts`), comme pour la page d'administration.
+ */
+function plainAlert(alert: GtfsRealtime.transit_realtime.IAlert): GtfsRealtime.transit_realtime.IAlert {
+	const urls = alert.url?.translation ?? [];
+	/** Le document que l'alerte porte déjà, dans la langue du texte, ou dans la première à défaut. */
+	const fileUrl = (language: string | null | undefined) =>
+		(urls.find((url) => url.language === language) ?? urls[0])?.text ?? undefined;
+
+	const plain = (
+		text: GtfsRealtime.transit_realtime.ITranslatedString | null | undefined,
+		clean: (text: string) => string = (text) => text,
+	) => {
+		const translation = (text?.translation ?? []).flatMap((translation) => {
+			const converted = clean(htmlToText(translation.text ?? "", fileUrl(translation.language)));
+			return converted.length > 0 ? [{ ...translation, text: converted }] : [];
+		});
+		return translation.length > 0 ? { translation } : null;
+	};
+
+	const localizedImage = (alert.descriptionText?.translation ?? []).flatMap((translation) => {
+		const url = firstImage(translation.text ?? "");
+		const extension = url?.match(/\.([a-zA-Z0-9]+)(?:[?#]|$)/)?.[1]?.toLowerCase();
+		const mediaType = extension !== undefined ? IMAGE_MEDIA_TYPES.get(extension) : undefined;
+		if (url === undefined || mediaType === undefined) return [];
+		return [{ url, mediaType, ...(translation.language ? { language: translation.language } : {}) }];
+	});
+
+	return {
+		...alert,
+		headerText: plain(alert.headerText),
+		descriptionText: plain(alert.descriptionText, withoutNoise),
+		image: alert.image?.localizedImage?.length || localizedImage.length === 0 ? alert.image : { localizedImage },
+	};
+}
+
+/**
+ * Les mentions que le CMS amont colle aux descriptions sans rien en dire au voyageur, avec ou sans
+ * crochets et quelle que soit la casse : « Info ASTUCE », « [2ème info] », « 2eme info »… La
+ * ponctuation qui les introduit part avec (« Info ASTUCE : »). Les lisières empêchent de mordre sur
+ * un mot voisin — « 2ème information » reste intacte.
+ */
+const NOISE =
+	/\[?[^\S\n]*(?<![\p{L}\d])(?:infos?[^\S\n]+astuce|(?:2|deux)[^\S\n]*(?:i?[eèé]me|[eè]|nde?)[^\S\n]+infos?)(?!\p{L})[^\S\n]*\]?(?:[^\S\n]*[:–-](?=\s|$))?/giu;
+
+/**
+ * Une description débarrassée de ses mentions inutiles (cf. {@link NOISE}). Une ligne qui n'avait
+ * qu'elles disparaît avec, sans laisser de ligne vide derrière elle, puis le texte est retaillé. Les
+ * autres lignes restent telles quelles, espaces compris.
+ */
+function withoutNoise(text: string): string {
+	return text
+		.split("\n")
+		.flatMap((line) => {
+			const cleaned = line.replace(NOISE, " ");
+			if (cleaned === line) return [line];
+
+			const trimmed = cleaned.replace(/[^\S\n]{2,}/g, " ").trim();
+			return trimmed.length === 0 ? [] : [trimmed];
+		})
+		.join("\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
 }
 
 function joinTranslations(text: GtfsRealtime.transit_realtime.ITranslatedString | null | undefined): string {

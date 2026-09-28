@@ -284,12 +284,21 @@ function unpadNumber(word: string): string {
  */
 export function stopNameMatches(name: string, within: string): boolean {
 	if (name === within) return true;
-	return containsRun(stopNameTokens(name), stopNameTokens(within));
+	return indexOfRun(stopNameTokens(name), stopNameTokens(within)) !== -1;
 }
 
-/** Vrai si `needle` apparaît comme une suite contiguë de mots dans `haystack`. */
-function containsRun(needle: string[], haystack: string[]): boolean {
-	if (needle.length === 0 || needle.length > haystack.length) return false;
+/**
+ * Position, en mots, de la première mention d'un nom d'arrêt dans un texte libre — -1 s'il n'y figure
+ * pas. Même rapprochement que {@link stopNameMatches}, le texte tenant lieu de libellé : c'est ce qui
+ * permet de dire, de deux arrêts cités, lequel l'est en premier.
+ */
+export function stopNamePosition(name: string, text: string): number {
+	return indexOfRun(stopNameTokens(name), stopNameTokens(text));
+}
+
+/** Position de la première occurrence de `needle`, suite contiguë de mots, dans `haystack` — ou -1. */
+function indexOfRun(needle: string[], haystack: string[]): number {
+	if (needle.length === 0 || needle.length > haystack.length) return -1;
 
 	for (let i = 0; i <= haystack.length - needle.length; i += 1) {
 		let match = true;
@@ -299,9 +308,9 @@ function containsRun(needle: string[], haystack: string[]): boolean {
 				break;
 			}
 		}
-		if (match) return true;
+		if (match) return i;
 	}
-	return false;
+	return -1;
 }
 
 /** Longueur à partir de laquelle un mot tolère deux fautes plutôt qu'une. */
