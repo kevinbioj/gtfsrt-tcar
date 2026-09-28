@@ -85,11 +85,15 @@ export function deduceBounds(
  *
  * Il le fait dès que sa plage — bornes comprises — porte un arrêt que l'info trafic supprime dans ce
  * sens. Sinon il n'en supprime aucun : le véhicule passe ailleurs entre deux arrêts qu'il dessert
- * toujours, et il n'y a pas de `Modification` à écrire — des sélecteurs qui désigneraient des arrêts
- * encore desservis mentiraient. C'est alors le seul tracé qui est publié.
+ * toujours : sa `Modification` ne désigne que sa borne amont, sans rien remplacer — des sélecteurs qui
+ * engloberaient des arrêts encore desservis mentiraient. Elle publie son tracé et son délai propagé.
  *
  * Rien ne se déclare donc de plus : la nature d'un tronçon se lit du périmètre et des bornes, qui
  * sont déjà saisis. Ne cocher aucun arrêt supprimé, c'est dire que la desserte ne change pas.
+ *
+ * Un tronçon sans borne aval n'en supprime jamais : il ne dit qu'où le chemin change, jusqu'au bout
+ * de la course — un tracé repris, une course rallongée. Supprimer jusqu'au terminus de chaque course,
+ * c'est l'affaire d'un tronçon dont on choisit le dernier arrêt.
  *
  * Les bornes sont éprouvées d'abord pour elles-mêmes : une borne supprimée suffit, quand bien même
  * aucun itinéraire de la ligne ne porterait les deux — une branche que le GTFS a renumérotée.
@@ -110,11 +114,10 @@ export function removesStops(
 	if (removedStopIds.has(startStopId) || removedStopIds.has(endStopId)) return true;
 
 	for (const { stops: sequence } of patternsOf(gtfs, routeId, directionId, patternIds)) {
-		const start = sequence.findIndex((stop) => stop.stopId === startStopId);
-		const end = sequence.findIndex((stop) => stop.stopId === endStopId);
-		if (start === -1 || end === -1 || start > end) continue;
+		const range = rangeOn(sequence, segment);
+		if (range === undefined) continue;
 
-		for (let index = start; index <= end; index += 1) {
+		for (let index = range.start; index <= range.end; index += 1) {
 			if (removedStopIds.has((sequence[index] as OrderedStop).stopId)) return true;
 		}
 	}
@@ -142,12 +145,7 @@ export function overlappingSegments(
 	bounds: readonly SegmentBounds[],
 ): [number, number] | undefined {
 	for (const { stops: sequence } of patternsOf(gtfs, routeId, directionId, patternIds)) {
-		const ranges = bounds.map((segment) => {
-			if (segment.startStopId === null || segment.endStopId === null) return undefined;
-			const start = sequence.findIndex((stop) => stop.stopId === segment.startStopId);
-			const end = sequence.findIndex((stop) => stop.stopId === segment.endStopId);
-			return start === -1 || end === -1 || start > end ? undefined : { start, end };
-		});
+		const ranges = bounds.map((segment) => rangeOn(sequence, segment));
 
 		for (let first = 0; first < ranges.length; first += 1) {
 			const a = ranges[first];
@@ -164,8 +162,27 @@ export function overlappingSegments(
 	return undefined;
 }
 
-/** Les bornes d'un tronçon, arrêtées ou non. */
+/**
+ * Les bornes d'un tronçon. Sans borne amont, il n'est pas arrêté ; sans borne aval, sa plage court
+ * jusqu'au dernier arrêt de chaque course (cf. `rangeOn`).
+ */
 export type SegmentBounds = { startStopId: string | null; endStopId: string | null };
+
+/**
+ * La plage d'un tronçon sur une suite d'arrêts — un tracé, l'horaire d'une course : les rangs de ses
+ * deux bornes, ou `undefined` si la suite ne les porte pas dans l'ordre. Sans borne aval, la plage
+ * finit au dernier arrêt de la suite : c'est le bout de CETTE course, quel qu'il soit.
+ */
+export function rangeOn(
+	sequence: readonly { stopId: string }[],
+	segment: SegmentBounds,
+): { start: number; end: number } | undefined {
+	if (segment.startStopId === null) return undefined;
+	const start = sequence.findIndex((stop) => stop.stopId === segment.startStopId);
+	const end =
+		segment.endStopId === null ? sequence.length - 1 : sequence.findIndex((stop) => stop.stopId === segment.endStopId);
+	return start === -1 || end === -1 || start > end ? undefined : { start, end };
+}
 
 /** Ces tracés visés comprennent-ils celui-ci ? Aucun tracé nommé, c'est les viser tous. */
 export function targets(patternIds: readonly string[], patternId: string): boolean {

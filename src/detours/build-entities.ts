@@ -16,7 +16,7 @@ import type { StaticGtfs, TripStop } from "../gtfs-rt/use-static-gtfs.js";
 import { encodePolyline } from "../utils/encode-polyline.js";
 import type { Coordinates } from "../utils/geometry.js";
 import { networkOf } from "../utils/network.js";
-import { removesStops } from "./bounds.js";
+import { rangeOn, removesStops, type SegmentBounds } from "./bounds.js";
 import type { ResolvedModification } from "./modifications.js";
 import { type DrawnPath, spliceShape } from "./splice-shape.js";
 import { type DetourTerminus, type ProvisionalStop, provisionalStopUid } from "./store.js";
@@ -30,8 +30,8 @@ type Candidate = {
 	/** De quoi le nommer au journal et dans les identifiants publiés : « M12#0 ». */
 	label: string;
 	/**
-	 * Sa plage supprime-t-elle des arrêts ? Sinon le véhicule passe ailleurs entre deux arrêts qu'il
-	 * dessert toujours : le tronçon ne publie pas de `Modification`, seulement son tracé.
+	 * Sa plage supprime-t-elle des arrêts ? Sinon le véhicule passe ailleurs sans rien perdre de sa
+	 * desserte : le tronçon publie une `Modification` de tracé seul (cf. `shapeOnly`).
 	 */
 	removes: boolean;
 	/** `null` pour une modification déclarée sans info trafic : il n'y a pas d'alerte à citer. */
@@ -45,7 +45,8 @@ type Candidate = {
 	/** Les tracés sur lesquels un tronçon plus prioritaire l'écrase (cf. `resolveOverrides`). */
 	overriddenOn: ReadonlySet<string>;
 	startStopId: string;
-	endStopId: string;
+	/** `null` : la plage court jusqu'au dernier arrêt de chaque course, et le tronçon ne supprime rien. */
+	endStopId: string | null;
 	propagatedDelay: number;
 	stops: { stopId: string; travelTime: number }[];
 	path: Coordinates[];
@@ -65,8 +66,6 @@ type Group = {
 	/** Le réseau de la ligne de ces courses : c'est sous lui que l'entité sort (cf. `networkOf`). */
 	network: string;
 	modifications: Modification[];
-	/** Les tronçons sans suppression : ils ne donnent qu'un tracé, à coudre avec les autres. */
-	reroutes: Applicable[];
 	shapeId: string;
 	tripIds: string[];
 };
@@ -78,7 +77,8 @@ type Group = {
 type Modification = {
 	parts: string[];
 	startStopId: string;
-	endStopId: string;
+	/** `null` pour une modification de tracé seul : elle ne remplace aucun arrêt (cf. `shapeOnly`). */
+	endStopId: string | null;
 	startIndex: number;
 	endIndex: number;
 	propagatedDelay: number;
@@ -102,11 +102,11 @@ type Modification = {
  * modifications. On assemble ce qui s'applique à chaque course, puis on réunit les courses qui
  * reçoivent exactement la même chose.
  *
- * Un tronçon qui ne supprime aucun arrêt, lui, ne produit AUCUNE `Modification` : il n'a rien à
- * remplacer, et des sélecteurs qui désigneraient des arrêts encore desservis mentiraient. Ce qu'il
- * change — le chemin — passe tout entier par le `shape_id` de la course, et l'entité sort avec une
- * liste `modifications` vide. C'est la seule façon d'annoncer une déviation qui ne touche pas à la
- * desserte, et c'est le cas d'une ligne déviée dans un sens où elle ne perd pas d'arrêt.
+ * Un tronçon qui ne supprime aucun arrêt, lui, produit une `Modification` de TRACÉ SEUL : sa borne
+ * amont pour tout sélecteur, ni borne aval ni arrêt de substitution — la spécification le prévoit
+ * ainsi, et c'est ce qui porte son délai propagé (cf. `shapeOnly`). Ce qu'il change — le chemin —
+ * passe par le `shape_id` de la course. C'est le cas d'une ligne déviée dans un sens où elle ne perd
+ * pas d'arrêt, d'un tracé repris jusqu'au terminus, d'une course rallongée.
  *
  * Une entité est émise PAR JOURNÉE DE SERVICE, et non une seule portant plusieurs `service_dates`.
  * Sans cela, les courses de toutes les journées se retrouveraient réunies sous chaque date : une
@@ -199,29 +199,32 @@ export function buildDetourEntities(
 				const matched = placed.filter((entry) => isActive(entry.candidate.periods, departsAt));
 				if (matched.length === 0) continue;
 
-				// Les deux natures de tronçon se séparent ici, et ne se revoient qu'au tracé. Un tronçon
-				// qui ne supprime rien n'a pas de `Modification` à replier avec les autres : il n'en
-				// produit aucune, et ce qu'il dessine se coud dans la shape comme le reste.
-				const resolved = mergeOverlaps(
+				// Les deux natures de tronçon se séparent ici. Seuls ceux qui suppriment se replient entre eux ;
+				// un tronçon de tracé seul ne remplace rien, et n'a rien à replier.
+				const removing = mergeOverlaps(
 					gtfs,
 					matched.filter((entry) => entry.candidate.removes),
 					schedule,
 					problems,
 				);
-				const reroutes = matched.filter((entry) => !entry.candidate.removes);
+				const resolved = [
+					...removing,
+					...shapeOnly(
+						gtfs,
+						matched.filter((entry) => !entry.candidate.removes),
+						removing,
+						problems,
+					),
+				].sort((a, b) => a.startIndex - b.startIndex);
 
 				for (const modification of resolved) for (const part of modification.parts) applied.add(part);
-				for (const entry of reroutes) applied.add(entry.candidate.label);
 
-				const signature =
-					`${meta.shapeId}|${resolved.map(signatureOf).join(";")}` +
-					`|${reroutes.map((entry) => entry.candidate.label).join(";")}`;
+				const signature = `${meta.shapeId}|${resolved.map(signatureOf).join(";")}`;
 				const group = groups.get(signature);
 				if (group === undefined)
 					groups.set(signature, {
 						network: networkOf(meta.routeId),
 						modifications: resolved,
-						reroutes,
 						shapeId: meta.shapeId,
 						tripIds: [tripId],
 					});
@@ -230,19 +233,12 @@ export function buildDetourEntities(
 		}
 
 		for (const [signature, group] of groups) {
-			const parts = [
-				...group.modifications.map((modification) => modification.parts.join("+")),
-				...group.reroutes.map((entry) => entry.candidate.label),
-			].join("-");
+			const parts = group.modifications.map((modification) => modification.parts.join("+")).join("-");
 			// Les mêmes tronçons ne donnent pas forcément la même chose sur deux branches : des horaires
 			// différents les replient différemment. L'empreinte de la signature tranche, et reste la même
 			// d'un relevé à l'autre tant que la déclaration ne bouge pas.
 			const fingerprint = createHash("sha1").update(signature).digest("hex").slice(0, 8);
 			const shapeId = resolveShapeId(gtfs, shapes, splicedShapes, problems, parts, fingerprint, group);
-
-			// Une entité qui ne porterait ni modification ni tracé ne dirait rien : c'est le cas d'un
-			// tronçon sans suppression dont la shape n'a pas pu être recousue, et le journal l'a dit.
-			if (group.modifications.length === 0 && shapeId === null) continue;
 
 			entities.push({
 				network: group.network,
@@ -259,7 +255,8 @@ export function buildDetourEntities(
 							// Toujours par identifiant d'arrêt, jamais par rang : une même modification couvre
 							// des dizaines de courses dont les `stop_sequence` ne coïncident pas.
 							startStopSelector: { stopId: modification.startStopId },
-							endStopSelector: { stopId: modification.endStopId },
+							// Absent pour une modification de tracé seul : la spec l'interdit quand rien n'est remplacé.
+							endStopSelector: modification.endStopId === null ? undefined : { stopId: modification.endStopId },
 							propagatedModificationDelay: modification.propagatedDelay,
 							replacementStops: modification.stops.map((stop) => ({
 								stopId: stop.stopId,
@@ -299,7 +296,9 @@ export function buildDetourEntities(
 			problems.add(
 				`${candidate.label} — aucune course de ${lineOf(gtfs, candidate.routeId)} sens ${candidate.directionId} ` +
 					(candidate.patternIds === null ? "" : `sur ${[...candidate.patternIds].join(", ")} `) +
-					`ne dessert ${candidate.startStopId} puis ${candidate.endStopId} dans les sept jours à venir : ` +
+					`ne dessert ${candidate.startStopId}` +
+					(candidate.endStopId === null ? "" : ` puis ${candidate.endStopId}`) +
+					" dans les sept jours à venir : " +
 					(candidate.patternIds === null ? "vérifier les bornes." : "vérifier les bornes et les tracés visés."),
 			);
 		}
@@ -345,8 +344,7 @@ export function countSelectableTrips(
 	gtfs: StaticGtfs,
 	routeId: string,
 	directionId: number,
-	startStopId: string,
-	endStopId: string,
+	bounds: SegmentBounds,
 	nowSeconds: number,
 ): Map<string, number> {
 	const counts = new Map<string, number>();
@@ -367,7 +365,7 @@ export function countSelectableTrips(
 				const schedule = gtfs.tripStopSequences.get(tripId);
 				const patternId = gtfs.tripPatterns.get(tripId);
 				if (schedule === undefined || patternId === undefined) continue;
-				if (boundsOn(schedule, startStopId, endStopId) === undefined) continue;
+				if (rangeOn(schedule, bounds) === undefined) continue;
 
 				counts.set(patternId, (counts.get(patternId) ?? 0) + 1);
 			}
@@ -404,10 +402,11 @@ function collectCandidates(
 		record.segments.forEach((segment, rank) => {
 			const label = `M${record.uid}#${rank}`;
 			const { startStopId, endStopId } = segment;
-			// Les bornes sont requises quelle que soit la nature du tronçon : publiées ou non, ce sont
-			// elles qui désignent les courses concernées.
-			if (startStopId === null || endStopId === null) {
-				problems.add(`${label} — bornes du tronçon manquantes.`);
+			// La borne amont est requise quelle que soit la nature du tronçon : publiée ou non, c'est elle
+			// qui désigne les courses concernées. La borne aval peut manquer : la plage court alors
+			// jusqu'au bout de chaque course (cf. `rangeOn`).
+			if (startStopId === null) {
+				problems.add(`${label} — borne amont du tronçon manquante.`);
 				return;
 			}
 
@@ -440,10 +439,10 @@ function collectCandidates(
 			// Le périmètre a pu changer après coup : des arrêts de substitution saisis quand la plage
 			// supprimait encore n'ont plus rien à remplacer. Ils sont laissés de côté, et le journal le
 			// dit — les publier reviendrait à ajouter des arrêts à une course qui n'en perd aucun.
-			if (!removes && (segment.stops.length > 0 || segment.propagatedDelay !== 0)) {
+			if (!removes && segment.stops.length > 0) {
 				problems.add(
-					`${label} — aucun arrêt supprimé dans sa plage : ses arrêts de substitution et son délai ` +
-						"propagé sont ignorés, seul le tracé est publié.",
+					`${label} — aucun arrêt supprimé dans sa plage : ses arrêts de substitution sont ignorés, ` +
+						"seuls le tracé et le délai propagé sont publiés.",
 				);
 			}
 
@@ -472,7 +471,7 @@ function collectCandidates(
 				overriddenOn: modification.overridden.get(rank) ?? new Set(),
 				startStopId,
 				endStopId,
-				propagatedDelay: removes ? segment.propagatedDelay : 0,
+				propagatedDelay: segment.propagatedDelay,
 				stops: removes ? segment.stops.map((stop) => ({ stopId: stop.stopId, travelTime: stop.travelTime })) : [],
 				path: segment.path,
 				terminus: segment.terminus,
@@ -491,7 +490,8 @@ function collectCandidates(
  *
  * Un tronçon n'est retenu que si l'horaire porte ses DEUX bornes, dans l'ordre : c'est ce qui écarte
  * les branches et les services partiels qui ne passent pas par le segment dévié, sans avoir à les
- * deviner. S'il nomme des tracés, la course doit en plus emprunter l'un d'eux — et ne pas être de
+ * deviner. Sans borne aval, la course n'a qu'à desservir la borne amont : la plage va jusqu'à son
+ * dernier arrêt. S'il nomme des tracés, la course doit en plus emprunter l'un d'eux — et ne pas être de
  * ceux où un tronçon plus prioritaire l'écrase.
  */
 function matchOnTrip(
@@ -504,23 +504,11 @@ function matchOnTrip(
 	for (const candidate of candidates) {
 		if (candidate.patternIds !== null && (patternId === undefined || !candidate.patternIds.has(patternId))) continue;
 		if (patternId !== undefined && candidate.overriddenOn.has(patternId)) continue;
-		const bounds = boundsOn(schedule, candidate.startStopId, candidate.endStopId);
-		if (bounds !== undefined) matched.push({ candidate, ...bounds });
+		const range = rangeOn(schedule, candidate);
+		if (range !== undefined) matched.push({ candidate, startIndex: range.start, endIndex: range.end });
 	}
 
 	return matched.sort((a, b) => a.startIndex - b.startIndex || a.endIndex - b.endIndex);
-}
-
-/** Le rang des deux bornes dans un horaire, ou `undefined` s'il ne les porte pas dans l'ordre. */
-function boundsOn(
-	schedule: TripStop[],
-	startStopId: string,
-	endStopId: string,
-): { startIndex: number; endIndex: number } | undefined {
-	const startIndex = schedule.findIndex((stop) => stop.stopId === startStopId);
-	const endIndex = schedule.findIndex((stop) => stop.stopId === endStopId);
-	if (startIndex === -1 || endIndex === -1 || startIndex > endIndex) return undefined;
-	return { startIndex, endIndex };
 }
 
 /**
@@ -558,7 +546,7 @@ function mergeOverlaps(
 			merged.push({
 				parts: [candidate.label],
 				startStopId: candidate.startStopId,
-				endStopId: candidate.endStopId,
+				endStopId: (schedule[endIndex] as TripStop).stopId,
 				startIndex,
 				endIndex,
 				propagatedDelay: candidate.propagatedDelay,
@@ -590,7 +578,7 @@ function mergeOverlaps(
 		previous.parts.push(candidate.label);
 		if (endIndex > previous.endIndex) {
 			previous.endIndex = endIndex;
-			previous.endStopId = candidate.endStopId;
+			previous.endStopId = (schedule[endIndex] as TripStop).stopId;
 		}
 		previous.propagatedDelay += candidate.propagatedDelay;
 		previous.lastModifiedTime = Math.max(previous.lastModifiedTime, candidate.updatedAt);
@@ -611,6 +599,56 @@ function mergeOverlaps(
 	}
 
 	return merged;
+}
+
+/**
+ * Les `Modification` de tracé seul des tronçons qui ne suppriment rien sur cette course.
+ *
+ * La spécification les prévoit : `start_stop_selector` seul, ni `end_stop_selector` ni
+ * `replacement_stops`. Le délai propagé s'applique alors à partir de l'arrêt qui SUIT la borne amont
+ * — la borne elle-même est desservie à l'heure. Rien n'est remplacé, et l'arrêt de référence ne sert
+ * à rien : il n'y a pas de temps de parcours à compter.
+ *
+ * Une borne amont qu'une modification supprime sur cette course — deux déclarations de même priorité
+ * qui se recoupent — ne désignerait qu'un arrêt que la course ne dessert plus. Le tronçon se replie
+ * alors dans celle-là, qui emporte son tracé mais pas son délai ; le journal le dit.
+ */
+function shapeOnly(
+	gtfs: StaticGtfs,
+	matched: readonly Applicable[],
+	removing: readonly Modification[],
+	problems: Set<string>,
+): Modification[] {
+	const published: Modification[] = [];
+
+	for (const { candidate, startIndex } of matched) {
+		const host = removing.find((other) => other.startIndex <= startIndex && startIndex <= other.endIndex);
+		if (host !== undefined) {
+			problems.add(
+				`${candidate.label} — sa borne amont est supprimée par ${host.parts.join("+")} sur ${lineOf(gtfs, candidate.routeId)} ` +
+					`sens ${candidate.directionId} : son tracé y est joint, son délai propagé est perdu.`,
+			);
+			host.parts.push(candidate.label);
+			host.lastModifiedTime = Math.max(host.lastModifiedTime, candidate.updatedAt);
+			host.paths.push(drawnPath(candidate));
+			continue;
+		}
+
+		published.push({
+			parts: [candidate.label],
+			startStopId: candidate.startStopId,
+			endStopId: null,
+			startIndex,
+			endIndex: startIndex,
+			propagatedDelay: candidate.propagatedDelay,
+			stops: [],
+			paths: [drawnPath(candidate)],
+			alertId: candidate.alertId,
+			lastModifiedTime: candidate.updatedAt,
+		});
+	}
+
+	return published;
 }
 
 /** Le tracé d'un tronçon, tel que la recouture le prend. */
@@ -689,10 +727,7 @@ function buildShape(
 	fingerprint: string,
 	group: Group,
 ): string | null {
-	const paths = [
-		...group.modifications.flatMap((modification) => modification.paths),
-		...group.reroutes.map((entry) => drawnPath(entry.candidate)),
-	];
+	const paths = group.modifications.flatMap((modification) => modification.paths);
 	if (paths.length === 0) return null;
 
 	const original = gtfs.shapes.get(group.shapeId);

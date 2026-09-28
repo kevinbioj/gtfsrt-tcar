@@ -420,7 +420,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 					<div class="field"><label>Dernier</label><select id="endStop"></select></div>
 					<p class="note" id="referenceNote"></p>
 					<div class="field" style="margin-top:8px"><label>Délai propagé</label><input id="propagatedDelay" type="number" step="1" value="0"></div>
-					<p class="note">Secondes ajoutées aux horaires qui suivent le tronçon. 0 si le détour ne rallonge rien.</p>
+					<p class="note" id="delayNote"></p>
 					<p class="note" id="tripCount"></p>
 
 					<div id="stopSection">
@@ -1905,7 +1905,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var segment = seg();
 		var list = el("patternList");
 		var focused = focusedPattern();
-		var bounded = segment.startStopId !== null && segment.endStopId !== null;
+		// Sans borne aval, la borne amont suffit à désigner les courses : la plage court jusqu'au bout.
+		var bounded = segment.startStopId !== null;
 		list.innerHTML = "";
 
 		state.detail.patterns.forEach(function (pattern) {
@@ -1956,7 +1957,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			note.textContent = "Aucun tracé coché : la modification ne vise aucune course.";
 			note.style.color = "var(--danger)";
 		} else {
-			note.textContent = bounded ? "Courses des sept jours à venir entre les bornes du tronçon " + (state.active + 1) + "." : "";
+			note.textContent = !bounded ? ""
+				: segment.endStopId === null
+					? "Courses des sept jours à venir qui desservent la borne amont du tronçon " + (state.active + 1) + "."
+					: "Courses des sept jours à venir entre les bornes du tronçon " + (state.active + 1) + ".";
 			note.style.color = "var(--muted)";
 		}
 	}
@@ -1998,9 +2002,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	/**
 	 * Ce tronçon supprime-t-il des arrêts ? La question ne se règle pas, elle se lit : sa plage —
 	 * bornes comprises — porte-t-elle un arrêt que le périmètre déclare supprimé ? Sinon le véhicule
-	 * passe ailleurs entre deux arrêts qu'il dessert toujours, et seul le tracé sera publié.
+	 * passe ailleurs sans rien perdre de sa desserte, et seuls le tracé et le délai seront publiés.
 	 *
-	 * Même règle que le serveur (cf. removesStops), sur les tracés que le tronçon vise.
+	 * Même règle que le serveur (cf. removesStops), sur les tracés que le tronçon vise : sans borne
+	 * aval, jamais.
 	 */
 	function removesStops(segment) {
 		if (segment.startStopId === null || segment.endStopId === null) return false;
@@ -2086,7 +2091,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 */
 	function refreshTripCount() {
 		var segment = seg();
-		if (segment.startStopId === null || segment.endStopId === null) {
+		if (segment.startStopId === null) {
 			segment.tripsByPattern = {};
 			renderTripCount();
 			renderPatterns();
@@ -2096,7 +2101,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		clearTimeout(state.countTimer);
 		state.countTimer = setTimeout(function () {
 			var url = API + "/api/modifications/" + state.detail.uid + "/trip-count"
-				+ "?start=" + encodeURIComponent(segment.startStopId) + "&end=" + encodeURIComponent(segment.endStopId);
+				+ "?start=" + encodeURIComponent(segment.startStopId)
+				+ (segment.endStopId === null ? "" : "&end=" + encodeURIComponent(segment.endStopId));
 			// Le compte revient par tracé, qu'il soit coché ou non : cocher ou décocher n'a alors plus
 			// rien à redemander, et chaque case dit si son tracé dessert ces bornes.
 			request(url).then(function (answer) {
@@ -2429,22 +2435,26 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 		// Les bornes désignent les courses dans tous les cas — celles dont l'horaire porte les deux, dans
 		// l'ordre. Ce qu'elles disent de plus dépend du périmètre : des arrêts supprimés, ou les deux
-		// extrémités d'un passage ailleurs, qui restent desservies et ne sont alors pas publiées.
+		// extrémités d'un passage ailleurs, qui restent desservies et ne sont alors pas publiées. Sans
+		// borne aval, le chemin change jusqu'au bout de la course, et rien n'est supprimé.
 		var removes = removesStops(segment);
 		el("boundsNote").innerHTML = removes
 			? "Premier et dernier arrêt <strong>supprimé</strong>, bornes comprises."
-			: "Entre quels arrêts le chemin change. Aucun arrêt supprimé dans cette plage : les deux "
-				+ "bornes restent <strong>desservies</strong> et ne servent qu'à désigner les courses.";
+			: segment.endStopId === null
+				? "D'où le chemin change, jusqu'au bout de la course : tracé repris ou course rallongée. Sans "
+					+ "dernier arrêt, rien n'est supprimé ; la borne reste <strong>desservie</strong>."
+				: "Entre quels arrêts le chemin change. Aucun arrêt supprimé dans cette plage : les deux "
+					+ "bornes restent <strong>desservies</strong>.";
 
 		[["startStop", "startStopId"], ["endStop", "endStopId"]].forEach(function (pair) {
 			var select = el(pair[0]);
 			select.innerHTML = "";
 
 			// Un tronçon qu'on vient d'ajouter n'a pas de bornes : sans cette entrée vide, le premier arrêt
-			// de la ligne s'imposerait en silence.
+			// de la ligne s'imposerait en silence. Laissée vide, la borne aval dit « jusqu'au bout ».
 			var empty = document.createElement("option");
 			empty.value = "";
-			empty.textContent = "— choisir —";
+			empty.textContent = pair[0] === "endStop" ? "— jusqu'au terminus —" : "— choisir —";
 			select.appendChild(empty);
 
 			stops.forEach(function (stop) {
@@ -2474,6 +2484,12 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			};
 		});
 
+		// Là où le délai commence dépend de ce que le tronçon publie : après le dernier arrêt de
+		// substitution s'il remplace des arrêts, après la borne amont s'il ne change que le tracé.
+		el("delayNote").textContent = (removes
+			? "Secondes ajoutées aux horaires des arrêts qui suivent le dernier arrêt de substitution."
+			: "Secondes ajoutées aux horaires des arrêts qui suivent la borne amont, elle exclue.")
+			+ " 0 si le détour ne rallonge rien.";
 		el("propagatedDelay").value = segment.propagatedDelay;
 		el("propagatedDelay").onchange = function (event) {
 			segment.propagatedDelay = parseInt(event.target.value, 10) || 0;
@@ -2920,7 +2936,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			note.style.color = "var(--warn)";
 		} else if (!removesStops(segment)) {
 			note.textContent = segment.stops.length === 0
-				? "Aucun arrêt supprimé dans cette plage : seul le tracé sera publié."
+				? "Aucun arrêt supprimé dans cette plage : seuls le tracé et le délai propagé seront publiés."
 				: "Aucun arrêt supprimé dans cette plage : ces arrêts de substitution ne seront pas publiés.";
 			note.style.color = segment.stops.length === 0 ? "var(--muted)" : "var(--warn)";
 		} else if (segment.stops.length === 0) {
@@ -3476,8 +3492,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				message = detail.segmentCount === 0 ? "Enregistré, sans tronçon." : "Enregistré.";
 			} else {
 				var segment = state.segments[blocking];
-				var why = segment.startStopId === null || segment.endStopId === null
-					? "bornes manquantes."
+				var why = segment.startStopId === null
+					? "borne amont manquante."
 					: matchingTrips(segment) === 0 ? "aucune course des tracés cochés ne dessert ses bornes."
 					: removesStops(segment) ? "ni arrêt ni tracé."
 					: "tracé manquant.";

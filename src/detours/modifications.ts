@@ -1,6 +1,7 @@
 import type { AlertPeriod } from "../ai/analyze-alert.js";
 import { type AnalyzedAlert, type CancelIndex, isActive, type SkipIndex } from "../gtfs-rt/use-service-alerts.js";
 import { courseKey, type OrderedStop, type RoutePattern, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
+import { rangeOn } from "./bounds.js";
 import { type DetourStore, type Modification, type ModificationOrigin, type Proposal, scopeKey } from "./store.js";
 
 /**
@@ -454,17 +455,17 @@ function patternsOf(gtfs: StaticGtfs, modification: ResolvedModification): Route
 
 /**
  * Les plages des tronçons d'une modification sur un tracé : aucune s'il n'est pas visé, ni pour un
- * tronçon dont le tracé ne porte pas les deux bornes dans l'ordre — il ne s'y applique pas.
+ * tronçon dont le tracé ne porte pas les deux bornes dans l'ordre — il ne s'y applique pas. Sans
+ * borne aval, la plage va jusqu'au bout du tracé (cf. `rangeOn`).
  */
 function placementsOn(modification: ResolvedModification, pattern: RoutePattern): Placement[] {
 	if (modification.patternIds.length > 0 && !modification.patternIds.includes(pattern.patternId)) return [];
 
 	const placements: Placement[] = [];
 	modification.record.segments.forEach((segment, rank) => {
-		const start = pattern.stops.findIndex((stop) => stop.stopId === segment.startStopId);
-		const end = pattern.stops.findIndex((stop) => stop.stopId === segment.endStopId);
-		if (start === -1 || end === -1 || start > end) return;
-		placements.push({ uid: modification.uid, rank, priority: modification.record.priority, start, end });
+		const range = rangeOn(pattern.stops, segment);
+		if (range === undefined) return;
+		placements.push({ uid: modification.uid, rank, priority: modification.record.priority, ...range });
 	});
 	return placements;
 }

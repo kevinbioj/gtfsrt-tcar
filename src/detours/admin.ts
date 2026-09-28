@@ -773,8 +773,9 @@ function summarizeOrphan(record: Modification, deps: AdminDependencies) {
 }
 
 /**
- * Un tronçon n'entre dans le feed qu'avec ses deux bornes — ce sont elles qui désignent les courses —
- * et de quoi dire quelque chose.
+ * Un tronçon n'entre dans le feed qu'avec sa borne amont — c'est elle qui désigne les courses, avec
+ * la borne aval s'il en a une — et de quoi dire quelque chose. Sans borne aval, il court jusqu'au
+ * bout de la course et ne supprime rien : il lui faut un tracé.
  *
  * Quand sa plage supprime des arrêts, ce quelque chose est des arrêts de substitution, un tracé, ou
  * les deux : le tracé seul suffit, le segment est alors supprimé sans report, et l'itinéraire porte
@@ -782,7 +783,7 @@ function summarizeOrphan(record: Modification, deps: AdminDependencies) {
  * rien à remplacer (cf. `removesStops`).
  */
 function isSegmentPublishable(segment: DetourSegment, modification: ResolvedModification, gtfs: StaticGtfs): boolean {
-	if (segment.startStopId === null || segment.endStopId === null) return false;
+	if (segment.startStopId === null) return false;
 	const removes = removesStops(
 		gtfs,
 		modification.routeId,
@@ -1012,23 +1013,16 @@ function patternLabels(patterns: readonly RoutePattern[], gtfs: StaticGtfs): str
 
 /**
  * Combien de courses les bornes d'un tronçon désignent sur chaque tracé du sens, visé ou non. Rien
- * tant qu'elles ne sont pas arrêtées.
+ * tant que la borne amont n'est pas arrêtée ; sans borne aval, toutes celles qui desservent l'amont.
  */
 function countTripsByPattern(
 	bounds: SegmentBounds,
 	modification: ResolvedModification,
 	deps: AdminDependencies,
 ): Map<string, number> {
-	if (bounds.startStopId === null || bounds.endStopId === null) return new Map();
+	if (bounds.startStopId === null) return new Map();
 
-	return countSelectableTrips(
-		deps.gtfs.data,
-		modification.routeId,
-		modification.directionId,
-		bounds.startStopId,
-		bounds.endStopId,
-		nowSeconds(),
-	);
+	return countSelectableTrips(deps.gtfs.data, modification.routeId, modification.directionId, bounds, nowSeconds());
 }
 
 /**

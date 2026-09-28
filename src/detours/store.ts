@@ -226,11 +226,16 @@ export type DetourStop = {
  */
 export type DetourSegment = {
 	/**
-	 * Premier arrêt de la plage, borne comprise. Publié comme `start_stop_selector` lorsque la plage
-	 * supprime des arrêts ; sinon il ne sert qu'à désigner les courses (cf. `removesStops`).
+	 * Premier arrêt de la plage, borne comprise. Toujours publié comme `start_stop_selector` : lorsque
+	 * la plage ne supprime rien, c'est la modification de tracé seul, dont le délai propagé part de
+	 * l'arrêt qui le suit (cf. `removesStops`).
 	 */
 	startStopId: string | null;
-	/** Dernier arrêt de la plage, borne incluse — `end_stop_selector`. */
+	/**
+	 * Dernier arrêt de la plage, borne incluse — `end_stop_selector`. Facultatif : sans lui, la plage
+	 * court jusqu'au dernier arrêt de chaque course, et le tronçon ne supprime rien — un tracé repris
+	 * ou une course rallongée (cf. `removesStops`).
+	 */
 	endStopId: string | null;
 	/** Secondes à répercuter sur tous les horaires suivant la modification. */
 	propagatedDelay: number;
