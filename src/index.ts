@@ -24,6 +24,8 @@ import {
 	VEHICLE_MONITORING_URL,
 	VEHICLE_POSITIONS_URL,
 	VEHICLE_STALENESS,
+	VEHICLES_INTERVAL,
+	VEHICLES_URL,
 	VERIFICATION_FEED_URL,
 	VERIFICATION_STALENESS,
 } from "./config.js";
@@ -51,6 +53,7 @@ import {
 	useServiceAlerts,
 } from "./gtfs-rt/use-service-alerts.js";
 import { departureEpoch, useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
+import { useVehicleFleet } from "./gtfs-rt/use-vehicle-fleet.js";
 import { useVehicleLocator, type VehicleLocation } from "./gtfs-rt/use-vehicle-locator.js";
 import { useVehicleMonitoring } from "./gtfs-rt/use-vehicle-monitoring.js";
 import { awaitsDeparture, useVehicleRegistry } from "./gtfs-rt/use-vehicle-registry.js";
@@ -84,6 +87,7 @@ const store = useRealtimeStore();
 const registry = useVehicleRegistry(restored?.vehicles);
 const movementTracker = useMovementTracker(restored?.movements);
 const vehicleOccupancyStatuses = useVehicleOccupancyStatuses();
+const vehicleFleet = await useVehicleFleet(VEHICLES_URL, VEHICLES_INTERVAL);
 
 const verificationFeed = await useVerificationFeed(VERIFICATION_FEED_URL);
 
@@ -167,11 +171,16 @@ const ofNetworks = <T>(entries: Iterable<[string, T]>, networks: ReadonlySet<str
 
 /**
  * Les véhicules à émettre à cet instant : le registre écarte lui-même les relevés TCAR périmés, les
- * réseaux relayés les leurs.
+ * réseaux relayés les leurs. Leur accessibilité et leur immatriculation ne sont posées qu'ici, d'après
+ * la course émise : une seule règle pour tous les réseaux, et rien à ajouter à ce que le registre retient.
  */
 const publishedPositions = (networks: ReadonlySet<string>) => {
 	const nowSeconds = Math.floor(Date.now() / 1000);
-	return ofNetworks([...registry.publishable(nowSeconds), ...relayedNetworks.vehiclePositions(nowSeconds)], networks);
+	return new Map(
+		ofNetworks([...registry.publishable(nowSeconds), ...relayedNetworks.vehiclePositions(nowSeconds)], networks)
+			.entries()
+			.map(([id, position]) => [id, vehicleFleet.describe(position)]),
+	);
 };
 
 /** Les trip updates à émettre, tous réseaux confondus dans le store (cf. `pollTripUpdates`). */

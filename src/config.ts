@@ -73,6 +73,18 @@ export const VERIFICATION_FEED_INTERVAL = POLL_INTERVAL;
  * une ligne, elle ne situe plus un véhicule.
  */
 export const PREFERRED_POSITION_STALENESS = Temporal.Duration.from({ minutes: 2 }).total("seconds");
+/**
+ * Le parc des trois réseaux — TCAR, TAE, TNI —, véhicule par véhicule : c'est lui qui dit si un
+ * véhicule est accessible en fauteuil roulant, et quelle est son immatriculation. Il ne bouge qu'au gré
+ * des mises en service, d'où un rafraîchissement horaire.
+ */
+export const VEHICLES_URL = "https://999.tcrn.fr/vehicles.json";
+export const VEHICLES_INTERVAL = Temporal.Duration.from({ hours: 1 }).total("milliseconds");
+/**
+ * Lignes du TEOR. Un véhicule qui y circule est jugé sur son accessibilité aux quais TEOR
+ * (`teor_accessible`) plutôt que sur son accessibilité générale, qui ne sert alors que de repli.
+ */
+export const TEOR_ROUTES = new Set(["TCAR:91", "TCAR:92", "TCAR:93", "TCAR:94"]);
 export const VEHICLE_OCCUPANCY_STALENESS = Temporal.Duration.from({ minutes: 3 }).total("milliseconds");
 export const VEHICLE_OCCUPANCY_STATUS_URL = atob("aHR0cHM6Ly90Y2FyLmZsb3dseS5yZS9Qb3J0YWwvTWFwRGV2aWNlcy5hc3B4");
 
