@@ -1,5 +1,5 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
-import { FINISHED_TRIP_RETENTION, TRIP_UPDATES_HORIZON } from "../config.js";
+import { FINISHED_TRIP_RETENTION, SERVICE_RUN_MARGIN, TRIP_UPDATES_HORIZON } from "../config.js";
 import { networkOf } from "../utils/network.js";
 import {
 	applySkippedStops,
@@ -69,7 +69,8 @@ export type ServiceRun = { tripId: string; date: string };
 /**
  * L'exemplaire de la course qui circule vraiment, et la journée de service dont il relève.
  * `undefined` lorsqu'aucun n'est rattachable à l'une des journées candidates — course que le GTFS ne
- * décrit plus, ou horaire théorique en retard sur le service en cours.
+ * décrit plus, horaire théorique en retard sur le service en cours, ou `reference` à plus de
+ * {@link SERVICE_RUN_MARGIN} du créneau de la course.
  *
  * Deux corrections en une, parce que c'est le même geste.
  *
@@ -81,6 +82,11 @@ export type ServiceRun = { tripId: string; date: string };
  * annonce pour la course. Le retard d'un véhicule se compte en minutes, l'écart entre deux journées
  * candidates en heures : aucune confusion possible, y compris pour une course écrite « 25:10 » que le
  * GTFS range la veille du soir où elle roule.
+ *
+ * Encore faut-il qu'un créneau encadre `reference` : le plus proche n'y suffit pas. Un véhicule garé
+ * sur sa course du matin, que la source annonce encore le soir, se trouve alors plus près du départ
+ * de demain que de l'arrivée d'aujourd'hui. Au-delà de {@link SERVICE_RUN_MARGIN}, aucune journée
+ * n'est retenue.
  *
  * La seconde est l'identifiant lui-même. Le GTFS décrit une même course une fois par service qui
  * l'assure, sous un `trip_id` par exemplaire, et le SAE se trompe d'exemplaire : il annonce le
@@ -117,6 +123,7 @@ export function resolveServiceRun(
 			// Distance de `reference` au créneau de la course ce jour-là : nulle pendant qu'elle roule, et
 			// c'est de combien elle le manque sinon.
 			const distance = Math.max(0, midnight + departure - reference, reference - (midnight + arrival));
+			if (distance > SERVICE_RUN_MARGIN) continue;
 
 			// À égalité — deux versions qui circulent le même jour —, on garde celle que la source annonce :
 			// un identifiant ne se réécrit que lorsqu'il le faut.
@@ -144,6 +151,9 @@ export function resolveServiceRun(
  * L'horaire annoncé se pose sur la journée où la course annoncée encadrerait `reference`, qu'elle y
  * circule ou non : c'est de ce départ-là que la course retenue doit être la plus proche. Une course
  * annoncée qui circule bel et bien est à distance nulle d'elle-même, et reste donc retenue.
+ *
+ * La course retenue doit encadrer `reference` à {@link SERVICE_RUN_MARGIN} près, comme dans
+ * `resolveServiceRun`.
  */
 export function resolveNearestRun(
 	gtfs: StaticGtfs,
@@ -191,7 +201,15 @@ export function resolveNearestRun(
 				if (candidateSchedule?.[0]?.stopId !== origin || candidateSchedule.at(-1)?.stopId !== destination) continue;
 
 				const candidateDeparture = gtfs.tripDepartures.get(candidate);
-				if (candidateDeparture === undefined) continue;
+				const candidateArrival = gtfs.tripArrivals.get(candidate);
+				if (candidateDeparture === undefined || candidateArrival === undefined) continue;
+
+				const slotDistance = Math.max(
+					0,
+					midnight + candidateDeparture - reference,
+					reference - (midnight + candidateArrival),
+				);
+				if (slotDistance > SERVICE_RUN_MARGIN) continue;
 
 				// À égalité, on garde celle que la source annonce, comme `resolveServiceRun`.
 				const distance = Math.abs(midnight + candidateDeparture - announcedDeparture);

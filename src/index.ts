@@ -38,6 +38,8 @@ import { handleRequest } from "./gtfs-rt/handle-request.js";
 import {
 	resolveNearestRun,
 	resolveServiceRun,
+	type ServiceDay,
+	type ServiceRun,
 	scheduledTripUpdates,
 	serviceDays,
 	tripRun,
@@ -53,7 +55,7 @@ import {
 	isCancelled,
 	useServiceAlerts,
 } from "./gtfs-rt/use-service-alerts.js";
-import { departureEpoch, useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
+import { useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
 import { useVehicleFleet } from "./gtfs-rt/use-vehicle-fleet.js";
 import { useVehicleLocator, type VehicleLocation } from "./gtfs-rt/use-vehicle-locator.js";
 import { useVehicleMonitoring } from "./gtfs-rt/use-vehicle-monitoring.js";
@@ -345,7 +347,7 @@ async function poll() {
 		// Le départ de la course. Tant qu'il n'est pas passé, l'immobilité du véhicule s'explique
 		// d'elle-même — il patiente à son terminus — et aucune des durées ne court contre lui : ni le gel
 		// du suivi, ni la sortie du feed, ni l'oubli (cf. `awaitsDeparture`).
-		const departsAt = departureOf(tripId, nowSeconds);
+		const departsAt = departureOf(run, candidateDays);
 		const awaitingDeparture = awaitsDeparture(departsAt, nowSeconds);
 
 		// Ce qu'une source réhorodate n'est pas fiable pour autant : seul le mouvement constaté prouve
@@ -525,15 +527,23 @@ function freshDestination(vehicleId: string, nowSeconds: number): string {
  * course déjà retardée n'est pas en retard pour autant, et le seul horaire théorique le sortirait du
  * feed avant même son départ.
  *
- * `undefined` pour une course qu'aucune des deux sources ne connaît — le GTFS statique peut dater
- * d'avant le service en cours.
+ * L'horaire théorique se pose sur la journée de service de la course, et non sur celle qui le
+ * placerait au plus près de maintenant : un véhicule garé sur sa course du matin passerait le soir
+ * pour attendre celle de demain.
+ *
+ * `undefined` pour une course rattachée à aucune journée (cf. `resolveServiceRun`) : le véhicule
+ * n'attend alors rien. De même pour une course qu'aucune des deux sources ne connaît — le GTFS
+ * statique peut dater d'avant le service en cours.
  */
-function departureOf(tripId: string, nowSeconds: number): number | undefined {
-	const realtime = store.tripDepartures.get(tripId);
+function departureOf(run: ServiceRun | undefined, days: readonly ServiceDay[]): number | undefined {
+	if (run === undefined) return undefined;
+
+	const realtime = store.tripDepartures.get(run.tripId);
 	if (realtime !== undefined) return realtime;
 
-	const scheduled = staticGtfs.data.tripDepartures.get(tripId);
-	return scheduled === undefined ? undefined : departureEpoch(scheduled, nowSeconds);
+	const midnight = days.find(({ date }) => date === run.date)?.midnight;
+	const scheduled = staticGtfs.data.tripDepartures.get(run.tripId);
+	return midnight === undefined || scheduled === undefined ? undefined : midnight + scheduled;
 }
 
 /**

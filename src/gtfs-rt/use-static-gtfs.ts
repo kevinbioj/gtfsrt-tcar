@@ -6,8 +6,6 @@ import { type Coordinates, haversine, projectOnShape, type ShapePoint } from "..
 
 export type { ShapePoint };
 
-const TIME_ZONE = "Europe/Paris";
-
 export type RouteDirection = { directionId: number; headsigns: string[] };
 
 /** Un arrêt dans l'itinéraire d'une ligne : son quai (stopId) et son nom normalisé. */
@@ -105,7 +103,7 @@ export type StaticGtfs = {
 	/**
 	 * tripId → départ théorique du premier arrêt, en secondes depuis minuit de la journée de service
 	 * — donc au-delà de 86 400 pour une course qui déborde sur le lendemain, comme le GTFS l'écrit.
-	 * {@link departureEpoch} en fait un instant.
+	 * Posé sur le minuit de cette journée (cf. `serviceDays`), il devient un instant.
 	 */
 	tripDepartures: Map<string, number>;
 	/**
@@ -1120,32 +1118,6 @@ function parseServiceTime(value: string): number {
 	if (Number.isNaN(hours) || Number.isNaN(minutes) || Number.isNaN(seconds)) return Number.NaN;
 
 	return hours * 3600 + minutes * 60 + seconds;
-}
-
-/**
- * L'instant, en secondes epoch, où tombe un horaire théorique donné en secondes depuis minuit.
- *
- * Le GTFS-RT ne dit pas à quelle journée de service appartient la course qu'il annonce, et l'horaire
- * seul ne le dit pas davantage : un départ à « 25:10:00 » et un départ à « 01:10:00 » nomment le
- * même instant à une journée près. On retient donc, des trois journées de service qui peuvent
- * l'englober, celle qui place le départ au plus près de maintenant — la seule qui puisse concerner
- * un véhicule en service à cet instant.
- *
- * Les bornes se calculent avec `startOfDay` et non par tranches de 86 400 s : les jours de
- * changement d'heure ne durent pas vingt-quatre heures, et un départ y serait décalé d'une heure.
- */
-export function departureEpoch(secondsFromMidnight: number, nowSeconds: number): number {
-	const today = Temporal.Now.zonedDateTimeISO(TIME_ZONE).startOfDay();
-
-	let closest = Number.NaN;
-	for (const days of [-1, 0, 1]) {
-		const departure = Math.floor(today.add({ days }).epochMilliseconds / 1000) + secondsFromMidnight;
-		if (Number.isNaN(closest) || Math.abs(departure - nowSeconds) < Math.abs(closest - nowSeconds)) {
-			closest = departure;
-		}
-	}
-
-	return closest;
 }
 
 /**

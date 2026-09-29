@@ -124,16 +124,28 @@ export const IMMOBILITY_LIMIT = Temporal.Duration.from({ minutes: 30 }).total("s
  * faudrait alors qu'il démarre pour y revenir, quand c'est justement en tête de course qu'il
  * intéresse le voyageur. Aucune d'elles ne joue donc contre lui tant que sa course n'a pas dépassé
  * son départ de ce délai — ni {@link VEHICLE_STALENESS}, ni {@link IMMOBILITY_LIMIT}, ni
- * {@link VEHICLE_MEMORY_DURATION}. Un véhicule mis à quai une heure et demie avant son service
- * reste ainsi publié une heure et demie durant (cf. `awaitsDeparture`).
+ * {@link VEHICLE_MEMORY_DURATION}. Un véhicule mis à quai une heure et demie avant son service reste ainsi
+ * publié une heure et demie durant (cf. `awaitsDeparture`).
  *
- * Ce délai-ci ne mesure donc pas une attente, qui n'a pas de limite, mais le retard au départ
- * au-delà duquel un véhicule qui n'a toujours pas bougé n'attend visiblement plus rien.
+ * Ce délai-ci ne mesure donc pas une attente, bornée ailleurs (cf. {@link SERVICE_RUN_MARGIN}), mais
+ * le retard au départ au-delà duquel un véhicule qui n'a toujours pas bougé n'attend visiblement plus
+ * rien.
  *
  * Le départ retenu est celui du flux temps réel quand il l'annonce — le retard pris avant même de
  * partir s'y lit — et à défaut celui du GTFS statique.
  */
 export const DEPARTURE_GRACE = Temporal.Duration.from({ minutes: 10 }).total("seconds");
+
+/**
+ * Marge autour du créneau théorique d'une course — de son départ à son arrivée — au-delà de laquelle
+ * l'instant de référence ne la rattache à aucune journée de service (cf. `resolveServiceRun`).
+ *
+ * Sans elle, la journée retenue était toujours la plus proche, si loin soit-elle. Or la source
+ * continue d'annoncer un véhicule garé sur sa course du matin : le soir venu, le départ de demain
+ * devenait plus proche que l'arrivée d'aujourd'hui, et le véhicule passait pour attendre son service
+ * du lendemain — republié, daté de demain. Deux heures couvrent l'attente au terminus comme le retard.
+ */
+export const SERVICE_RUN_MARGIN = Temporal.Duration.from({ hours: 2 }).total("seconds");
 
 /**
  * Durée pendant laquelle un véhicule reste mémorisé après son dernier mouvement. Il n'est plus émis
