@@ -10,6 +10,7 @@ import {
 	ALERTS_POLL_INTERVAL,
 	DETOURS_DB_PATH,
 	GTFS_CHECK_INTERVAL,
+	NON_REALTIME_DESTINATIONS,
 	PORT,
 	PREFERRED_POSITION_STALENESS,
 	REALTIME_LINES,
@@ -55,7 +56,7 @@ import {
 	isCancelled,
 	useServiceAlerts,
 } from "./gtfs-rt/use-service-alerts.js";
-import { useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
+import { normalizeStopName, useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
 import { useVehicleFleet } from "./gtfs-rt/use-vehicle-fleet.js";
 import { useVehicleLocator, type VehicleLocation } from "./gtfs-rt/use-vehicle-locator.js";
 import { useVehicleMonitoring } from "./gtfs-rt/use-vehicle-monitoring.js";
@@ -386,7 +387,7 @@ async function poll() {
 		// Ligne sans vrai temps réel : la source y rebadge l'horaire théorique, sa course ne vaut rien.
 		// Le véhicule n'est jamais publié de ce fait — tout au plus voit-il sa position rafraîchie s'il
 		// l'a déjà été depuis une ligne qui, elle, tient debout.
-		if (!REALTIME_LINES.has(lineId)) {
+		if (!hasSourceRealtime(lineId, tripId)) {
 			untrackedLines += 1;
 			if (registry.refresh(vehicleId, movedPosition, timestamp, occupancyStatus, relocate(vehicleId, movedPosition)))
 				refreshed += 1;
@@ -508,6 +509,20 @@ function describeLocation(location: VehicleLocation | undefined): string {
 				: "vers";
 
 	return `${status} ${staticGtfs.data.stopNames.get(location.stopId) ?? location.stopId} #${location.currentStopSequence}`;
+}
+
+/**
+ * La source a-t-elle un vrai temps réel pour cette course TCAR ? Il faut que sa ligne en ait un
+ * (cf. `REALTIME_LINES`), et que sa destination n'en soit pas écartée (cf. `NON_REALTIME_DESTINATIONS`).
+ */
+function hasSourceRealtime(lineId: string, tripId: string | null | undefined): boolean {
+	if (!REALTIME_LINES.has(lineId)) return false;
+	const excluded = NON_REALTIME_DESTINATIONS.get(lineId);
+	if (excluded === undefined) return true;
+	const headsign = tripId ? staticGtfs.data.trips.get(tripId)?.headsign : undefined;
+	if (headsign === undefined) return true;
+	const wanted = normalizeStopName(headsign);
+	return !excluded.some((name) => normalizeStopName(name) === wanted);
 }
 
 /**
@@ -671,7 +686,8 @@ async function pollTripUpdates() {
 			});
 
 			const tripRouteId = entity.tripUpdate.trip?.routeId ?? "";
-			const realtime = network !== HOME_NETWORK || REALTIME_LINES.has(tripRouteId.split(":").at(-1) ?? "");
+			const realtime =
+				network !== HOME_NETWORK || hasSourceRealtime(tripRouteId.split(":").at(-1) ?? "", resolvedTripId);
 
 			// Le départ annoncé pour la course, avant que les suppressions d'arrêt ne remanient l'horaire.
 			// Les lignes sans vrai temps réel n'y ont pas droit : la source y rebadge l'horaire théorique,

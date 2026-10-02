@@ -1,10 +1,10 @@
 import type { RelayedNetwork } from "./gtfs-rt/use-relayed-networks.js";
 
 /**
- * Lignes TCAR dont le temps réel de la source est authentique. Ailleurs, la source rebadge l'horaire
- * théorique en temps réel : ses véhicules ne sont jamais publiés — tout au plus rafraîchit-on la
- * position d'un véhicule déjà connu — et ses trip updates sont réduits aux seules suppressions
- * d'arrêt (cf. `keepOnlySkippedStops`).
+ * Lignes TCAR dont le temps réel de la source est authentique, hormis certaines destinations (cf.
+ * {@link NON_REALTIME_DESTINATIONS}). Ailleurs, la source rebadge l'horaire théorique en temps réel :
+ * ses véhicules ne sont jamais publiés — tout au plus rafraîchit-on la position d'un véhicule déjà
+ * connu — et ses trip updates sont réduits aux seules suppressions d'arrêt (cf. `keepOnlySkippedStops`).
  *
  * Les réseaux relayés (cf. {@link RELAYED_NETWORKS}) n'y sont pas soumis : leur temps réel passe tel
  * quel, sur toutes leurs lignes.
@@ -32,6 +32,17 @@ export const REALTIME_LINES = new Set([
 	"43",
 	"98",
 ]);
+
+/**
+ * Courses écartées du temps réel de la source bien que leur ligne figure dans {@link REALTIME_LINES} :
+ * ligne → destinations (`trip_headsign` du GTFS statique). Elles sont traitées comme celles d'une
+ * ligne sans vrai temps réel — véhicule jamais publié depuis elles, trip update réduit aux
+ * suppressions d'arrêt.
+ *
+ * Rapprochées comme les destinations de {@link LINE_DESTINATIONS} : casse, accents et ponctuation
+ * n'ont pas d'importance, le reste doit correspondre.
+ */
+export const NON_REALTIME_DESTINATIONS = new Map<string, string[]>([["20", ["Boulingrin"]]]);
 
 export const PORT = 3000;
 /** Source des positions et des courses : le GTFS-RT du SAE, compact et gzippé (~7 Ko). */
