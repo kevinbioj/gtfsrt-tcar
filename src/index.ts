@@ -10,6 +10,7 @@ import {
 	ALERTS_POLL_INTERVAL,
 	DETOURS_DB_PATH,
 	GTFS_CHECK_INTERVAL,
+	LEGACY_GTFS_URL,
 	NON_REALTIME_DESTINATIONS,
 	PORT,
 	PREFERRED_POSITION_STALENESS,
@@ -45,6 +46,7 @@ import {
 	serviceDays,
 	tripRun,
 } from "./gtfs-rt/scheduled-trips.js";
+import { matchLegacyTrip, useLegacyGtfs } from "./gtfs-rt/use-legacy-gtfs.js";
 import { type Movement, useMovementTracker } from "./gtfs-rt/use-movement-tracker.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
 import { useRelayedNetworks } from "./gtfs-rt/use-relayed-networks.js";
@@ -101,6 +103,9 @@ const staticGtfs = await useStaticGtfs(STATIC_GTFS_URL, GTFS_CHECK_INTERVAL);
 // Le locator lit `staticGtfs.data` à chaque appel : il suit donc les rechargements du GTFS de
 // lui-même, sans avoir à s'y réabonner.
 const vehicleLocator = useVehicleLocator(staticGtfs, restored?.locations);
+// Le GTFS dont le flux de vérification tire ses identifiants de course, pour les rapporter au GTFS
+// publié (cf. `matchLegacyTrip`).
+const legacyGtfs = await useLegacyGtfs(LEGACY_GTFS_URL, GTFS_CHECK_INTERVAL);
 const detourStore = useDetourStore(DETOURS_DB_PATH);
 // Les modifications se rebâtissent à chaque relevé d'infos trafic, et après chaque saisie : c'est
 // ce qui crée celles que l'IA propose sans ambiguïté, et qui tient à jour les arrêts à sauter. Le
@@ -567,6 +572,11 @@ function departureOf(run: ServiceRun | undefined, days: readonly ServiceDay[]): 
  * Seuls comptent ceux dont il a une course et une position assez fraîche pour être publiée
  * ({@link PREFERRED_POSITION_STALENESS}) : c'est alors sa position qui l'emporte de toute façon, et
  * sa ligne et son sens se confirment d'eux-mêmes. Le reste du traitement ne les distingue pas.
+ *
+ * Sa course est nommée d'après son propre GTFS, pas d'après celui qu'on publie : elle y est rapportée
+ * avant d'être injectée (cf. `matchLegacyTrip`). Faute d'équivalent — ou tant que ce GTFS n'a pas pu
+ * être chargé —, l'identifiant est pris tel quel : mieux vaut un véhicule sur une course incertaine
+ * que pas de véhicule du tout.
  */
 function legacyOnlyVehicles(
 	feed: GtfsRealtime.transit_realtime.FeedMessage,
@@ -582,7 +592,13 @@ function legacyOnlyVehicles(
 				nowSeconds - verified.recordedAt <= PREFERRED_POSITION_STALENESS,
 		)
 		.map(([vehicleId, verified]) => ({
-			trip: { tripId: verified.tripId, routeId: verified.routeId, directionId: verified.directionId },
+			trip: {
+				tripId:
+					matchLegacyTrip(legacyGtfs.trips, staticGtfs.data, verified.tripId ?? "") ??
+					`${HOME_NETWORK}:${verified.tripId}`,
+				routeId: verified.routeId,
+				directionId: verified.directionId,
+			},
 			vehicle: { id: `TCAR:Vehicle::${vehicleId}:LOC` },
 			position: verified.position,
 			timestamp: verified.recordedAt,

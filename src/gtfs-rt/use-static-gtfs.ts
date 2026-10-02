@@ -355,12 +355,12 @@ function withinEdits(a: string, b: string, max: number): boolean {
 // ---
 
 /** Version publiée du GTFS (ETag de préférence, sinon Last-Modified). `null` si aucun en-tête exploitable. */
-function signatureOf(response: { headers: Headers }): string | null {
+export function signatureOf(response: { headers: Headers }): string | null {
 	return response.headers.get("etag") ?? response.headers.get("last-modified");
 }
 
 /** Requête HEAD légère : renvoie la signature de la version publiée, ou `null` si indisponible. */
-async function fetchSignature(url: string): Promise<string | null> {
+export async function fetchSignature(url: string): Promise<string | null> {
 	try {
 		const response = await fetch(url, { method: "HEAD" });
 		if (!response.ok) return null;
@@ -1108,7 +1108,7 @@ function projectStop(
  * ne s'écrit pas ainsi. Les heures au-delà de 24 sont légitimes et se conservent telles quelles :
  * « 25:10:00 » est une course de la journée de la veille qui déborde sur le lendemain.
  */
-function parseServiceTime(value: string): number {
+export function parseServiceTime(value: string): number {
 	const parts = value.split(":");
 	if (parts.length < 2) return Number.NaN;
 
@@ -1163,7 +1163,7 @@ function isSubsequence(needle: OrderedStop[], haystack: OrderedStop[]): boolean 
 }
 
 /** Parseur CSV minimal gérant les champs entre guillemets. */
-function* parseCsv(csv: string): Generator<string[]> {
+export function* parseCsv(csv: string): Generator<string[]> {
 	for (const line of csv.split("\n")) {
 		const trimmed = line.endsWith("\r") ? line.slice(0, -1) : line;
 		if (trimmed.length === 0) continue;

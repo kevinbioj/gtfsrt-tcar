@@ -76,6 +76,19 @@ export const VERIFICATION_FEED_URL = "https://reseau-astuce.fr/ftp/gtfsrt/Astuce
  */
 export const VERIFICATION_FEED_INTERVAL = VEHICLE_POSITIONS_INTERVAL;
 /**
+ * Le GTFS dont le flux de vérification tire ses identifiants de course. Ce n'est pas celui que le feed
+ * publie : un même `trip_id` peut y désigner une autre course, d'où un rapprochement avant d'injecter
+ * un véhicule que seul ce flux voit (cf. `matchLegacyTrip`). Retéléchargé, comme le GTFS publié, au
+ * seul changement de son Last-Modified (cf. {@link GTFS_CHECK_INTERVAL}).
+ */
+export const LEGACY_GTFS_URL = "https://exs.tcar.cityway.fr/gtfs.aspx?key=TCAR&operatorCode=ASTUCE";
+/**
+ * Écart maximal, en kilomètres, entre les terminus de deux courses pour les tenir pour les mêmes d'un
+ * GTFS à l'autre. Les quais n'y portent pas les mêmes identifiants, seules leurs coordonnées se
+ * comparent — et elles ne coïncident pas au mètre près.
+ */
+export const LEGACY_TERMINUS_TOLERANCE = 0.1;
+/**
  * Âge au-delà duquel la position du flux Astuce cesse d'être préférée à celle du flux SAE.
  *
  * Le SAE sort par moments des coordonnées aberrantes, et rien en aval ne les rattrape : l'écart à la

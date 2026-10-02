@@ -42,7 +42,10 @@ export type VerifiedVehicle = {
 	recordedAt: number;
 	/** Ligne préfixée comme le GTFS publié (« TCAR:92 »), pour se comparer au flux source. */
 	routeId: string;
-	/** Course préfixée comme le GTFS publié (« TCAR:7761 »), `undefined` si le flux n'en dit rien. */
+	/**
+	 * Course telle que le flux l'écrit (« 7761 »), `undefined` s'il n'en dit rien. Elle est nommée
+	 * d'après son propre GTFS, et non d'après celui qu'on publie (cf. `matchLegacyTrip`).
+	 */
 	tripId: string | undefined;
 	directionId: number;
 };
@@ -90,7 +93,7 @@ async function loadResource(vehicleUrl: string): Promise<Map<string, VerifiedVeh
 				},
 				recordedAt,
 				routeId: `TCAR:${vehicle.trip.routeId}`,
-				tripId: vehicle.trip.tripId ? `TCAR:${vehicle.trip.tripId}` : undefined,
+				tripId: vehicle.trip.tripId || undefined,
 				directionId: vehicle.trip.directionId ?? 0,
 			});
 		}
