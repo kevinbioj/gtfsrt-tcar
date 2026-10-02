@@ -661,8 +661,11 @@ function routePrefix(segment: string, routes: AlertRouteContext[]): string[] | n
 
 	const routeIds: string[] = [];
 	for (const token of tokens) {
+		// Le nom exact d'abord : « T1 » et « F1 » ont le même numéro, et l'alerte cite souvent les deux.
 		const number = lineNumber(token);
-		const match = number ? routes.find((route) => lineNumber(route.shortName) === number) : undefined;
+		const match =
+			routes.find((route) => normalizeStopName(route.shortName) === token) ??
+			(number ? routes.find((route) => lineNumber(route.shortName) === number) : undefined);
 		if (match === undefined) return null;
 		routeIds.push(match.routeId);
 	}

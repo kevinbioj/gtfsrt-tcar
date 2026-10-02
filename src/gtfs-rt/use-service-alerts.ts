@@ -713,7 +713,9 @@ function collectNetworkRoutes(alert: GtfsRealtime.transit_realtime.IAlert, gtfs:
 function buildRouteContext(routeIds: Set<string>, gtfs: StaticGtfs): AlertRouteContext[] {
 	return [...routeIds].map((routeId) => ({
 		routeId,
-		shortName: routeId.split(":").at(-1) ?? routeId,
+		// Le nom commercial, celui que cite le texte : l'identifiant (« TCAR:91 » pour la T1) ferait
+		// prendre au modèle la T1 pour la F1 (« TCAR:01 »).
+		shortName: gtfs.routeNames.get(routeId) ?? routeId.split(":").at(-1) ?? routeId,
 		directions: gtfs.routeDirections.get(routeId) ?? [],
 	}));
 }
@@ -782,10 +784,17 @@ function resolveRemovedStop(
 	// que les quais réellement desservis par chaque course.
 	const endName = normalizeStopName(removedStop.toStopName);
 
+	// Un itinéraire qui ne porte qu'UNE des deux bornes est prolongé grâce aux lignes sœurs (cf.
+	// {@link extendRangeNames}) : sans cela, il ne perdrait que la borne qu'il dessert.
 	const rangeNames = new Set<string>();
+	let siblingRange: Set<string> | undefined;
 	for (const dir of [0, 1]) {
 		for (const sequence of gtfs.routeStopSequences.get(routeId)?.get(dir) ?? []) {
-			const sliced = sliceRangeNames(sequence, startName, endName);
+			let sliced = sliceRangeNames(sequence, startName, endName);
+			if (sliced === undefined) {
+				siblingRange ??= siblingRangeNames(gtfs, network, startName, endName);
+				sliced = extendRangeNames(sequence, [startName, endName], siblingRange);
+			}
 			if (sliced) for (const name of sliced) rangeNames.add(name);
 		}
 	}
@@ -996,6 +1005,49 @@ function sliceRangeNames(sequence: OrderedStop[], startName: string, endName: st
 
 	const [lo, hi] = startIndex <= endIndex ? [startIndex, endIndex] : [endIndex, startIndex];
 	return sequence.slice(lo, hi + 1).map((stop) => stop.name);
+}
+
+/**
+ * Les noms de la plage, relevés sur TOUS les itinéraires du réseau qui portent ses deux bornes : le
+ * tronçon physique qu'elle désigne, quelle que soit la ligne qui le parcourt de bout en bout.
+ */
+function siblingRangeNames(gtfs: StaticGtfs, network: string, startName: string, endName: string): Set<string> {
+	const names = new Set<string>();
+	for (const [routeId, directions] of gtfs.routeStopSequences) {
+		if (networkOf(routeId) !== network) continue;
+		for (const sequences of directions.values()) {
+			for (const sequence of sequences) {
+				for (const name of sliceRangeNames(sequence, startName, endName) ?? []) names.add(name);
+			}
+		}
+	}
+	return names;
+}
+
+/**
+ * La part de la plage que parcourt un itinéraire qui n'en porte qu'une borne : depuis celle-ci, les
+ * arrêts consécutifs que le tronçon des lignes sœurs couvre aussi. « Théâtre des Arts à Saint-Hilaire »
+ * sur la T1, qui finit à CHU Charles Nicolle sans passer par Saint-Hilaire : la T2 donne le tronçon,
+ * et la T1 le suit de Théâtre des Arts jusqu'à son terminus.
+ *
+ * La course qui quitte le tronçon avant l'autre borne n'en perd que ce qu'elle y a parcouru. Aucune
+ * borne sur l'itinéraire, ou aucune ligne sœur qui porte les deux → `undefined`.
+ */
+function extendRangeNames(sequence: OrderedStop[], bounds: string[], siblingRange: Set<string>): string[] | undefined {
+	if (siblingRange.size === 0) return undefined;
+
+	for (const bound of bounds) {
+		const index = findStopIndex(sequence, bound);
+		if (index === -1) continue;
+
+		let lo = index;
+		while (lo > 0 && siblingRange.has(sequence[lo - 1]!.name)) lo -= 1;
+		let hi = index;
+		while (hi < sequence.length - 1 && siblingRange.has(sequence[hi + 1]!.name)) hi += 1;
+		return sequence.slice(lo, hi + 1).map((stop) => stop.name);
+	}
+
+	return undefined;
 }
 
 /**
