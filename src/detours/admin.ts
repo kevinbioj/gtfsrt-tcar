@@ -22,6 +22,8 @@ import type {
 	Modification,
 	ModificationInput,
 	ModificationPeriod,
+	ProvisionalStop,
+	ProvisionalStopFields,
 	Scope,
 } from "./store.js";
 
@@ -444,25 +446,61 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		return c.json(stops.sort((a, b) => a.name.localeCompare(b.name, "fr")));
 	});
 
+	/**
+	 * Ce parmi quoi se choisissent la zone tarifaire et la station parente d'un arrêt provisoire : les
+	 * zones du GTFS, et ses stations — en tableaux, il y en a un bon millier.
+	 */
+	admin.get("/api/stop-references", (c) => {
+		const gtfs = deps.gtfs.data;
+		const fareAreas = [...gtfs.fareAreas].map(([areaId, name]) => ({ areaId, name }));
+		const stations: [stationId: string, name: string, latitude: number | null, longitude: number | null][] = [
+			...gtfs.stations,
+		].map(([stationId, station]) => [
+			stationId,
+			station.name,
+			station.coordinates?.latitude ?? null,
+			station.coordinates?.longitude ?? null,
+		]);
+
+		return c.json({
+			fareAreas: fareAreas.sort((a, b) => a.name.localeCompare(b.name, "fr")),
+			stations: stations.sort((a, b) => a[1].localeCompare(b[1], "fr")),
+		});
+	});
+
 	admin.post("/api/provisional-stops", async (c) => {
 		const parsed = await parseProvisionalStop(c);
 		if ("message" in parsed) return c.json({ code: 400, message: parsed.message }, 400);
 
-		const { name, latitude, longitude } = parsed;
-		return c.json(deps.store.createProvisionalStop(name, latitude, longitude, Math.floor(Date.now() / 1000)));
+		const { details, ...located } = parsed;
+		const fields = { ...NO_DETAILS, ...details, ...located };
+		const unknown = unknownReference(fields, undefined, deps.gtfs.data);
+		if (unknown !== undefined) return c.json({ code: 400, message: unknown }, 400);
+
+		return c.json(deps.store.createProvisionalStop(fields, Math.floor(Date.now() / 1000)));
 	});
 
 	admin.put("/api/provisional-stops/:stopId", async (c) => {
 		const stopId = c.req.param("stopId");
+		const current = deps.store.provisionalStops.get(stopId);
+		if (current === undefined) return c.json({ code: 404, message: "Arrêt provisoire inconnu." }, 404);
+
 		const parsed = await parseProvisionalStop(c);
 		if ("message" in parsed) return c.json({ code: 400, message: parsed.message }, 400);
 
-		const { name, latitude, longitude } = parsed;
-		if (!deps.store.updateProvisionalStop(stopId, name, latitude, longitude)) {
+		// Ce que la requête tait reste tel quel : l'éditeur de déviation ne fait que renommer ou
+		// déplacer l'arrêt, et n'a pas à connaître le reste pour ne pas l'effacer.
+		const { stopId: _, ...kept } = current;
+		const { details, ...located } = parsed;
+		const fields = { ...kept, ...details, ...located };
+		const unknown = unknownReference(fields, current, deps.gtfs.data);
+		if (unknown !== undefined) return c.json({ code: 400, message: unknown }, 400);
+
+		if (!deps.store.updateProvisionalStop(stopId, fields)) {
 			return c.json({ code: 404, message: "Arrêt provisoire inconnu." }, 404);
 		}
 
-		// Le libellé ou la position d'un arrêt publié viennent de changer : le feed doit suivre.
+		// Ce que le feed publie de l'arrêt vient de changer : il doit suivre.
 		deps.rebuild();
 		return c.json(deps.store.provisionalStops.get(stopId));
 	});
@@ -1402,10 +1440,50 @@ function splitBound(bound: string) {
 	return { date: date as string, time: time ?? null };
 }
 
-/** Relit le corps d'une création ou d'une modification d'arrêt provisoire. */
+/** Ce qu'un arrêt provisoire porte au-delà de son nom et de sa position. */
+type ProvisionalStopDetails = Omit<ProvisionalStopFields, "name" | "latitude" | "longitude">;
+
+/** Les détails d'un arrêt provisoire tant que rien n'en a été dit. */
+const NO_DETAILS: ProvisionalStopDetails = {
+	stopCode: null,
+	description: null,
+	zoneId: null,
+	parentStation: null,
+	wheelchairBoarding: 0,
+	platformCode: null,
+};
+
+/** Les champs libres d'un arrêt provisoire. */
+const TEXT_DETAILS = ["stopCode", "description", "zoneId", "parentStation", "platformCode"] as const;
+
+/**
+ * La zone tarifaire ou la station qui ne figure pas au GTFS, s'il y en a une. Celle que l'arrêt porte
+ * déjà reste admise, quand bien même le GTFS l'aurait retirée depuis : c'est à qui en change de la
+ * remplacer.
+ */
+function unknownReference(fields: ProvisionalStopFields, current: ProvisionalStop | undefined, gtfs: StaticGtfs) {
+	if (fields.zoneId !== null && fields.zoneId !== current?.zoneId && !gtfs.fareAreas.has(fields.zoneId)) {
+		return `Zone tarifaire inconnue du GTFS : ${fields.zoneId}.`;
+	}
+	if (
+		fields.parentStation !== null &&
+		fields.parentStation !== current?.parentStation &&
+		!gtfs.stations.has(fields.parentStation)
+	) {
+		return `Station inconnue du GTFS : ${fields.parentStation}.`;
+	}
+	return undefined;
+}
+
+/**
+ * Relit le corps d'une création ou d'une modification d'arrêt provisoire. Le nom et la position sont
+ * obligatoires ; des détails, seuls ceux que le corps cite sont rendus — `null` pour un champ vidé.
+ */
 async function parseProvisionalStop(
 	c: Context,
-): Promise<{ name: string; latitude: number; longitude: number } | { message: string }> {
+): Promise<
+	{ name: string; latitude: number; longitude: number; details: Partial<ProvisionalStopDetails> } | { message: string }
+> {
 	let body: unknown;
 	try {
 		body = await c.req.json();
@@ -1422,7 +1500,22 @@ async function parseProvisionalStop(
 	const coordinates = readCoordinates(payload.latitude, payload.longitude);
 	if (coordinates === undefined) return { message: "Coordonnées hors du réseau." };
 
-	return { name, ...coordinates };
+	const details: Partial<ProvisionalStopDetails> = {};
+	for (const field of TEXT_DETAILS) {
+		const raw = payload[field];
+		if (raw === undefined) continue;
+		if (raw !== null && typeof raw !== "string") return { message: `Champ ${field} attendu : un texte, ou null.` };
+		details[field] = raw?.trim() || null;
+	}
+
+	const wheelchairBoarding = payload.wheelchairBoarding;
+	if (wheelchairBoarding === 0 || wheelchairBoarding === 1 || wheelchairBoarding === 2) {
+		details.wheelchairBoarding = wheelchairBoarding;
+	} else if (wheelchairBoarding !== undefined) {
+		return { message: "Accessibilité attendue : 0 (inconnue), 1 (accessible) ou 2 (inaccessible)." };
+	}
+
+	return { name, ...coordinates, details };
 }
 
 /** Un point tel que l'interface l'envoie : une paire [latitude, longitude]. */

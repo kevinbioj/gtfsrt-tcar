@@ -308,9 +308,15 @@ export function buildDetourEntities(
 		const stop = provisional.get(stopId) as ProvisionalStop;
 		stops.set(stopId, {
 			stopId,
-			stopName: { translation: [{ text: stop.name, language: "fr" }] },
+			stopCode: translated(stop.stopCode),
+			stopName: translated(stop.name, "fr"),
+			stopDesc: translated(stop.description, "fr"),
 			stopLat: stop.latitude,
 			stopLon: stop.longitude,
+			zoneId: stop.zoneId,
+			parentStation: stop.parentStation,
+			wheelchairBoarding: stop.wheelchairBoarding,
+			platformCode: translated(stop.platformCode),
 		});
 	}
 
@@ -777,6 +783,15 @@ function report(
 		`✓ ${applied} detour segments published (${stops.size} stops, ${shapes.size} shapes, ${modifications.length} modifications).`,
 	);
 	for (const problem of problems) console.warn(`\t✘ ${problem}`);
+}
+
+/**
+ * Un champ texte d'arrêt tel que le GTFS-RT le veut, ou rien pour un champ vide. Un code ou un quai
+ * ne sont d'aucune langue : ils s'en passent.
+ */
+function translated(text: string | null, language?: string): GtfsRealtime.transit_realtime.ITranslatedString | null {
+	if (text === null) return null;
+	return { translation: [language === undefined ? { text } : { text, language }] };
 }
 
 /** Le nom commercial de la ligne (« TCAR:07 » → « F7 »), ou à défaut le bout de son identifiant. */

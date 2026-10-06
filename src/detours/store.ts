@@ -183,6 +183,21 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 	`
 	ALTER TABLE modifications ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
 	`,
+	// La zone tarifaire d'un arrêt provisoire : une `area_id` du GTFS (cf. `StaticGtfs.fareAreas`),
+	// publiée comme `zone_id`. NULL : aucune.
+	`
+	ALTER TABLE provisional_stops ADD COLUMN zone_id TEXT;
+	`,
+	// Le reste de ce que le GTFS-RT dit d'un arrêt (cf. `ProvisionalStop`). NULL : rien à publier ;
+	// l'accessibilité vaut 0 — inconnue — comme dans le GTFS.
+	`
+	ALTER TABLE provisional_stops ADD COLUMN stop_code TEXT;
+	ALTER TABLE provisional_stops ADD COLUMN description TEXT;
+	ALTER TABLE provisional_stops ADD COLUMN parent_station TEXT;
+	ALTER TABLE provisional_stops ADD COLUMN wheelchair_boarding INTEGER NOT NULL DEFAULT 0
+		CHECK (wheelchair_boarding IN (0, 1, 2));
+	ALTER TABLE provisional_stops ADD COLUMN platform_code TEXT;
+	`,
 ];
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
@@ -192,7 +207,25 @@ export type ProvisionalStop = {
 	name: string;
 	latitude: number;
 	longitude: number;
+	/** Le code affiché aux voyageurs (`stop_code`), saisi librement ; `null` : aucun. */
+	stopCode: string | null;
+	/** La description (`stop_desc`), saisie librement ; `null` : aucune. */
+	description: string | null;
+	/** La zone tarifaire, une `area_id` du GTFS publiée comme `zone_id` ; `null` : aucune. */
+	zoneId: string | null;
+	/** La station du GTFS (`location_type` = 1) à laquelle il se rattache ; `null` : aucune. */
+	parentStation: string | null;
+	/** L'accessibilité en fauteuil, codée comme `wheelchair_boarding`. */
+	wheelchairBoarding: WheelchairBoarding;
+	/** Le quai ou la voie (`platform_code`), saisi librement ; `null` : aucun. */
+	platformCode: string | null;
 };
+
+/** Ce qui se saisit d'un arrêt provisoire : tout, sauf son identifiant. */
+export type ProvisionalStopFields = Omit<ProvisionalStop, "stopId">;
+
+/** 0 : inconnue. 1 : accessible. 2 : inaccessible. Les valeurs du GTFS, et de `Stop.WheelchairBoarding`. */
+export type WheelchairBoarding = 0 | 1 | 2;
 
 /** Un arrêt que la déviation dessert à la place des arrêts supprimés. */
 export type DetourStop = {
@@ -389,7 +422,19 @@ export function useDetourStore(path: string) {
 
 		for (const row of db.prepare("SELECT * FROM provisional_stops ORDER BY stop_uid").all() as ProvisionalRow[]) {
 			const stopId = provisionalStopId(row.stop_uid);
-			provisional.set(stopId, { stopId, name: row.name, latitude: row.latitude, longitude: row.longitude });
+			provisional.set(stopId, {
+				stopId,
+				name: row.name,
+				latitude: row.latitude,
+				longitude: row.longitude,
+				stopCode: row.stop_code,
+				description: row.description,
+				zoneId: row.zone_id,
+				parentStation: row.parent_station,
+				wheelchairBoarding:
+					row.wheelchair_boarding === 1 || row.wheelchair_boarding === 2 ? row.wheelchair_boarding : 0,
+				platformCode: row.platform_code,
+			});
 		}
 
 		for (const row of db.prepare("SELECT * FROM dismissed_scopes").all() as DismissedRow[]) {
@@ -722,26 +767,36 @@ export function useDetourStore(path: string) {
 		},
 
 		/** Verse un arrêt provisoire dans la base. Il est aussitôt désignable par toutes les déviations. */
-		createProvisionalStop(name: string, latitude: number, longitude: number, nowSeconds: number): ProvisionalStop {
+		createProvisionalStop(fields: ProvisionalStopFields, nowSeconds: number): ProvisionalStop {
 			const { lastInsertRowid } = db
-				.prepare("INSERT INTO provisional_stops (name, latitude, longitude, created_at) VALUES (?, ?, ?, ?)")
-				.run(name, latitude, longitude, nowSeconds);
+				.prepare(
+					`INSERT INTO provisional_stops
+						(name, latitude, longitude, stop_code, description, zone_id, parent_station, wheelchair_boarding,
+						 platform_code, created_at)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				)
+				.run(...provisionalColumns(fields), nowSeconds);
 
 			reload();
 			return provisional.get(provisionalStopId(Number(lastInsertRowid))) as ProvisionalStop;
 		},
 
 		/**
-		 * Renomme ou déplace un arrêt provisoire. Le changement vaut pour TOUTES les déviations qui le
-		 * désignent : c'est le même arrêt sur le terrain, il n'a pas à être entretenu deux fois.
+		 * Renomme, déplace ou redécrit un arrêt provisoire. Le changement vaut pour TOUTES les déviations
+		 * qui le désignent : c'est le même arrêt sur le terrain, il n'a pas à être entretenu deux fois.
 		 */
-		updateProvisionalStop(stopId: string, name: string, latitude: number, longitude: number): boolean {
+		updateProvisionalStop(stopId: string, fields: ProvisionalStopFields): boolean {
 			const uid = provisionalStopUid(stopId);
 			if (uid === undefined) return false;
 
 			const { changes } = db
-				.prepare("UPDATE provisional_stops SET name = ?, latitude = ?, longitude = ? WHERE stop_uid = ?")
-				.run(name, latitude, longitude, uid);
+				.prepare(
+					`UPDATE provisional_stops
+					 SET name = ?, latitude = ?, longitude = ?, stop_code = ?, description = ?, zone_id = ?, parent_station = ?,
+						 wheelchair_boarding = ?, platform_code = ?
+					 WHERE stop_uid = ?`,
+				)
+				.run(...provisionalColumns(fields), uid);
 
 			reload();
 			return changes > 0;
@@ -792,6 +847,21 @@ export function provisionalStopUid(stopId: string): number | undefined {
 	return match === null ? undefined : Number(match[1]);
 }
 
+/** Les colonnes saisies d'un arrêt provisoire, dans l'ordre où l'insertion et la mise à jour les citent. */
+function provisionalColumns(fields: ProvisionalStopFields) {
+	return [
+		fields.name,
+		fields.latitude,
+		fields.longitude,
+		fields.stopCode,
+		fields.description,
+		fields.zoneId,
+		fields.parentStation,
+		fields.wheelchairBoarding,
+		fields.platformCode,
+	] as const;
+}
+
 /** « 2026-09-24 » et « 08:30 » donnent « 2026-09-24T08:30 » ; sans heure, la date seule. */
 function joinBound(date: string, time: string | null): string {
 	return time === null ? date : `${date}T${time}`;
@@ -840,7 +910,19 @@ type DismissedRow = { alert_number: string; route_id: string; direction_id: numb
 
 type FirstSeenRow = { alert_number: string; first_seen_at: number; header_text: string | null };
 
-type ProvisionalRow = { stop_uid: number; name: string; latitude: number; longitude: number; created_at: number };
+type ProvisionalRow = {
+	stop_uid: number;
+	name: string;
+	latitude: number;
+	longitude: number;
+	stop_code: string | null;
+	description: string | null;
+	zone_id: string | null;
+	parent_station: string | null;
+	wheelchair_boarding: number;
+	platform_code: string | null;
+	created_at: number;
+};
 
 type SegmentRow = {
 	uid: number;

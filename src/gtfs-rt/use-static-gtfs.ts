@@ -150,7 +150,22 @@ export type StaticGtfs = {
 	trips: Map<string, TripMeta>;
 	/** shapeId → tracé de la course, chaque point portant son abscisse curviligne en kilomètres. */
 	shapes: Map<string, ShapePoint[]>;
+	/**
+	 * areaId → libellé des zones tarifaires (`areas.txt`, Fares v2) : « ROUEN » → « Rouen ». Le GTFS
+	 * n'en dit rien par `zone_id`, que ses quais laissent vide ; c'est ce parmi quoi l'on choisit la
+	 * zone d'un arrêt provisoire.
+	 */
+	fareAreas: Map<string, string>;
+	/**
+	 * Les stations (`location_type` = 1) : leur libellé et, si le GTFS les donne, leurs coordonnées.
+	 * Ce ne sont pas des quais — rien ne s'y dessert —, mais ce à quoi un arrêt provisoire peut se
+	 * rattacher comme `parent_station`.
+	 */
+	stations: Map<string, Station>;
 };
+
+/** Une station du GTFS : un pôle qui regroupe des quais. */
+export type Station = { name: string; coordinates: Coordinates | null };
 
 let currentInterval: NodeJS.Timeout | undefined;
 
@@ -393,6 +408,8 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		stopCoordinates: new Map(),
 		trips: new Map(),
 		shapes: new Map(),
+		fareAreas: new Map(),
+		stations: new Map(),
 	};
 
 	try {
@@ -412,7 +429,8 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 				file.name === "stop_times.txt" ||
 				file.name === "shapes.txt" ||
 				file.name === "calendar.txt" ||
-				file.name === "calendar_dates.txt",
+				file.name === "calendar_dates.txt" ||
+				file.name === "areas.txt",
 		});
 
 		if (!files["stops.txt"] || !files["trips.txt"]) {
@@ -421,9 +439,12 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		}
 
 		const decoder = new TextDecoder();
-		const { stopNameIndex, stopKeyIndex, idToName, coordinates } = buildStops(decoder.decode(files["stops.txt"]));
+		const { stopNameIndex, stopKeyIndex, idToName, coordinates, stations } = buildStops(
+			decoder.decode(files["stops.txt"]),
+		);
 		const { routeDirections, tripMeta, serviceTrips } = buildTrips(decoder.decode(files["trips.txt"]));
 		const routeNames = files["routes.txt"] ? buildRouteNames(decoder.decode(files["routes.txt"])) : new Map();
+		const fareAreas = files["areas.txt"] ? buildFareAreas(decoder.decode(files["areas.txt"])) : new Map();
 		const calendars = files["calendar.txt"] ? buildCalendar(decoder.decode(files["calendar.txt"])) : new Map();
 		const calendarExceptions = files["calendar_dates.txt"]
 			? buildCalendarDates(decoder.decode(files["calendar_dates.txt"]))
@@ -488,6 +509,8 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 				stopCoordinates: coordinates,
 				trips: tripMeta,
 				shapes,
+				fareAreas,
+				stations,
 			},
 			signature,
 		};
@@ -502,21 +525,24 @@ function buildStops(csv: string): {
 	stopKeyIndex: Map<string, Set<string>>;
 	idToName: Map<string, string>;
 	coordinates: Map<string, Coordinates>;
+	stations: Map<string, Station>;
 } {
 	const stopNameIndex = new Map<string, Set<string>>();
 	const stopKeyIndex = new Map<string, Set<string>>();
 	const idToName = new Map<string, string>();
 	const coordinates = new Map<string, Coordinates>();
+	const stations = new Map<string, Station>();
 	const rows = parseCsv(csv);
 	const header = rows.next().value;
-	if (!header) return { stopNameIndex, stopKeyIndex, idToName, coordinates };
+	if (!header) return { stopNameIndex, stopKeyIndex, idToName, coordinates, stations };
 
 	const idCol = header.indexOf("stop_id");
 	const nameCol = header.indexOf("stop_name");
 	const parentCol = header.indexOf("parent_station");
 	const latitudeCol = header.indexOf("stop_lat");
 	const longitudeCol = header.indexOf("stop_lon");
-	if (idCol === -1 || nameCol === -1) return { stopNameIndex, stopKeyIndex, idToName, coordinates };
+	const locationTypeCol = header.indexOf("location_type");
+	if (idCol === -1 || nameCol === -1) return { stopNameIndex, stopKeyIndex, idToName, coordinates, stations };
 
 	const stationNames = new Map<string, string>();
 	const stationStopIds = new Map<string, Set<string>>();
@@ -526,6 +552,14 @@ function buildStops(csv: string): {
 		const stopName = row[nameCol];
 		if (!stopId || !stopName) continue;
 
+		const latitude = latitudeCol === -1 ? Number.NaN : Number.parseFloat(row[latitudeCol] ?? "");
+		const longitude = longitudeCol === -1 ? Number.NaN : Number.parseFloat(row[longitudeCol] ?? "");
+		const position = Number.isNaN(latitude) || Number.isNaN(longitude) ? null : { latitude, longitude };
+
+		if (locationTypeCol !== -1 && row[locationTypeCol] === "1") {
+			stations.set(stopId, { name: stopName, coordinates: position });
+		}
+
 		// Les stations parentes ne sont pas des quais : on les met de côté pour n'indexer que leur
 		// nom (cf. plus bas), jamais leur identifiant. Chaque réseau les range sous « <réseau>:ST: ».
 		if (/^[^:]+:ST:/.test(stopId)) {
@@ -534,10 +568,7 @@ function buildStops(csv: string): {
 		}
 
 		idToName.set(stopId, stopName);
-
-		const latitude = latitudeCol === -1 ? Number.NaN : Number.parseFloat(row[latitudeCol] ?? "");
-		const longitude = longitudeCol === -1 ? Number.NaN : Number.parseFloat(row[longitudeCol] ?? "");
-		if (!Number.isNaN(latitude) && !Number.isNaN(longitude)) coordinates.set(stopId, { latitude, longitude });
+		if (position !== null) coordinates.set(stopId, position);
 
 		const parent = parentCol === -1 ? "" : (row[parentCol] ?? "");
 		if (parent) {
@@ -566,7 +597,7 @@ function buildStops(csv: string): {
 		indexStopName(stopNameIndex, stopKeyIndex, stationName, stopIds);
 	}
 
-	return { stopNameIndex, stopKeyIndex, idToName, coordinates };
+	return { stopNameIndex, stopKeyIndex, idToName, coordinates, stations };
 }
 
 function indexStopName(
@@ -614,6 +645,27 @@ function buildRouteNames(csv: string): Map<string, string> {
 	}
 
 	return names;
+}
+
+/** Les zones tarifaires et leur libellé. Une zone sans `area_name` est nommée par son identifiant. */
+function buildFareAreas(csv: string): Map<string, string> {
+	const areas = new Map<string, string>();
+	const rows = parseCsv(csv);
+	const header = rows.next().value;
+	if (!header) return areas;
+
+	const idCol = header.indexOf("area_id");
+	const nameCol = header.indexOf("area_name");
+	if (idCol === -1) return areas;
+
+	for (const row of rows) {
+		const areaId = row[idCol];
+		if (!areaId) continue;
+		const name = nameCol === -1 ? "" : (row[nameCol]?.trim() ?? "");
+		areas.set(areaId, name || areaId);
+	}
+
+	return areas;
 }
 
 function buildTrips(csv: string): {

@@ -235,6 +235,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	.heading .badges .badge.tag { margin-left: 0; }
 	/* La raison et la période, un champ par ligne, un peu d'air entre eux. */
 	.fields .field { margin-bottom: 8px; }
+	dialog .fields .field label { width: 104px; }
+	dialog .fields .field input, dialog .fields .field select { flex: 1; min-width: 0; }
 	details > summary { cursor: pointer; color: var(--muted); font-size: 13px; margin: 4px 0; }
 	details[open] > summary { margin-bottom: 6px; }
 	/*
@@ -510,7 +512,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		// Les lignes cochées du tableau, par identifiant (cf. rowId).
 		selected: new Set(),
 		// La base des arrêts provisoires : sa carte, ses marqueurs par identifiant, et la pose en cours.
-		stopsMap: null, stopsLayer: null, provisionalStops: [], stopMarkersById: {}, placingStop: false,
+		stopsMap: null, stopsLayer: null, provisionalStops: [], fareAreas: [], stations: [], stopMarkersById: {}, placingStop: false,
 		// L'arrêt provisoire choisi au tableau ou sur la carte, par identifiant publié.
 		selectedStop: null,
 		// Tous les arrêts désignables, GTFS et provisoires, chargés au premier « Ajouter un arrêt » ;
@@ -1247,9 +1249,12 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 * ceux que plus rien ne désigne.
 	 */
 	function openStops() {
-		request(API + "/api/provisional-stops").then(function (stops) {
+		Promise.all([request(API + "/api/provisional-stops"), request(API + "/api/stop-references")]).then(function (answers) {
+			var stops = answers[0];
 			state.detail = null;
 			state.provisionalStops = stops;
+			state.fareAreas = answers[1].fareAreas;
+			state.stations = answers[1].stations;
 			showView("stops");
 
 			if (state.stopsMap === null) {
@@ -1311,6 +1316,38 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	function stopNumber(stop) { return parseInt(stop.stopId.split(":").pop(), 10) || 0; }
 
+	/** Le libellé d'une zone tarifaire, d'après le GTFS ; une zone qu'il ne connaît plus le dit. */
+	function zoneName(zoneId) {
+		var area = state.fareAreas.find(function (area) { return area.areaId === zoneId; });
+		return area ? area.name : zoneId + " (absente du GTFS)";
+	}
+
+	/** Les libellés de l'accessibilité, aux valeurs de wheelchair_boarding. */
+	var WHEELCHAIR_LABELS = ["Inconnue", "Accessible", "Non accessible"];
+
+	/** Distance approchée en mètres — assez juste à l'échelle d'une agglomération pour ordonner. */
+	function metersBetween(latitude1, longitude1, latitude2, longitude2) {
+		var x = (longitude2 - longitude1) * Math.cos((latitude1 + latitude2) * Math.PI / 360);
+		var y = latitude2 - latitude1;
+		return Math.sqrt(x * x + y * y) * 111320;
+	}
+
+	/** Un menu déroulant : une entrée vide si elle a un libellé, puis les choix, l'actuel retenu. */
+	function selectField(id, label, emptyLabel, choices, current) {
+		return "<div class='field'><label for='" + id + "'>" + label + "</label><select id='" + id + "'>"
+			+ (emptyLabel === null ? "" : "<option value=\"\">" + escapeHtml(emptyLabel) + "</option>")
+			+ choices.map(function (choice) {
+				return "<option value=\"" + escapeHtml(choice.value) + "\""
+					+ (String(choice.value) === String(current) ? " selected" : "") + ">" + escapeHtml(choice.label) + "</option>";
+			}).join("")
+			+ "</select></div>";
+	}
+
+	function textField(id, label, value, placeholder) {
+		return "<div class='field'><label for='" + id + "'>" + label + "</label><input id='" + id
+			+ "' autocomplete='off' value=\"" + escapeHtml(value || "") + "\" placeholder=\"" + escapeHtml(placeholder || "") + "\"></div>";
+	}
+
 	/** Le tableau des arrêts : ceux que la recherche retient, dans l'ordre choisi. */
 	function renderStopsTable() {
 		var body = el("stopsBody");
@@ -1326,7 +1363,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			tr.className = stop.stopId === state.selectedStop ? "selected" : "";
 			tr.innerHTML =
 				"<td>" + escapeHtml(stop.name)
-					+ "<div class='note' style='font-size:12px'>" + escapeHtml(stop.stopId) + "</div></td>" +
+					+ "<div class='note' style='font-size:12px'>" + escapeHtml(stop.stopId)
+					+ (stop.stopCode ? " · code " + escapeHtml(stop.stopCode) : "")
+					+ (stop.zoneId ? " · zone " + escapeHtml(zoneName(stop.zoneId)) : " · sans zone") + "</div></td>" +
 				"<td class='act'></td>";
 
 			var cell = tr.querySelector("td.act");
@@ -1463,20 +1502,59 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	}
 
 	/**
-	 * Renomme l'arrêt. Le nouveau nom vaut pour toutes les modifications qui le désignent ; la position
-	 * se change en glissant le marqueur.
+	 * Tout ce que le GTFS-RT publie de l'arrêt, hors position — elle se change en glissant le marqueur.
+	 * La zone tarifaire et la station parente se choisissent parmi celles du GTFS, les stations de la
+	 * plus proche à la plus lointaine. Le changement vaut pour toutes les modifications qui le désignent.
 	 */
 	function editProvisional(stop) {
+		var zones = state.fareAreas.map(function (area) {
+			return { value: area.areaId, label: area.name + " (" + area.areaId + ")" };
+		});
+		var stations = state.stations.map(function (station) {
+			var distance = station[2] === null ? Infinity : metersBetween(stop.latitude, stop.longitude, station[2], station[3]);
+			return { value: station[0], distance: distance, label: station[1]
+				+ (distance === Infinity ? "" : " — " + (distance < 1000 ? Math.round(distance) + " m" : (distance / 1000).toFixed(1) + " km"))
+				+ " (" + station[0] + ")" };
+		}).sort(function (a, b) { return a.distance - b.distance; });
+
+		// Une zone ou une station que le GTFS a retirée depuis reste proposée : la laisser disparaître de
+		// la liste ferait croire qu'elle a été vidée, et l'enregistrement l'effacerait en silence.
+		if (stop.zoneId && !zones.some(function (zone) { return zone.value === stop.zoneId; })) {
+			zones.push({ value: stop.zoneId, label: "⚠ " + zoneName(stop.zoneId) });
+		}
+		if (stop.parentStation && !stations.some(function (station) { return station.value === stop.parentStation; })) {
+			stations.unshift({ value: stop.parentStation, label: "⚠ " + stop.parentStation + " (absente du GTFS)" });
+		}
+
 		openDialog({
 			title: "Modifier l'arrêt provisoire",
-			body: "<div class='field'><label>Nom</label><input id='dialogName' autocomplete='off' value='"
-				+ escapeHtml(stop.name).replace(/'/g, "&#39;") + "'></div>"
-				+ usagesBlock(stop, "Le nouveau nom vaudra pour :"),
+			body: "<div class='fields'>"
+				+ textField("dialogName", "Nom", stop.name)
+				+ textField("dialogCode", "Code arrêt", stop.stopCode)
+				+ textField("dialogDescription", "Description", stop.description)
+				+ textField("dialogPlatform", "Code plateforme", stop.platformCode, "quai, voie…")
+				+ selectField("dialogZone", "Zone tarifaire", "— aucune —", zones, stop.zoneId || "")
+				+ selectField("dialogParent", "Station parente", "— aucune —", stations, stop.parentStation || "")
+				+ selectField("dialogWheelchair", "Accessibilité", null, WHEELCHAIR_LABELS.map(function (label, value) {
+					return { value: value, label: label };
+				}), stop.wheelchairBoarding)
+				+ "</div>"
+				+ usagesBlock(stop, "Le changement vaudra pour :"),
 			confirmText: "Enregistrer",
 			confirm: function () {
 				var name = el("dialogName").value.trim();
 				if (name.length === 0) return Promise.reject(new Error("Le nom de l'arrêt est obligatoire."));
-				return updateProvisional(stop, { name: name, latitude: stop.latitude, longitude: stop.longitude });
+				return updateProvisional(stop, {
+					name: name,
+					latitude: stop.latitude,
+					longitude: stop.longitude,
+					stopCode: el("dialogCode").value.trim() || null,
+					description: el("dialogDescription").value.trim() || null,
+					platformCode: el("dialogPlatform").value.trim() || null,
+					zoneId: el("dialogZone").value || null,
+					parentStation: el("dialogParent").value || null,
+					wheelchairBoarding: Number(el("dialogWheelchair").value)
+				});
 			}
 		});
 	}
