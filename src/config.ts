@@ -408,7 +408,7 @@ export const ALERTS_POLL_INTERVAL = Temporal.Duration.from({ minutes: 5 }).total
  * Fréquent à dessein — un GTFS périmé fait échouer la correspondance des identifiants d'arrêt.
  */
 export const GTFS_CHECK_INTERVAL = Temporal.Duration.from({ minutes: 5 }).total("milliseconds");
-export const ANTHROPIC_MODEL = "claude-haiku-4-5";
+export const ANTHROPIC_MODEL = "claude-haiku-5-5";
 export const ALERT_CACHE_PATH = ".cache/alert-analysis.json";
 
 /**
