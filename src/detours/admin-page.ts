@@ -198,6 +198,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	#stopsBody tr { cursor: pointer; }
 	#stopsBody tr.selected td { background: #fdecee; }
 	.stopPin { background: none; border: none; }
+	.tooltipId { color: var(--muted); font-size: 11px; }
 	/* Les boîtes de dialogue des arrêts provisoires : un titre, un contenu, les actions en bas à droite. */
 	dialog { width: 440px; max-width: calc(100vw - 32px); padding: 16px; border: 1px solid var(--line);
 		border-radius: 8px; background: var(--panel); color: var(--ink); }
@@ -1232,6 +1233,11 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 	}
 
+	/** L'infobulle d'un arrêt sur la carte : son nom, et son identifiant dessous. */
+	function stopTooltip(label, stopId) {
+		return escapeHtml(label) + (stopId ? "<br><span class='tooltipId'>" + escapeHtml(stopId) + "</span>" : "");
+	}
+
 	/** Retient un réglage d'affichage d'une visite à l'autre — sans en dépendre : le stockage peut manquer. */
 	function remember(key, value) {
 		try { window.localStorage.setItem(key, value); } catch (error) { /* rien à retenir */ }
@@ -1425,7 +1431,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			var marker = L.marker([stop.latitude, stop.longitude], {
 				draggable: true, icon: stopPin(selected), zIndexOffset: selected ? 1000 : 0
 			})
-				.bindTooltip(stop.name)
+				.bindTooltip(stopTooltip(stop.name, stop.stopId))
 				.addTo(state.stopsLayer);
 
 			marker.on("click", function () { selectStop(stop); });
@@ -2672,7 +2678,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var at = L.latLng(stop.latitude, stop.longitude);
 		var marker = L.circleMarker(at, {
 			radius: 16, color: "#1f6feb", weight: 3, fillColor: "#1f6feb", fillOpacity: .2, interactive: false
-		}).bindTooltip(stop.name, { permanent: true, direction: "top", offset: [0, -14] }).addTo(map);
+		}).bindTooltip(stopTooltip(stop.name, stop.stopId), { permanent: true, direction: "top", offset: [0, -14] }).addTo(map);
 
 		state.highlight = { map: map, marker: marker };
 		map.panTo(at);
@@ -2761,7 +2767,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				color: stop.removed ? "#d1242f" : "#57606a",
 				fillColor: stop.removed ? "#d1242f" : "#fff",
 				fillOpacity: 1, weight: 2
-			}).bindTooltip(stop.name).addTo(state.routeLayer);
+			}).bindTooltip(stopTooltip(stop.name, stop.stopId)).addTo(state.routeLayer);
 
 			// En mode « arrêt existant », les arrêts de la ligne se réemploient d'un clic. Le clic ne doit
 			// pas remonter à la carte, qui y verrait la pose d'un point.
@@ -2833,7 +2839,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			var color = stop.provisional ? "#9a6700" : "#1f6feb";
 			var marker = L.circleMarker([stop.latitude, stop.longitude], {
 				radius: 4, color: color, weight: 2, fillColor: "#fff", fillOpacity: 1
-			}).bindTooltip(stop.name).addTo(state.pickLayer);
+			}).bindTooltip(stopTooltip(stop.name, stop.stopId)).addTo(state.pickLayer);
 			marker.bringToBack();
 
 			// En pose d'un nouvel arrêt, le clic revient à la carte : c'est une position qu'on donne.
@@ -3048,13 +3054,13 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			if (!stop.provisional) {
 				var pin = L.circleMarker([stop.latitude, stop.longitude], {
 					radius: 8, color: "#1a7f37", fillColor: "#1a7f37", fillOpacity: .85, weight: 2
-				}).bindTooltip(label + " (GTFS)").addTo(state.drawLayer);
+				}).bindTooltip(stopTooltip(label + " (GTFS)", stop.stopId)).addTo(state.drawLayer);
 				state.stopMarkers.push(pin);
 				return;
 			}
 
 			var marker = L.marker([stop.latitude, stop.longitude], { draggable: true })
-				.bindTooltip(label)
+				.bindTooltip(stopTooltip(label, stop.stopId))
 				.addTo(state.drawLayer);
 			marker.on("dragend", function () {
 				var position = marker.getLatLng();
@@ -3385,7 +3391,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				if (stop.latitude === null || stop.longitude === null) return;
 				L.circleMarker([stop.latitude, stop.longitude], {
 					radius: 5, color: "#8b949e", fillColor: "#8b949e", fillOpacity: .5, weight: 1
-				}).bindTooltip("Tronçon " + (index + 1) + " — " + (stop.name || "sans nom")).addTo(state.otherLayer);
+				}).bindTooltip(stopTooltip("Tronçon " + (index + 1) + " — " + (stop.name || "sans nom"), stop.stopId)).addTo(state.otherLayer);
 			});
 		});
 	}
