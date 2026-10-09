@@ -282,7 +282,7 @@ export function scheduledTripUpdates(
 
 				const tripUpdate = isCancelled(cancelIndex, gtfs, tripId, midnight)
 					? buildCancellation(gtfs, tripId, date, nowSeconds)
-					: buildTripUpdate(gtfs, skipIndex, tripId, date, midnight + departure, nowSeconds);
+					: buildTripUpdate(gtfs, skipIndex, tripId, date, midnight, departure, nowSeconds);
 				if (tripUpdate === undefined) continue;
 
 				// L'identifiant porte la journée de service comme le descripteur, et pour la même raison :
@@ -353,7 +353,8 @@ function buildTripUpdate(
 	skipIndex: SkipIndex,
 	tripId: string,
 	startDate: string,
-	departsAt: number,
+	midnight: number,
+	departure: number,
 	nowSeconds: number,
 ): GtfsRealtime.transit_realtime.ITripUpdate | undefined {
 	const meta = gtfs.trips.get(tripId);
@@ -384,7 +385,8 @@ function buildTripUpdate(
 		meta.routeId,
 		skipIndex,
 		gtfs,
-		Temporal.Instant.fromEpochMilliseconds(departsAt * 1000),
+		midnight,
+		Temporal.Instant.fromEpochMilliseconds((midnight + departure) * 1000),
 	);
 	if (!hasSkippedStops(tripUpdate)) return undefined;
 

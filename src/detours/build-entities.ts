@@ -7,8 +7,8 @@ import { FINISHED_TRIP_RETENTION, MAX_DETOUR_JUNCTION_OFFSET, TRIP_MODIFICATIONS
 import { serviceDaysBetween } from "../gtfs-rt/scheduled-trips.js";
 import {
 	type CancelIndex,
-	isActive,
 	isCancelled,
+	passesDuring,
 	periodsOverlap,
 	republishedAlertId,
 } from "../gtfs-rt/use-service-alerts.js";
@@ -40,7 +40,10 @@ type Candidate = {
 	directionId: number;
 	/** Les tracés visés, ou `null` pour tous (cf. `DetourSegment.patternIds`). */
 	patternIds: ReadonlySet<string> | null;
-	/** Les périodes de sa modification : il ne s'applique qu'aux courses qui partent pendant l'une d'elles. */
+	/**
+	 * Les périodes de sa modification : il ne s'applique qu'aux courses qui passent à l'une de ses
+	 * bornes pendant l'une d'elles (cf. `passesDuring`).
+	 */
 	periods: AlertPeriod[];
 	/** Les tracés sur lesquels un tronçon plus prioritaire l'écrase (cf. `resolveOverrides`). */
 	overriddenOn: ReadonlySet<string>;
@@ -139,8 +142,8 @@ export function buildDetourEntities(
 	const retainedSince = nowSeconds - FINISHED_TRIP_RETENTION;
 	const days = serviceDaysBetween(gtfs, retainedSince, horizon);
 
-	// Les tronçons se jaugent au départ des courses, qui peut remonter à la veille : la première journée
-	// candidate borne donc les périodes à considérer, et non l'instant présent.
+	// Les tronçons se jaugent au passage des courses à leurs bornes, qui peut remonter à la veille : la
+	// première journée candidate borne donc les périodes à considérer, et non l'instant présent.
 	const candidates = collectCandidates(
 		gtfs,
 		modifications,
@@ -191,12 +194,21 @@ export function buildDetourEntities(
 				const schedule = gtfs.tripStopSequences.get(tripId);
 				if (schedule === undefined) continue;
 
-				// Chaque tronçon se jauge au départ de la course, comme les annulations et les arrêts supprimés
-				// des trip updates : une déviation de ce soir se lit dès ce matin, sur les courses de ce soir.
+				// Chaque tronçon se jauge au passage de la course à ses bornes, comme les arrêts supprimés des
+				// trip updates : la course qui n'atteint la déviation qu'après sa fin ne la prend pas, celle
+				// partie avant son début mais qui l'atteint pendant la prend. Une déviation de ce soir se lit
+				// dès ce matin, sur les courses de ce soir.
 				const placed = matchOnTrip(applicable, schedule, gtfs.tripPatterns.get(tripId));
 				for (const entry of placed) served.add(entry.candidate.label);
 				const departsAt = Temporal.Instant.fromEpochMilliseconds((day.midnight + departure) * 1000);
-				const matched = placed.filter((entry) => isActive(entry.candidate.periods, departsAt));
+				const matched = placed.filter((entry) =>
+					passesDuring(
+						entry.candidate.periods,
+						day.midnight,
+						[(schedule[entry.startIndex] as TripStop).arrival, (schedule[entry.endIndex] as TripStop).arrival],
+						departsAt,
+					),
+				);
 				if (matched.length === 0) continue;
 
 				// Les deux natures de tronçon se séparent ici. Seuls ceux qui suppriment se replient entre eux ;

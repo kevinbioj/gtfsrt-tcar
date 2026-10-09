@@ -302,7 +302,8 @@ function indexModifications(
 	for (const modification of modifications.values()) {
 		const { record, periods, removedStopIds } = modification;
 		// Invisible, elle ne fait rien sauter. Hors période, si : ses arrêts ne sautent que sur les courses
-		// qui partent pendant l'une de ses périodes, et le feed porte les vingt-quatre heures à venir.
+		// qui passent à leurs bornes pendant l'une de ses périodes, et le feed porte les vingt-quatre
+		// heures à venir.
 		if (!record.disabled && removedStopIds.size > 0) {
 			const buckets = skipIndex.get(record.routeId) ?? [];
 			const ceded = yielded.get(record.uid);

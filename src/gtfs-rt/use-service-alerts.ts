@@ -35,8 +35,9 @@ const EMPTY_SERVED: ReadonlySet<string> = new Set();
 /**
  * Des quais à sauter sur une ligne, dans un sens, pour les courses de certains tracés seulement —
  * ou de tous (`null`) : une modification restreinte à un tracé ne touche pas les courses des autres.
- * Seulement pour les courses qui partent pendant l'une des périodes, comme les annulations (cf.
- * `isCancelled`) : une déviation qui commence ce soir se lit dès ce matin sur les courses de ce soir.
+ * Seulement pour les courses qui passent à l'une des bornes d'une suite d'arrêts supprimés pendant
+ * l'une des périodes (cf. `passesDuring`) : une déviation qui commence ce soir se lit dès ce matin sur
+ * les courses de ce soir.
  */
 export type SkipBucket = {
 	directionId: number;
@@ -182,15 +183,44 @@ export function useServiceAlerts(
 }
 
 /**
- * Renvoie l'ensemble des stopId à sauter pour une course de cette ligne, dans ce sens, sur ce tracé,
- * qui part à `departsAt`. Un tracé inconnu — course absente du GTFS — ne voit que les suppressions qui
- * visent tous les tracés.
+ * La course passe-t-elle à l'une de ces bornes pendant l'une des périodes ? Une déviation ne vaut que
+ * pour les courses qui la rencontrent : c'est leur passage théorique à ses bornes qui se jauge, et non
+ * leur départ — le 14:50 qui atteint à 15:10 une déviation de 15:00 à 16:00 la prend, le 15:55 qui ne
+ * l'atteint qu'à 16:20 ne la prend pas.
+ *
+ * `passages` se comptent en secondes depuis `midnight`, comme `TripStop.arrival` ; ceux que l'horaire
+ * ne donne pas (`NaN`) sont ignorés, et faute d'aucun, c'est `fallback` qui se jauge.
+ */
+export function passesDuring(
+	periods: AlertPeriod[],
+	midnight: number,
+	passages: readonly number[],
+	fallback: Temporal.Instant,
+): boolean {
+	if (periods.length === 0) return true;
+	const known = passages.filter(Number.isFinite);
+	if (known.length === 0) return isActive(periods, fallback);
+	return known.some((seconds) =>
+		isActive(periods, Temporal.Instant.fromEpochMilliseconds((midnight + seconds) * 1000)),
+	);
+}
+
+/**
+ * Renvoie l'ensemble des stopId à sauter pour une course de cette ligne, dans ce sens, sur ce tracé.
+ * Un tracé inconnu — course absente du GTFS — ne voit que les suppressions qui visent tous les tracés.
+ *
+ * Sur son horaire théorique, les arrêts d'un bucket se regroupent en suites contiguës, qui sont les
+ * tronçons déviés tels que la course les rencontre : chacune saute si la course passe à son premier
+ * ou à son dernier arrêt pendant l'une des périodes (cf. `passesDuring`). Sans horaire, ou sans la
+ * journée de service, c'est `departsAt` qui se jauge, pour tout le bucket.
  */
 export function skippedStopIds(
 	skipIndex: SkipIndex,
 	routeId: string,
 	directionId: number,
 	patternId: string | undefined,
+	schedule: TripStop[] | undefined,
+	midnight: number | undefined,
 	departsAt: Temporal.Instant,
 ): Set<string> {
 	const buckets = skipIndex.get(routeId);
@@ -200,14 +230,35 @@ export function skippedStopIds(
 	for (const bucket of buckets) {
 		if (bucket.directionId !== directionId) continue;
 		if (bucket.patternIds !== null && (patternId === undefined || !bucket.patternIds.has(patternId))) continue;
-		if (!isActive(bucket.periods, departsAt)) continue;
-		for (const stopId of bucket.stopIds) stopIds.add(stopId);
+
+		if (schedule === undefined || midnight === undefined) {
+			if (isActive(bucket.periods, departsAt)) for (const stopId of bucket.stopIds) stopIds.add(stopId);
+			continue;
+		}
+
+		let run: TripStop[] = [];
+		const flush = () => {
+			const first = run[0];
+			const last = run.at(-1);
+			if (first !== undefined && last !== undefined) {
+				if (passesDuring(bucket.periods, midnight, [first.arrival, last.arrival], departsAt))
+					for (const stop of run) stopIds.add(stop.stopId);
+			}
+			run = [];
+		};
+		for (const stop of schedule) {
+			if (bucket.stopIds.has(stop.stopId)) run.push(stop);
+			else flush();
+		}
+		flush();
 	}
 	return stopIds;
 }
 
 /**
- * Marque en SKIPPED les arrêts supprimés d'un trip, jaugés à son départ `departsAt`. Deux cas :
+ * Marque en SKIPPED les arrêts supprimés d'un trip, jaugés à son passage aux bornes de chaque
+ * tronçon dévié sur la journée de service qui commence à `midnight` — ou, faute de la connaître, à
+ * `departsAt` (cf. `skippedStopIds`). Deux cas :
  *  1. arrêt présent dans le GTFS-RT → on le bascule en SKIPPED (temps retirés) ;
  *  2. arrêt supprimé mais ABSENT du GTFS-RT (la source l'a retiré) → on le réinsère comme entrée
  *     SKIPPED, à sa position (stop_sequence issu de l'horaire théorique du trip).
@@ -220,6 +271,7 @@ export function applySkippedStops(
 	routeId: string,
 	skipIndex: SkipIndex,
 	gtfs: StaticGtfs,
+	midnight: number | undefined,
 	departsAt: Temporal.Instant,
 ) {
 	const stopTimeUpdates = tripUpdate.stopTimeUpdate;
@@ -227,17 +279,20 @@ export function applySkippedStops(
 
 	const directionId = tripUpdate.trip?.directionId ?? 0;
 	const tripId = tripUpdate.trip?.tripId;
+	// L'horaire théorique date le passage aux bornes, sert au garde-fou (terminus de la course) puis à
+	// la réinsertion.
+	const schedule = tripId ? gtfs.tripStopSequences.get(tripId) : undefined;
 	let stopIds = skippedStopIds(
 		skipIndex,
 		routeId,
 		directionId,
 		tripId ? gtfs.tripPatterns.get(tripId) : undefined,
+		schedule,
+		midnight,
 		departsAt,
 	);
 	if (stopIds.size === 0) return;
 
-	// L'horaire théorique sert au garde-fou (terminus de la course) puis à la réinsertion.
-	const schedule = tripId ? gtfs.tripStopSequences.get(tripId) : undefined;
 	if (schedule !== undefined) {
 		stopIds = keepEffectiveTermini(stopIds, schedule, gtfs, routeId, directionId);
 		if (stopIds.size === 0) return;

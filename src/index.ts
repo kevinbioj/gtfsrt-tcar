@@ -740,8 +740,9 @@ async function pollTripUpdates() {
 				continue;
 			}
 
-			// Les suppressions se jaugent au départ de la course, comme les annulations ; faute de le
-			// connaître, à l'instant du relevé.
+			// Les suppressions se jaugent au passage de la course aux bornes de chaque tronçon dévié ;
+			// faute de connaître sa journée de service, à son départ, et faute de celui-ci, à l'instant du
+			// relevé.
 			const departure = resolvedTripId ? staticGtfs.data.tripDepartures.get(resolvedTripId) : undefined;
 			const departsAt = midnight !== undefined && departure !== undefined ? midnight + departure : nowSeconds;
 			applySkippedStops(
@@ -749,6 +750,7 @@ async function pollTripUpdates() {
 				tripRouteId,
 				modificationIndex.skipIndex,
 				staticGtfs.data,
+				midnight,
 				Temporal.Instant.fromEpochMilliseconds(departsAt * 1000),
 			);
 
