@@ -13,6 +13,7 @@ import { SERVED_STOPS } from "../config.js";
 import { networkOf } from "../utils/network.js";
 import { firstImage, htmlToText } from "../utils/sanitize-html.js";
 import {
+	canonicalStopId,
 	normalizeStopName,
 	type OrderedStop,
 	type StaticGtfs,
@@ -437,7 +438,7 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 			// La période active du flux amont est sa fenêtre de publication — des mois, souvent jusqu'à la
 			// fin de l'année —, et non celle de la perturbation : c'est la période de communication. La
 			// période d'impact vient de l'analyse, une fois qu'elle a tourné (cf. étape 3).
-			const republished = withAccessibilityStops(plainAlert(alert), routeIds, gtfs);
+			const republished = withAccessibilityStops(withCanonicalStops(plainAlert(alert), gtfs), routeIds, gtfs);
 			republished.communicationPeriod = alert.activePeriod ?? [];
 			republishedById.set(alertId, republished);
 			entities.push({
@@ -1196,6 +1197,23 @@ const IMAGE_MEDIA_TYPES = new Map([
 	["gif", "image/gif"],
 	["webp", "image/webp"],
 ]);
+
+/** L'alerte, ses arrêts fusionnés remplacés par ceux que le GTFS connaît encore (cf. `canonicalStopId`). */
+function withCanonicalStops(
+	alert: GtfsRealtime.transit_realtime.IAlert,
+	gtfs: StaticGtfs,
+): GtfsRealtime.transit_realtime.IAlert {
+	if (!alert.informedEntity?.some((informed) => informed.stopId && gtfs.mergedStops.has(informed.stopId))) {
+		return alert;
+	}
+
+	return {
+		...alert,
+		informedEntity: alert.informedEntity.map((informed) =>
+			informed.stopId ? { ...informed, stopId: canonicalStopId(gtfs, informed.stopId) } : informed,
+		),
+	};
+}
 
 /**
  * L'info trafic telle qu'on la republie : ses textes ramenés à du texte brut, et l'image que sa

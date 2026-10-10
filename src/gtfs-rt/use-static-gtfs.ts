@@ -162,6 +162,12 @@ export type StaticGtfs = {
 	 * rattacher comme `parent_station`.
 	 */
 	stations: Map<string, Station>;
+	/**
+	 * stopId → quai ou station qui le remplace (`merged_stops.txt`). Le GTFS de tout Astuce fusionne
+	 * les arrêts que deux réseaux partagent : ceux de TAE disparaissent au profit de ceux de TCAR, mais
+	 * le temps réel de TAE continue de les citer (cf. {@link canonicalStopId}).
+	 */
+	mergedStops: Map<string, string>;
 };
 
 /** Une station du GTFS : un pôle qui regroupe des quais. */
@@ -198,6 +204,14 @@ export async function useStaticGtfs(url: string, checkInterval: number, onReload
 	}, checkInterval);
 
 	return resource;
+}
+
+/**
+ * L'arrêt qu'un `stopId` du temps réel désigne dans le GTFS : celui dans lequel il a été fusionné
+ * (cf. {@link StaticGtfs.mergedStops}), ou lui-même.
+ */
+export function canonicalStopId(gtfs: StaticGtfs, stopId: string): string {
+	return gtfs.mergedStops.get(stopId) ?? stopId;
 }
 
 /** Normalise un nom d'arrêt : minuscules, sans accents, alphanumérique compacté. */
@@ -410,6 +424,7 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		shapes: new Map(),
 		fareAreas: new Map(),
 		stations: new Map(),
+		mergedStops: new Map(),
 	};
 
 	try {
@@ -430,7 +445,8 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 				file.name === "shapes.txt" ||
 				file.name === "calendar.txt" ||
 				file.name === "calendar_dates.txt" ||
-				file.name === "areas.txt",
+				file.name === "areas.txt" ||
+				file.name === "merged_stops.txt",
 		});
 
 		if (!files["stops.txt"] || !files["trips.txt"]) {
@@ -445,6 +461,9 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		const { routeDirections, tripMeta, serviceTrips } = buildTrips(decoder.decode(files["trips.txt"]));
 		const routeNames = files["routes.txt"] ? buildRouteNames(decoder.decode(files["routes.txt"])) : new Map();
 		const fareAreas = files["areas.txt"] ? buildFareAreas(decoder.decode(files["areas.txt"])) : new Map();
+		const mergedStops = files["merged_stops.txt"]
+			? buildMergedStops(decoder.decode(files["merged_stops.txt"]))
+			: new Map();
 		const calendars = files["calendar.txt"] ? buildCalendar(decoder.decode(files["calendar.txt"])) : new Map();
 		const calendarExceptions = files["calendar_dates.txt"]
 			? buildCalendarDates(decoder.decode(files["calendar_dates.txt"]))
@@ -486,7 +505,7 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		}
 
 		console.log(
-			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${itineraries} route itineraries, ${tripStopSequences.size} trip schedules, ${shapes.size} shapes, ${serviceTrips.size} services, ${courseVersions.size} courses from GTFS.`,
+			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${itineraries} route itineraries, ${tripStopSequences.size} trip schedules, ${shapes.size} shapes, ${serviceTrips.size} services, ${courseVersions.size} courses, ${mergedStops.size} merged stops from GTFS.`,
 		);
 		return {
 			data: {
@@ -511,6 +530,7 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 				shapes,
 				fareAreas,
 				stations,
+				mergedStops,
 			},
 			signature,
 		};
@@ -666,6 +686,36 @@ function buildFareAreas(csv: string): Map<string, string> {
 	}
 
 	return areas;
+}
+
+/**
+ * Les arrêts fusionnés et ce qui les remplace. Les chaînes (A fusionné dans B, lui-même fusionné dans
+ * C) sont suivies jusqu'au bout, pour que chaque entrée désigne un arrêt que le GTFS connaît encore.
+ */
+function buildMergedStops(csv: string): Map<string, string> {
+	const merged = new Map<string, string>();
+	const rows = parseCsv(csv);
+	const header = rows.next().value;
+	if (!header) return merged;
+
+	const idCol = header.indexOf("stop_id");
+	const intoCol = header.indexOf("merged_into_stop_id");
+	if (idCol === -1 || intoCol === -1) return merged;
+
+	for (const row of rows) {
+		const stopId = row[idCol];
+		const into = row[intoCol];
+		if (stopId && into && stopId !== into) merged.set(stopId, into);
+	}
+
+	for (const [stopId, into] of merged) {
+		let target = into;
+		// Le compteur borne une boucle que le fichier ne devrait jamais contenir.
+		for (let hops = 0; merged.has(target) && hops < merged.size; hops += 1) target = merged.get(target) as string;
+		merged.set(stopId, target);
+	}
+
+	return merged;
 }
 
 function buildTrips(csv: string): {

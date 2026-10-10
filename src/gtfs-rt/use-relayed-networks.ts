@@ -23,7 +23,11 @@ export type RelayedTripUpdates = { network: string; tripUpdates: GtfsRealtime.tr
  * c'est pourquoi on garde le flux brut, et qu'on en redonne une copie neuve à chaque lecture. Une
  * annulation levée entre-temps ne doit rien avoir effacé de ce que la source annonçait.
  */
-export function useRelayedNetworks(networks: readonly RelayedNetwork[]) {
+export function useRelayedNetworks(
+	networks: readonly RelayedNetwork[],
+	/** Le quai du GTFS qu'un `stopId` de la source désigne, les arrêts fusionnés y étant remplacés. */
+	canonicalStopId: (stopId: string) => string,
+) {
 	const tripFeeds = new Map<string, Uint8Array>();
 	const vehiclePositions = new Map<string, Map<string, GtfsRealtime.transit_realtime.IVehiclePosition>>();
 
@@ -33,7 +37,7 @@ export function useRelayedNetworks(networks: readonly RelayedNetwork[]) {
 				const { provider, vehiclePositionsUrl } = network;
 				const vehicleFeed = await loadFeed(provider, "vehicle positions", vehiclePositionsUrl);
 				if (vehicleFeed !== undefined) {
-					vehiclePositions.set(provider, relayVehiclePositions(network, decode(vehicleFeed)));
+					vehiclePositions.set(provider, relayVehiclePositions(network, decode(vehicleFeed), canonicalStopId));
 				}
 
 				console.log(`✓ ${provider}: ${vehiclePositions.get(provider)?.size ?? 0} vehicle positions.`);
@@ -148,7 +152,11 @@ function relayTripUpdates(network: RelayedNetwork, feed: GtfsRealtime.transit_re
 	return relayed;
 }
 
-function relayVehiclePositions(network: RelayedNetwork, feed: GtfsRealtime.transit_realtime.FeedMessage) {
+function relayVehiclePositions(
+	network: RelayedNetwork,
+	feed: GtfsRealtime.transit_realtime.FeedMessage,
+	canonicalStopId: (stopId: string) => string,
+) {
 	const { provider } = network;
 	const relayed = new Map<string, GtfsRealtime.transit_realtime.IVehiclePosition>();
 
@@ -158,7 +166,7 @@ function relayVehiclePositions(network: RelayedNetwork, feed: GtfsRealtime.trans
 		if (!vehicle || number === undefined || !vehicle.position) continue;
 
 		if (vehicle.trip) prefixTrip(provider, vehicle.trip);
-		if (vehicle.stopId) vehicle.stopId = withPrefix(provider, vehicle.stopId);
+		if (vehicle.stopId) vehicle.stopId = canonicalStopId(withPrefix(provider, vehicle.stopId));
 		vehicle.vehicle = { id: `${provider}:${number}` };
 
 		relayed.set(`VM:${provider}:${number}`, vehicle);

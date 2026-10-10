@@ -58,7 +58,7 @@ import {
 	isCancelled,
 	useServiceAlerts,
 } from "./gtfs-rt/use-service-alerts.js";
-import { normalizeStopName, useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
+import { canonicalStopId, normalizeStopName, useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
 import { useVehicleFleet } from "./gtfs-rt/use-vehicle-fleet.js";
 import { useVehicleLocator, type VehicleLocation } from "./gtfs-rt/use-vehicle-locator.js";
 import { useVehicleMonitoring } from "./gtfs-rt/use-vehicle-monitoring.js";
@@ -118,7 +118,7 @@ const modificationIndex = useModificationIndex(detourStore, staticGtfs, () => se
 // Sa présence est constatée ici, ses octets ne seront lus qu'au premier accrochage.
 const roadGraph = useRoadGraph(ROAD_GRAPH_PATH);
 // TAE et TNI : relayés tels quels, sans rien de la vérification qui s'applique à TCAR.
-const relayedNetworks = useRelayedNetworks(RELAYED_NETWORKS);
+const relayedNetworks = useRelayedNetworks(RELAYED_NETWORKS, (stopId) => canonicalStopId(staticGtfs.data, stopId));
 
 const hono = new Hono();
 
@@ -699,6 +699,10 @@ async function pollTripUpdates() {
 			entity.tripUpdate.stopTimeUpdate?.forEach((stopTimeUpdate) => {
 				stopTimeUpdate.scheduleRelationship =
 					GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SCHEDULED;
+				// Un arrêt fusionné dans un autre n'existe plus dans le GTFS : sous son ancien identifiant, il ne
+				// se rapprocherait d'aucun quai de l'horaire théorique — ni les suppressions d'arrêt ni le
+				// consommateur du feed ne sauraient le situer.
+				if (stopTimeUpdate.stopId) stopTimeUpdate.stopId = canonicalStopId(staticGtfs.data, stopTimeUpdate.stopId);
 			});
 
 			const tripRouteId = entity.tripUpdate.trip?.routeId ?? "";
