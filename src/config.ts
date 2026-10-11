@@ -82,6 +82,21 @@ export const LEGACY_TRIP_UPDATES_URL = "https://reseau-astuce.fr/ftp/gtfsrt/Astu
  */
 export const LEGACY_TAKEOVER_DELAY = Temporal.Duration.from({ minutes: 3 }).total("seconds");
 /**
+ * Nombre d'arrêts en amont du premier que l'ancien GTFS-RT annonce, sur lesquels on reporte toujours
+ * son retard ou son avance — en plus de ceux dont l'heure théorique n'est pas venue. Il passe à
+ * l'arrêt suivant dès que le véhicule arrive au sien : celui où le véhicule se trouve encore, portes
+ * ouvertes, n'a alors plus d'horaire (cf. `backfillStops`).
+ */
+export const LEGACY_BACKFILLED_STOPS = 2;
+/**
+ * Durée pendant laquelle on retient le dernier horaire qu'une source a annoncé pour un arrêt, au-delà
+ * de son passage — théorique ou annoncé, le plus tardif des deux (cf. `useStopTimeMemory`). C'est de
+ * quoi le rendre tant qu'il peut l'être : jusqu'à son heure théorique pour une course en avance, et
+ * le temps que le véhicule s'y attarde pour les arrêts qui précèdent immédiatement le premier annoncé
+ * (cf. {@link LEGACY_BACKFILLED_STOPS}).
+ */
+export const STOP_TIME_RETENTION = Temporal.Duration.from({ minutes: 30 }).total("seconds");
+/**
  * Rafraîchissement du flux de vérification. Il republie ses relevés à la minute, mais il est devenu
  * la source des positions publiées : l'interroger moins souvent que le flux SAE ferait traîner tout
  * le feed d'autant. D'où le même rythme que {@link VEHICLE_POSITIONS_INTERVAL} — c'est un fichier statique léger.

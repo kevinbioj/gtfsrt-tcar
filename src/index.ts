@@ -10,6 +10,7 @@ import {
 	ALERTS_POLL_INTERVAL,
 	DETOURS_DB_PATH,
 	GTFS_CHECK_INTERVAL,
+	LEGACY_BACKFILLED_STOPS,
 	LEGACY_GTFS_URL,
 	LEGACY_TAKEOVER_DELAY,
 	LEGACY_TRIP_UPDATES_URL,
@@ -22,6 +23,7 @@ import {
 	SERVICE_ALERTS_URL,
 	STATE_CACHE_PATH,
 	STATIC_GTFS_URL,
+	STOP_TIME_RETENTION,
 	TRIP_UPDATES_INTERVAL,
 	TRIP_UPDATES_URL,
 	VEHICLE_MONITORING_INTERVAL,
@@ -61,6 +63,7 @@ import {
 	useServiceAlerts,
 } from "./gtfs-rt/use-service-alerts.js";
 import { canonicalStopId, normalizeStopName, useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
+import { type RememberedStopTime, useStopTimeMemory } from "./gtfs-rt/use-stop-time-memory.js";
 import { useVehicleFleet } from "./gtfs-rt/use-vehicle-fleet.js";
 import { useVehicleLocator, type VehicleLocation } from "./gtfs-rt/use-vehicle-locator.js";
 import { useVehicleMonitoring } from "./gtfs-rt/use-vehicle-monitoring.js";
@@ -98,6 +101,8 @@ const store = useRealtimeStore();
  * une course que le SAE a cessé de tenir à jour (cf. {@link LEGACY_TAKEOVER_DELAY}).
  */
 const sourceTripUpdatedAt = new Map<string, number>();
+/** Les horaires que les sources ont annoncés, rendus aux arrêts qu'elles retirent (cf. `backfillStops`). */
+const stopTimeMemory = useStopTimeMemory(restored?.stopTimes);
 const registry = useVehicleRegistry(restored?.vehicles);
 const movementTracker = useMovementTracker(restored?.movements);
 const vehicleOccupancyStatuses = useVehicleOccupancyStatuses();
@@ -507,7 +512,12 @@ async function poll() {
 
 	saveState(
 		STATE_CACHE_PATH,
-		{ movements: movementTracker.snapshot(), vehicles: registry.snapshot(), locations: vehicleLocator.snapshot() },
+		{
+			movements: movementTracker.snapshot(),
+			vehicles: registry.snapshot(),
+			locations: vehicleLocator.snapshot(),
+			stopTimes: stopTimeMemory.snapshot(),
+		},
 		nowSeconds,
 	);
 
@@ -655,6 +665,7 @@ async function pollTripUpdates() {
 		const nowSeconds = Math.floor(Date.now() / 1000);
 
 		store.tripUpdates.clear();
+		stopTimeMemory.prune(nowSeconds);
 		store.tripDepartures.clear();
 
 		// Journées de service auxquelles une course annoncée peut appartenir. Le lendemain en fait partie :
@@ -797,6 +808,25 @@ async function pollTripUpdates() {
 				if (departure !== undefined) store.tripDepartures.set(resolvedTripId, departure);
 			}
 
+			// Les arrêts que la source a déjà quittés, mais dont l'heure théorique n'est pas encore venue :
+			// une course en avance les retire de ses horaires, et le voyageur qui s'y présente à l'heure
+			// retomberait sur le théorique, quand le véhicule est passé. On les lui rend avec ce qu'elle en
+			// annonçait en dernier, d'où la mémoire tenue d'abord (cf. `backfillStops`). Après le départ
+			// annoncé, qu'un horaire rendu au terminus ne doit pas fausser.
+			const midnight = candidateDays.find((day) => day.date === startDate)?.midnight;
+			if (network === HOME_NETWORK && realtime && resolvedTripId && startDate && midnight !== undefined) {
+				const run = tripRun(resolvedTripId, startDate);
+				rememberStopTimes(run, entity.tripUpdate, resolvedTripId, midnight);
+				backfillStops(
+					entity.tripUpdate,
+					resolvedTripId,
+					midnight,
+					nowSeconds,
+					entity.legacy ? LEGACY_BACKFILLED_STOPS : 0,
+					(stopSequence) => stopTimeMemory.recall(run, stopSequence),
+				);
+			}
+
 			if (resolvedTripId && startDate) {
 				covered.add(tripRun(resolvedTripId, startDate));
 
@@ -821,7 +851,6 @@ async function pollTripUpdates() {
 			const entityId = `ET:${network}:${tripEntityId}${startDate ? `:${startDate}` : ""}`;
 
 			// Annulée par une modification : ce que la source en dit ne tient plus, temps réel compris.
-			const midnight = candidateDays.find((day) => day.date === startDate)?.midnight;
 			if (
 				resolvedTripId &&
 				midnight !== undefined &&
@@ -944,6 +973,108 @@ function rebaseStops(tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate, trip
 		from = index + 1;
 		return [{ ...stopTimeUpdate, stopSequence: schedule[index]?.stopSequence }];
 	});
+}
+
+/**
+ * Retient l'horaire que la source annonce pour chaque arrêt de la course (cf. `useStopTimeMemory`),
+ * jusqu'à {@link STOP_TIME_RETENTION} après son passage — théorique ou annoncé, le plus tardif des
+ * deux. Un arrêt sans horaire n'apprend rien : il n'est pas retenu.
+ */
+function rememberStopTimes(
+	run: string,
+	tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate,
+	tripId: string,
+	midnight: number,
+) {
+	const theoretical = new Map(
+		(staticGtfs.data.tripStopSequences.get(tripId) ?? []).map(({ stopSequence, arrival }) => [
+			stopSequence,
+			midnight + arrival,
+		]),
+	);
+
+	stopTimeMemory.remember(
+		run,
+		(tripUpdate.stopTimeUpdate ?? []).flatMap(({ stopSequence, stopId, arrival, departure }) => {
+			const arrivalTime = Number(arrival?.time ?? 0) || undefined;
+			const departureTime = Number(departure?.time ?? 0) || undefined;
+			if (typeof stopSequence !== "number" || !stopId || (arrivalTime === undefined && departureTime === undefined))
+				return [];
+
+			const passage = Math.max(theoretical.get(stopSequence) ?? 0, arrivalTime ?? 0, departureTime ?? 0);
+			const stopTime: RememberedStopTime = {
+				stopId,
+				arrival: arrivalTime,
+				departure: departureTime,
+				keepUntil: passage + STOP_TIME_RETENTION,
+			};
+			return [[stopSequence, stopTime] as const];
+		}),
+	);
+}
+
+/**
+ * Rend à la course les arrêts qui précèdent le premier qu'annonce la source. Sont rendus :
+ *
+ *  - tous ceux dont l'heure théorique n'est pas encore venue. Une course en avance les a déjà
+ *    desservis et la source n'en parle plus ; sans eux, le voyageur qui s'y présente à l'heure se
+ *    verrait promettre le passage théorique d'un véhicule déjà reparti. Leur horaire, désormais
+ *    passé, dit au contraire qu'il l'est ;
+ *  - quoi qu'il en soit, les `nearby` qui précèdent immédiatement. L'ancien GTFS-RT passe à l'arrêt
+ *    suivant dès que le véhicule arrive au sien : celui où il se trouve encore, portes ouvertes,
+ *    n'aurait sinon plus d'horaire (cf. {@link LEGACY_BACKFILLED_STOPS}).
+ *
+ * Chacun reprend le dernier horaire que la source en a annoncé (`recall`) : l'estimation faite juste
+ * avant le passage, bien plus juste que le retard d'aujourd'hui reporté sur un arrêt desservi il y a
+ * dix minutes. Faute d'en avoir jamais reçu — premier relevé de la course, ou arrêt que la source a
+ * sauté —, il reçoit le retard ou l'avance du premier arrêt annoncé.
+ *
+ * Ce retard se déduit de l'horaire annoncé et de l'horaire théorique du GTFS publié, posé sur la
+ * journée de service de la course (`midnight`). Le champ `delay` de la source ne s'y prête pas : il
+ * manque parfois, et l'ancien GTFS-RT le compte sur une autre base que ce GTFS. Pour la même raison,
+ * les arrêts rendus n'en portent pas — seulement l'horaire.
+ */
+function backfillStops(
+	tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate,
+	tripId: string,
+	midnight: number,
+	nowSeconds: number,
+	nearby: number,
+	recall: (stopSequence: number) => RememberedStopTime | undefined,
+) {
+	const schedule = staticGtfs.data.tripStopSequences.get(tripId);
+	const first = tripUpdate.stopTimeUpdate?.[0];
+	if (schedule === undefined || first === undefined) return;
+
+	const index = schedule.findIndex(({ stopSequence }) => stopSequence === first.stopSequence);
+	if (index <= 0) return;
+
+	const announced = Number(first.arrival?.time ?? first.departure?.time ?? 0);
+	const scheduled = schedule[index]?.arrival;
+	const delay = announced === 0 || scheduled === undefined ? undefined : announced - (midnight + scheduled);
+
+	const backfilled = schedule
+		.slice(0, index)
+		.filter(({ arrival }, i) => i >= index - nearby || midnight + arrival >= nowSeconds)
+		.flatMap(({ stopSequence, stopId, arrival }) => {
+			const remembered = recall(stopSequence);
+			if (remembered?.stopId === stopId) {
+				return [
+					{
+						stopSequence,
+						stopId,
+						arrival: { time: remembered.arrival ?? remembered.departure },
+						departure: { time: remembered.departure ?? remembered.arrival },
+					},
+				];
+			}
+
+			if (delay === undefined) return [];
+			const event = { time: midnight + arrival + delay };
+			return [{ stopSequence, stopId, arrival: event, departure: event }];
+		});
+
+	tripUpdate.stopTimeUpdate = [...backfilled, ...(tripUpdate.stopTimeUpdate ?? [])];
 }
 
 /**

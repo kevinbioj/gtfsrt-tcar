@@ -1,12 +1,14 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
 import type { TrackedVehicle } from "./gtfs-rt/use-movement-tracker.js";
+import type { RememberedRun } from "./gtfs-rt/use-stop-time-memory.js";
 import type { LocatedVehicle } from "./gtfs-rt/use-vehicle-locator.js";
 import type { RegisteredVehicle } from "./gtfs-rt/use-vehicle-registry.js";
 
 /**
  * Tout ce que le producteur sait et que personne d'autre ne saurait lui redire : le mouvement qu'il
- * a constaté, ce qu'il a publié, où il a situé chaque véhicule. Les instantanés qu'il tient des
+ * a constaté, ce qu'il a publié, où il a situé chaque véhicule, les horaires que les sources ont
+ * retirés de leurs trip updates. Les instantanés qu'il tient des
  * sources amont (vérification, girouettes, charge, trip updates) n'en sont pas : ceux-là se
  * rechargent d'eux-mêmes dès le démarrage, et les relire ne ferait que ressortir du périmé.
  */
@@ -21,6 +23,8 @@ export type ProducerState = {
 	vehicles: [string, RegisteredVehicle][];
 	/** Le dernier projeté de chaque véhicule sur sa course (cf. `useVehicleLocator`). */
 	locations: [string, LocatedVehicle][];
+	/** Le dernier horaire annoncé pour chaque arrêt de chaque course (cf. `useStopTimeMemory`). */
+	stopTimes: [string, RememberedRun][];
 };
 
 /**
@@ -55,7 +59,7 @@ export function loadState(path: string, nowSeconds: number): ProducerState | und
 	// Fichier vierge : c'est le gabarit que le montage Docker met en place, pas un état.
 	if (raw.trim().length === 0) return undefined;
 
-	let parsed: { savedAt?: unknown; movements?: unknown; vehicles?: unknown; locations?: unknown };
+	let parsed: { savedAt?: unknown; movements?: unknown; vehicles?: unknown; locations?: unknown; stopTimes?: unknown };
 	try {
 		parsed = JSON.parse(raw);
 	} catch (cause) {
@@ -69,11 +73,12 @@ export function loadState(path: string, nowSeconds: number): ProducerState | und
 		movements: entriesOf(parsed.movements, isTrackedVehicle),
 		vehicles: entriesOf(parsed.vehicles, isRegisteredVehicle),
 		locations: entriesOf(parsed.locations, isLocatedVehicle),
+		stopTimes: entriesOf(parsed.stopTimes, isRememberedRun),
 	};
 
 	const age = savedAt ? `saved ${Math.round((nowSeconds - savedAt) / 60)} min ago` : "of unknown age";
 	console.log(
-		`✓ Restored state ${age} (${state.vehicles.length} vehicles, ${state.movements.length} tracked, ${state.locations.length} located).`,
+		`✓ Restored state ${age} (${state.vehicles.length} vehicles, ${state.movements.length} tracked, ${state.locations.length} located, ${state.stopTimes.length} trips with remembered stop times).`,
 	);
 
 	return state;
@@ -145,4 +150,18 @@ function isLocatedVehicle(payload: unknown): payload is LocatedVehicle {
 
 	const { currentStopSequence, stopId, currentStatus } = payload.location;
 	return typeof currentStopSequence === "number" && typeof stopId === "string" && typeof currentStatus === "number";
+}
+
+function isRememberedRun(payload: unknown): payload is RememberedRun {
+	if (!Array.isArray(payload)) return false;
+
+	return payload.every((entry) => {
+		if (!Array.isArray(entry) || entry.length !== 2) return false;
+		const [stopSequence, stopTime] = entry;
+		if (typeof stopSequence !== "number" || !isObject(stopTime)) return false;
+		// `arrival` ou `departure` manque quand la source ne l'a pas annoncé : JSON n'écrit pas `undefined`.
+		if (stopTime.arrival !== undefined && typeof stopTime.arrival !== "number") return false;
+		if (stopTime.departure !== undefined && typeof stopTime.departure !== "number") return false;
+		return typeof stopTime.stopId === "string" && typeof stopTime.keepUntil === "number";
+	});
 }
