@@ -86,6 +86,15 @@ export function useVehicleRegistry(restored: Iterable<readonly [string, Register
 		},
 
 		/**
+		 * Vrai si la course retenue pour ce véhicule est sur cette ligne et dans ce sens. Faux s'il n'a
+		 * jamais été publié, ou s'il l'a été sans course (haut-le-pied).
+		 */
+		runsOn(vehicleId: string, routeId: string, directionId: number): boolean {
+			const trip = vehicles.get(vehicleId)?.entity.trip;
+			return !!trip?.tripId && trip.routeId === routeId && (trip.directionId ?? 0) === directionId;
+		},
+
+		/**
 		 * Remplace intégralement l'entrée du véhicule par ce que la source vient d'en dire.
 		 *
 		 * `departsAt` est le départ de la course publiée, en secondes epoch ; il vaut `undefined` quand

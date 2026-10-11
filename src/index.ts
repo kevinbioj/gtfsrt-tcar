@@ -422,7 +422,26 @@ async function poll() {
 			continue;
 		}
 
+		// Course qui ne circule ni hier, ni aujourd'hui, ni demain, et qu'aucune course du jour ne
+		// remplace : l'annonce est fausse. L'ancien GTFS-RT en fait alterner un véhicule d'un relevé à
+		// l'autre entre sa vraie course et une course du samedi le dimanche. Comme pour une annonce
+		// démentie, seule la position est rafraîchie, sur la course déjà publiée.
+		//
+		// La course annoncée est en revanche publiée telle quelle, faute de mieux, quand la course déjà
+		// publiée ne peut plus servir : le véhicule n'en a encore aucune, ou il a changé de ligne ou de
+		// sens — la course gardée serait alors fausse à coup sûr. La première course rattachée la
+		// remplacera.
 		const directionId = vehicle.trip.directionId ?? 0;
+		if (run === undefined && registry.runsOn(vehicleId, routeId, directionId)) {
+			console.warn(
+				`\t✘ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} — course "${vehicle.trip.tripId}" rattachée à aucune journée de service.`,
+			);
+
+			if (registry.refresh(vehicleId, movedPosition, timestamp, occupancyStatus, relocate(vehicleId, movedPosition)))
+				refreshed += 1;
+			continue;
+		}
+
 		const check = verifyVehicle(
 			{ routeId, lineId, directionId },
 			freshVerification(vehicleId, nowSeconds),
