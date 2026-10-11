@@ -25,8 +25,11 @@ export type RelayedTripUpdates = { network: string; tripUpdates: GtfsRealtime.tr
  */
 export function useRelayedNetworks(
 	networks: readonly RelayedNetwork[],
-	/** Le quai du GTFS qu'un `stopId` de la source désigne, les arrêts fusionnés y étant remplacés. */
-	canonicalStopId: (stopId: string) => string,
+	/**
+	 * Le quai du GTFS qu'un `stopId` de la source désigne pour la course du véhicule, les arrêts
+	 * fusionnés ou éclatés y étant remplacés.
+	 */
+	canonicalStopId: (stopId: string, trip: GtfsRealtime.transit_realtime.ITripDescriptor | null | undefined) => string,
 ) {
 	const tripFeeds = new Map<string, Uint8Array>();
 	const vehiclePositions = new Map<string, Map<string, GtfsRealtime.transit_realtime.IVehiclePosition>>();
@@ -155,7 +158,7 @@ function relayTripUpdates(network: RelayedNetwork, feed: GtfsRealtime.transit_re
 function relayVehiclePositions(
 	network: RelayedNetwork,
 	feed: GtfsRealtime.transit_realtime.FeedMessage,
-	canonicalStopId: (stopId: string) => string,
+	canonicalStopId: (stopId: string, trip: GtfsRealtime.transit_realtime.ITripDescriptor | null | undefined) => string,
 ) {
 	const { provider } = network;
 	const relayed = new Map<string, GtfsRealtime.transit_realtime.IVehiclePosition>();
@@ -166,7 +169,7 @@ function relayVehiclePositions(
 		if (!vehicle || number === undefined || !vehicle.position) continue;
 
 		if (vehicle.trip) prefixTrip(provider, vehicle.trip);
-		if (vehicle.stopId) vehicle.stopId = canonicalStopId(withPrefix(provider, vehicle.stopId));
+		if (vehicle.stopId) vehicle.stopId = canonicalStopId(withPrefix(provider, vehicle.stopId), vehicle.trip);
 		vehicle.vehicle = { id: `${provider}:${number}` };
 
 		relayed.set(`VM:${provider}:${number}`, vehicle);

@@ -168,7 +168,17 @@ export type StaticGtfs = {
 	 * le temps réel de TAE continue de les citer (cf. {@link canonicalStopId}).
 	 */
 	mergedStops: Map<string, string>;
+	/**
+	 * stopId → quais qui le remplacent, chacun pour une ligne et un sens (`split_stops.txt`). Le GTFS
+	 * de tout Astuce éclate en plusieurs quais un arrêt que la source ne décrit que d'un tenant, et
+	 * l'arrêt d'origine en disparaît, quand le temps réel de la source continue de le citer (cf.
+	 * {@link canonicalStopId} et {@link canonicalStopIds}).
+	 */
+	splitStops: Map<string, SplitStop[]>;
 };
+
+/** Le quai qui remplace un arrêt éclaté, pour une ligne et un sens donnés. */
+export type SplitStop = { routeId: string; directionId: number; stopId: string };
 
 /** Une station du GTFS : un pôle qui regroupe des quais. */
 export type Station = { name: string; coordinates: Coordinates | null };
@@ -207,11 +217,27 @@ export async function useStaticGtfs(url: string, checkInterval: number, onReload
 }
 
 /**
- * L'arrêt qu'un `stopId` du temps réel désigne dans le GTFS : celui dans lequel il a été fusionné
- * (cf. {@link StaticGtfs.mergedStops}), ou lui-même.
+ * L'arrêt qu'un `stopId` du temps réel désigne dans le GTFS : le quai qui le remplace sur cette ligne
+ * et dans ce sens s'il a été éclaté (cf. {@link StaticGtfs.splitStops}), celui dans lequel il a été
+ * fusionné (cf. {@link StaticGtfs.mergedStops}), ou lui-même. Sans ligne ni sens, un arrêt éclaté
+ * reste tel quel : rien ne dit lequel de ses quais est le bon.
  */
-export function canonicalStopId(gtfs: StaticGtfs, stopId: string): string {
-	return gtfs.mergedStops.get(stopId) ?? stopId;
+export function canonicalStopId(gtfs: StaticGtfs, stopId: string, routeId?: string, directionId?: number): string {
+	const split = gtfs.splitStops
+		.get(stopId)
+		?.find((candidate) => candidate.routeId === routeId && candidate.directionId === directionId);
+	const target = split?.stopId ?? stopId;
+	return gtfs.mergedStops.get(target) ?? target;
+}
+
+/**
+ * Tous les arrêts du GTFS qu'un `stopId` peut désigner, quelles que soient la ligne et le sens : les
+ * quais qui le remplacent s'il a été éclaté, sinon le seul que donne {@link canonicalStopId}.
+ */
+export function canonicalStopIds(gtfs: StaticGtfs, stopId: string): string[] {
+	const splits = gtfs.splitStops.get(stopId);
+	if (splits === undefined) return [canonicalStopId(gtfs, stopId)];
+	return [...new Set(splits.map((split) => canonicalStopId(gtfs, split.stopId)))];
 }
 
 /** Normalise un nom d'arrêt : minuscules, sans accents, alphanumérique compacté. */
@@ -425,6 +451,7 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		fareAreas: new Map(),
 		stations: new Map(),
 		mergedStops: new Map(),
+		splitStops: new Map(),
 	};
 
 	try {
@@ -446,7 +473,8 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 				file.name === "calendar.txt" ||
 				file.name === "calendar_dates.txt" ||
 				file.name === "areas.txt" ||
-				file.name === "merged_stops.txt",
+				file.name === "merged_stops.txt" ||
+				file.name === "split_stops.txt",
 		});
 
 		if (!files["stops.txt"] || !files["trips.txt"]) {
@@ -464,6 +492,7 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		const mergedStops = files["merged_stops.txt"]
 			? buildMergedStops(decoder.decode(files["merged_stops.txt"]))
 			: new Map();
+		const splitStops = files["split_stops.txt"] ? buildSplitStops(decoder.decode(files["split_stops.txt"])) : new Map();
 		const calendars = files["calendar.txt"] ? buildCalendar(decoder.decode(files["calendar.txt"])) : new Map();
 		const calendarExceptions = files["calendar_dates.txt"]
 			? buildCalendarDates(decoder.decode(files["calendar_dates.txt"]))
@@ -505,7 +534,7 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		}
 
 		console.log(
-			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${itineraries} route itineraries, ${tripStopSequences.size} trip schedules, ${shapes.size} shapes, ${serviceTrips.size} services, ${courseVersions.size} courses, ${mergedStops.size} merged stops from GTFS.`,
+			`✓ Loaded ${stopNameIndex.size} stop names, ${routeDirections.size} routes, ${itineraries} route itineraries, ${tripStopSequences.size} trip schedules, ${shapes.size} shapes, ${serviceTrips.size} services, ${courseVersions.size} courses, ${mergedStops.size} merged stops, ${splitStops.size} split stops from GTFS.`,
 		);
 		return {
 			data: {
@@ -531,6 +560,7 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 				fareAreas,
 				stations,
 				mergedStops,
+				splitStops,
 			},
 			signature,
 		};
@@ -716,6 +746,34 @@ function buildMergedStops(csv: string): Map<string, string> {
 	}
 
 	return merged;
+}
+
+/** Les arrêts éclatés et, pour chacun, le quai qui le remplace sur chaque ligne et dans chaque sens. */
+function buildSplitStops(csv: string): Map<string, SplitStop[]> {
+	const split = new Map<string, SplitStop[]>();
+	const rows = parseCsv(csv);
+	const header = rows.next().value;
+	if (!header) return split;
+
+	const sourceCol = header.indexOf("source_stop_id");
+	const routeCol = header.indexOf("route_id");
+	const directionCol = header.indexOf("route_direction");
+	const destCol = header.indexOf("dest_stop_id");
+	if (sourceCol === -1 || routeCol === -1 || directionCol === -1 || destCol === -1) return split;
+
+	for (const row of rows) {
+		const source = row[sourceCol];
+		const routeId = row[routeCol];
+		const directionId = Number(row[directionCol]);
+		const stopId = row[destCol];
+		if (!source || !routeId || !stopId || !row[directionCol] || !Number.isInteger(directionId)) continue;
+
+		const entries = split.get(source);
+		if (entries === undefined) split.set(source, [{ routeId, directionId, stopId }]);
+		else entries.push({ routeId, directionId, stopId });
+	}
+
+	return split;
 }
 
 function buildTrips(csv: string): {

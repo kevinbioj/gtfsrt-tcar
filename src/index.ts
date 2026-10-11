@@ -131,7 +131,17 @@ const modificationIndex = useModificationIndex(detourStore, staticGtfs, () => se
 // Sa présence est constatée ici, ses octets ne seront lus qu'au premier accrochage.
 const roadGraph = useRoadGraph(ROAD_GRAPH_PATH);
 // TAE et TNI : relayés tels quels, sans rien de la vérification qui s'applique à TCAR.
-const relayedNetworks = useRelayedNetworks(RELAYED_NETWORKS, (stopId) => canonicalStopId(staticGtfs.data, stopId));
+// La ligne et le sens d'une course se lisent dans le GTFS d'abord : la source ne donne pas toujours le sens,
+// dont dépend le quai d'un arrêt éclaté.
+const relayedNetworks = useRelayedNetworks(RELAYED_NETWORKS, (stopId, trip) => {
+	const meta = trip?.tripId ? staticGtfs.data.trips.get(trip.tripId) : undefined;
+	return canonicalStopId(
+		staticGtfs.data,
+		stopId,
+		meta?.routeId ?? trip?.routeId ?? undefined,
+		meta?.directionId ?? trip?.directionId ?? undefined,
+	);
+});
 
 const hono = new Hono();
 
@@ -496,7 +506,7 @@ async function poll() {
 				vehicle: { id: `TCAR:${vehicleId}` },
 				position: movedPosition,
 				currentStopSequence: location?.currentStopSequence,
-				stopId: location?.stopId,
+				stopId: location ? canonicalStopId(staticGtfs.data, location.stopId, routeId, directionId) : undefined,
 				currentStatus: location?.currentStatus,
 				timestamp,
 				occupancyStatus,
@@ -787,16 +797,24 @@ async function pollTripUpdates() {
 					(resolvedTripId ? staticGtfs.data.trips.get(resolvedTripId)?.directionId : undefined) ?? 0;
 			}
 
+			const tripRouteId = entity.tripUpdate.trip?.routeId ?? "";
+			const tripMeta = resolvedTripId ? staticGtfs.data.trips.get(resolvedTripId) : undefined;
+
 			entity.tripUpdate.stopTimeUpdate?.forEach((stopTimeUpdate) => {
 				stopTimeUpdate.scheduleRelationship =
 					GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SCHEDULED;
-				// Un arrêt fusionné dans un autre n'existe plus dans le GTFS : sous son ancien identifiant, il ne
-				// se rapprocherait d'aucun quai de l'horaire théorique — ni les suppressions d'arrêt ni le
-				// consommateur du feed ne sauraient le situer.
-				if (stopTimeUpdate.stopId) stopTimeUpdate.stopId = canonicalStopId(staticGtfs.data, stopTimeUpdate.stopId);
+				// Un arrêt fusionné dans un autre, ou éclaté en un quai par ligne et par sens, n'existe plus dans
+				// le GTFS : sous son ancien identifiant, il ne se rapprocherait d'aucun quai de l'horaire
+				// théorique — ni les suppressions d'arrêt ni le consommateur du feed ne sauraient le situer.
+				if (stopTimeUpdate.stopId)
+					stopTimeUpdate.stopId = canonicalStopId(
+						staticGtfs.data,
+						stopTimeUpdate.stopId,
+						tripMeta?.routeId ?? tripRouteId,
+						entity.tripUpdate.trip?.directionId ?? undefined,
+					);
 			});
 
-			const tripRouteId = entity.tripUpdate.trip?.routeId ?? "";
 			const realtime =
 				network !== HOME_NETWORK || hasSourceRealtime(tripRouteId.split(":").at(-1) ?? "", resolvedTripId);
 

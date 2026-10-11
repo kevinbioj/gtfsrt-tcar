@@ -13,7 +13,7 @@ import { SERVED_STOPS } from "../config.js";
 import { networkOf } from "../utils/network.js";
 import { firstImage, htmlToText } from "../utils/sanitize-html.js";
 import {
-	canonicalStopId,
+	canonicalStopIds,
 	normalizeStopName,
 	type OrderedStop,
 	type StaticGtfs,
@@ -1198,19 +1198,27 @@ const IMAGE_MEDIA_TYPES = new Map([
 	["webp", "image/webp"],
 ]);
 
-/** L'alerte, ses arrêts fusionnés remplacés par ceux que le GTFS connaît encore (cf. `canonicalStopId`). */
+/**
+ * L'alerte, ses arrêts fusionnés ou éclatés remplacés par ceux que le GTFS connaît encore (cf.
+ * `canonicalStopIds`). Un arrêt éclaté l'est en tous ses quais, sans égard à la ligne ni au sens :
+ * l'info trafic parle de l'arrêt, pas d'un quai qu'une ligne y dessert.
+ */
 function withCanonicalStops(
 	alert: GtfsRealtime.transit_realtime.IAlert,
 	gtfs: StaticGtfs,
 ): GtfsRealtime.transit_realtime.IAlert {
-	if (!alert.informedEntity?.some((informed) => informed.stopId && gtfs.mergedStops.has(informed.stopId))) {
+	if (
+		!alert.informedEntity?.some(
+			(informed) => informed.stopId && (gtfs.mergedStops.has(informed.stopId) || gtfs.splitStops.has(informed.stopId)),
+		)
+	) {
 		return alert;
 	}
 
 	return {
 		...alert,
-		informedEntity: alert.informedEntity.map((informed) =>
-			informed.stopId ? { ...informed, stopId: canonicalStopId(gtfs, informed.stopId) } : informed,
+		informedEntity: alert.informedEntity.flatMap((informed) =>
+			informed.stopId ? canonicalStopIds(gtfs, informed.stopId).map((stopId) => ({ ...informed, stopId })) : [informed],
 		),
 	};
 }
