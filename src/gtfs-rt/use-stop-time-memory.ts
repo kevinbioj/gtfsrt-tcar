@@ -19,7 +19,8 @@ export type RememberedRun = [number, RememberedStopTime][];
  * l'estimation faite juste avant le passage (cf. `backfillStops`).
  *
  * Les courses sont rangées sous leur journée de service (cf. `tripRun`). Un arrêt est oublié passé
- * son `keepUntil`, que l'appelant fixe ; une course, quand elle n'a plus d'arrêt retenu.
+ * son `keepUntil`, que l'appelant fixe et que chaque relevé de la course repousse pour tous ses
+ * arrêts ; une course, quand elle n'a plus d'arrêt retenu.
  *
  * `restored` rend à la mémoire ce qu'elle tenait au dernier arrêt du producteur (cf. `loadState`) :
  * ce que la source a retiré entre-temps, elle ne le redira pas.
@@ -43,7 +44,14 @@ export function useStopTimeMemory(restored: Iterable<readonly [string, Remembere
 				runs.set(run, remembered);
 			}
 
-			for (const [stopSequence, stopTime] of stops) remembered.set(stopSequence, stopTime);
+			// Une course qui prend du retard repousse sa fin : ses arrêts desservis, que la source ne
+			// redira plus, doivent tenir jusqu'à elle comme les autres.
+			let keepUntil = Number.NEGATIVE_INFINITY;
+			for (const [stopSequence, stopTime] of stops) {
+				remembered.set(stopSequence, stopTime);
+				keepUntil = Math.max(keepUntil, stopTime.keepUntil);
+			}
+			for (const stopTime of remembered.values()) stopTime.keepUntil = Math.max(stopTime.keepUntil, keepUntil);
 		},
 
 		/** Le dernier horaire annoncé pour cet arrêt de la course, `undefined` si on n'en a pas. */

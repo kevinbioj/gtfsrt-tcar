@@ -831,10 +831,16 @@ async function pollTripUpdates() {
 			// retomberait sur le théorique, quand le véhicule est passé. On les lui rend avec ce qu'elle en
 			// annonçait en dernier, d'où la mémoire tenue d'abord (cf. `backfillStops`). Après le départ
 			// annoncé, qu'un horaire rendu au terminus ne doit pas fausser.
+			//
+			// Une course que le SAE a cessé de mettre à jour n'apprend rien à la mémoire : ses horaires
+			// sont des prévisions périmées, qui écraseraient à chaque relevé ce que l'ancien GTFS-RT,
+			// passé après lui, a annoncé de plus frais (cf. {@link LEGACY_TAKEOVER_DELAY}).
 			const midnight = candidateDays.find((day) => day.date === startDate)?.midnight;
 			if (network === HOME_NETWORK && realtime && resolvedTripId && startDate && midnight !== undefined) {
 				const run = tripRun(resolvedTripId, startDate);
-				rememberStopTimes(run, entity.tripUpdate, resolvedTripId, midnight);
+				const updatedAt = Number(entity.tripUpdate.timestamp ?? 0) || nowSeconds;
+				if (entity.legacy || nowSeconds - updatedAt <= LEGACY_TAKEOVER_DELAY)
+					rememberStopTimes(run, entity.tripUpdate, resolvedTripId, midnight);
 				backfillStops(
 					entity.tripUpdate,
 					resolvedTripId,
@@ -995,8 +1001,9 @@ function rebaseStops(tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate, trip
 
 /**
  * Retient l'horaire que la source annonce pour chaque arrêt de la course (cf. `useStopTimeMemory`),
- * jusqu'à {@link STOP_TIME_RETENTION} après son passage — théorique ou annoncé, le plus tardif des
- * deux. Un arrêt sans horaire n'apprend rien : il n'est pas retenu.
+ * jusqu'à {@link STOP_TIME_RETENTION} après la fin de la course — théorique ou annoncée, la plus
+ * tardive des deux : ses arrêts desservis se publient tant qu'elle circule. Un arrêt sans horaire
+ * n'apprend rien : il n'est pas retenu.
  */
 function rememberStopTimes(
 	run: string,
@@ -1004,48 +1011,43 @@ function rememberStopTimes(
 	tripId: string,
 	midnight: number,
 ) {
-	const theoretical = new Map(
-		(staticGtfs.data.tripStopSequences.get(tripId) ?? []).map(({ stopSequence, arrival }) => [
-			stopSequence,
-			midnight + arrival,
-		]),
+	const announced = (tripUpdate.stopTimeUpdate ?? []).flatMap(({ stopSequence, stopId, arrival, departure }) => {
+		const arrivalTime = Number(arrival?.time ?? 0) || undefined;
+		const departureTime = Number(departure?.time ?? 0) || undefined;
+		if (typeof stopSequence !== "number" || !stopId || (arrivalTime === undefined && departureTime === undefined))
+			return [];
+		return [{ stopSequence, stopId, arrival: arrivalTime, departure: departureTime }];
+	});
+
+	const end = Math.max(
+		...(staticGtfs.data.tripStopSequences.get(tripId) ?? []).map(({ arrival }) => midnight + arrival),
+		...announced.map(({ arrival, departure }) => Math.max(arrival ?? 0, departure ?? 0)),
 	);
 
 	stopTimeMemory.remember(
 		run,
-		(tripUpdate.stopTimeUpdate ?? []).flatMap(({ stopSequence, stopId, arrival, departure }) => {
-			const arrivalTime = Number(arrival?.time ?? 0) || undefined;
-			const departureTime = Number(departure?.time ?? 0) || undefined;
-			if (typeof stopSequence !== "number" || !stopId || (arrivalTime === undefined && departureTime === undefined))
-				return [];
-
-			const passage = Math.max(theoretical.get(stopSequence) ?? 0, arrivalTime ?? 0, departureTime ?? 0);
-			const stopTime: RememberedStopTime = {
-				stopId,
-				arrival: arrivalTime,
-				departure: departureTime,
-				keepUntil: passage + STOP_TIME_RETENTION,
-			};
-			return [[stopSequence, stopTime] as const];
+		announced.map(({ stopSequence, ...stopTime }) => {
+			const remembered: RememberedStopTime = { ...stopTime, keepUntil: end + STOP_TIME_RETENTION };
+			return [stopSequence, remembered] as const;
 		}),
 	);
 }
 
 /**
- * Rend à la course les arrêts qui précèdent le premier qu'annonce la source. Sont rendus :
+ * Rend à la course les arrêts qui précèdent le premier qu'annonce la source. Tous ceux dont on a
+ * retenu un horaire (`recall`) sont rendus avec lui : l'estimation faite juste avant le passage, qui
+ * date le passage du véhicule à chacun des arrêts qu'il a desservis.
  *
- *  - tous ceux dont l'heure théorique n'est pas encore venue. Une course en avance les a déjà
- *    desservis et la source n'en parle plus ; sans eux, le voyageur qui s'y présente à l'heure se
- *    verrait promettre le passage théorique d'un véhicule déjà reparti. Leur horaire, désormais
- *    passé, dit au contraire qu'il l'est ;
- *  - quoi qu'il en soit, les `nearby` qui précèdent immédiatement. L'ancien GTFS-RT passe à l'arrêt
- *    suivant dès que le véhicule arrive au sien : celui où il se trouve encore, portes ouvertes,
- *    n'aurait sinon plus d'horaire (cf. {@link LEGACY_BACKFILLED_STOPS}).
+ * Faute d'en avoir jamais reçu — premier relevé de la course, ou arrêt que la source a sauté —, il
+ * n'est rendu, avec le retard ou l'avance du premier arrêt annoncé, que s'il en a besoin :
  *
- * Chacun reprend le dernier horaire que la source en a annoncé (`recall`) : l'estimation faite juste
- * avant le passage, bien plus juste que le retard d'aujourd'hui reporté sur un arrêt desservi il y a
- * dix minutes. Faute d'en avoir jamais reçu — premier relevé de la course, ou arrêt que la source a
- * sauté —, il reçoit le retard ou l'avance du premier arrêt annoncé.
+ *  - son heure théorique n'est pas encore venue. Une course en avance l'a déjà desservi et la source
+ *    n'en parle plus ; sans lui, le voyageur qui s'y présente à l'heure se verrait promettre le
+ *    passage théorique d'un véhicule déjà reparti. Son horaire, désormais passé, dit au contraire
+ *    qu'il l'est ;
+ *  - il est l'un des `nearby` qui précèdent immédiatement. L'ancien GTFS-RT passe à l'arrêt suivant
+ *    dès que le véhicule arrive au sien : celui où il se trouve encore, portes ouvertes, n'aurait
+ *    sinon plus d'horaire (cf. {@link LEGACY_BACKFILLED_STOPS}).
  *
  * Ce retard se déduit de l'horaire annoncé et de l'horaire théorique du GTFS publié, posé sur la
  * journée de service de la course (`midnight`). Le champ `delay` de la source ne s'y prête pas : il
@@ -1071,26 +1073,23 @@ function backfillStops(
 	const scheduled = schedule[index]?.arrival;
 	const delay = announced === 0 || scheduled === undefined ? undefined : announced - (midnight + scheduled);
 
-	const backfilled = schedule
-		.slice(0, index)
-		.filter(({ arrival }, i) => i >= index - nearby || midnight + arrival >= nowSeconds)
-		.flatMap(({ stopSequence, stopId, arrival }) => {
-			const remembered = recall(stopSequence);
-			if (remembered?.stopId === stopId) {
-				return [
-					{
-						stopSequence,
-						stopId,
-						arrival: { time: remembered.arrival ?? remembered.departure },
-						departure: { time: remembered.departure ?? remembered.arrival },
-					},
-				];
-			}
+	const backfilled = schedule.slice(0, index).flatMap(({ stopSequence, stopId, arrival }, i) => {
+		const remembered = recall(stopSequence);
+		if (remembered?.stopId === stopId) {
+			return [
+				{
+					stopSequence,
+					stopId,
+					arrival: { time: remembered.arrival ?? remembered.departure },
+					departure: { time: remembered.departure ?? remembered.arrival },
+				},
+			];
+		}
 
-			if (delay === undefined) return [];
-			const event = { time: midnight + arrival + delay };
-			return [{ stopSequence, stopId, arrival: event, departure: event }];
-		});
+		if (delay === undefined || (i < index - nearby && midnight + arrival < nowSeconds)) return [];
+		const event = { time: midnight + arrival + delay };
+		return [{ stopSequence, stopId, arrival: event, departure: event }];
+	});
 
 	tripUpdate.stopTimeUpdate = [...backfilled, ...(tripUpdate.stopTimeUpdate ?? [])];
 }

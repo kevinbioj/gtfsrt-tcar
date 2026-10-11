@@ -89,11 +89,10 @@ export const LEGACY_TAKEOVER_DELAY = Temporal.Duration.from({ minutes: 3 }).tota
  */
 export const LEGACY_BACKFILLED_STOPS = 2;
 /**
- * Durée pendant laquelle on retient le dernier horaire qu'une source a annoncé pour un arrêt, au-delà
- * de son passage — théorique ou annoncé, le plus tardif des deux (cf. `useStopTimeMemory`). C'est de
- * quoi le rendre tant qu'il peut l'être : jusqu'à son heure théorique pour une course en avance, et
- * le temps que le véhicule s'y attarde pour les arrêts qui précèdent immédiatement le premier annoncé
- * (cf. {@link LEGACY_BACKFILLED_STOPS}).
+ * Durée pendant laquelle on retient le dernier horaire qu'une source a annoncé pour les arrêts d'une
+ * course, au-delà de sa fin — théorique ou annoncée, la plus tardive des deux (cf.
+ * `useStopTimeMemory`). Les arrêts desservis se publient ainsi avec leur horaire de passage tant que
+ * la course circule, et un peu au-delà, le temps qu'une source en retard la termine.
  */
 export const STOP_TIME_RETENTION = Temporal.Duration.from({ minutes: 30 }).total("seconds");
 /**
