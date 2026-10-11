@@ -1,4 +1,5 @@
 import { unzipSync } from "fflate";
+import type GtfsRealtime from "gtfs-realtime-bindings";
 
 import { LEGACY_TERMINUS_TOLERANCE } from "../config.js";
 import { type Coordinates, haversine } from "../utils/geometry.js";
@@ -18,6 +19,8 @@ export type LegacyTrip = {
 	directionId: number;
 	/** Arrivées théoriques, arrêt après arrêt, en secondes depuis minuit de la journée de service. */
 	arrivals: number[];
+	/** Rangs des arrêts, dans le même ordre que {@link arrivals}. */
+	stopSequences: number[];
 	origin: Coordinates | undefined;
 	destination: Coordinates | undefined;
 };
@@ -107,6 +110,41 @@ export function matchLegacyTrip(
 
 	matcher.results.set(tripId, match);
 	return match;
+}
+
+/**
+ * Un trip update de l'ancien GTFS-RT, rapporté au GTFS publié, ou `undefined` lorsque sa course n'y a
+ * pas d'équivalent (cf. {@link matchLegacyTrip}) ou qu'aucun de ses arrêts ne s'y reporte.
+ *
+ * Ses arrêts portent le `stop_code` de l'ancien GTFS, que rien ne relie au GTFS publié : seul leur
+ * rang compte. La course publiée qui lui correspond dessert les mêmes arrêts aux mêmes heures, le
+ * même arrêt est donc à la même place dans l'une et l'autre. Une course rapprochée sur ses seuls
+ * terminus n'a pas forcément autant d'arrêts : la place n'y dit plus rien, et elle est écartée.
+ */
+export function legacyTripUpdate(
+	legacyTrips: ReadonlyMap<string, LegacyTrip>,
+	gtfs: StaticGtfs,
+	tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate,
+): GtfsRealtime.transit_realtime.ITripUpdate | undefined {
+	const legacyId = tripUpdate.trip?.tripId;
+	const legacy = legacyId ? legacyTrips.get(legacyId) : undefined;
+	if (!legacyId || legacy === undefined) return undefined;
+
+	const tripId = matchLegacyTrip(legacyTrips, gtfs, legacyId);
+	const schedule = tripId === undefined ? undefined : gtfs.tripStopSequences.get(tripId);
+	if (tripId === undefined || schedule?.length !== legacy.stopSequences.length) return undefined;
+
+	const stopTimeUpdate = (tripUpdate.stopTimeUpdate ?? []).flatMap((update) => {
+		const stop = schedule[legacy.stopSequences.indexOf(update.stopSequence ?? -1)];
+		return stop === undefined ? [] : [{ ...update, stopSequence: stop.stopSequence, stopId: stop.stopId }];
+	});
+	if (stopTimeUpdate.length === 0) return undefined;
+
+	return {
+		trip: { tripId, routeId: legacy.routeId, directionId: legacy.directionId },
+		stopTimeUpdate,
+		timestamp: tripUpdate.timestamp,
+	};
 }
 
 // ---
@@ -255,6 +293,7 @@ async function loadLegacyGtfs(
 			trips.set(tripId, {
 				...tripMeta,
 				arrivals: stops.map(({ arrival }) => arrival),
+				stopSequences: stops.map(({ stopSequence }) => stopSequence),
 				origin: coordinates.get(stops[0]?.stopId ?? ""),
 				destination: coordinates.get(stops.at(-1)?.stopId ?? ""),
 			});

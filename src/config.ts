@@ -70,6 +70,18 @@ export const TRIP_UPDATES_INTERVAL = Temporal.Duration.from({ seconds: 20 }).tot
  */
 export const VERIFICATION_FEED_URL = "https://reseau-astuce.fr/ftp/gtfsrt/Astuce.VehiclePosition.pb";
 /**
+ * Les trip updates de l'ancien GTFS-RT. Ils prennent le relais du flux SAE pour les courses dont il
+ * ne parle pas, ou plus depuis {@link LEGACY_TAKEOVER_DELAY} — toutes, lorsqu'il est en panne (cf.
+ * `legacyTripUpdate`). Relevés au rythme de {@link TRIP_UPDATES_INTERVAL}.
+ */
+export const LEGACY_TRIP_UPDATES_URL = "https://reseau-astuce.fr/ftp/gtfsrt/Astuce.TripUpdate.pb";
+/**
+ * Délai sans mise à jour du flux SAE au-delà duquel l'ancien GTFS-RT reprend une course que le SAE
+ * publiait. En deçà, le SAE garde la main : les deux flux ne se relaient pas d'un relevé à l'autre au
+ * gré d'un trou passager.
+ */
+export const LEGACY_TAKEOVER_DELAY = Temporal.Duration.from({ minutes: 3 }).total("seconds");
+/**
  * Rafraîchissement du flux de vérification. Il republie ses relevés à la minute, mais il est devenu
  * la source des positions publiées : l'interroger moins souvent que le flux SAE ferait traîner tout
  * le feed d'autant. D'où le même rythme que {@link VEHICLE_POSITIONS_INTERVAL} — c'est un fichier statique léger.

@@ -11,6 +11,8 @@ import {
 	DETOURS_DB_PATH,
 	GTFS_CHECK_INTERVAL,
 	LEGACY_GTFS_URL,
+	LEGACY_TAKEOVER_DELAY,
+	LEGACY_TRIP_UPDATES_URL,
 	NON_REALTIME_DESTINATIONS,
 	PORT,
 	PREFERRED_POSITION_STALENESS,
@@ -46,7 +48,7 @@ import {
 	serviceDays,
 	tripRun,
 } from "./gtfs-rt/scheduled-trips.js";
-import { matchLegacyTrip, useLegacyGtfs } from "./gtfs-rt/use-legacy-gtfs.js";
+import { legacyTripUpdate, matchLegacyTrip, useLegacyGtfs } from "./gtfs-rt/use-legacy-gtfs.js";
 import { type Movement, useMovementTracker } from "./gtfs-rt/use-movement-tracker.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
 import { useRelayedNetworks } from "./gtfs-rt/use-relayed-networks.js";
@@ -90,6 +92,12 @@ console.log(` ,----.,--------.,------.,---.        ,------.,--------. ,--------.
 const restored = loadState(STATE_CACHE_PATH, Math.floor(Date.now() / 1000));
 
 const store = useRealtimeStore();
+/**
+ * Course et journée de service (cf. `tripRun`) → dernière mise à jour que le flux SAE en a publiée, en
+ * secondes epoch. Elle survit aux relevés : c'est elle qui dit quand l'ancien GTFS-RT peut reprendre
+ * une course que le SAE a cessé de tenir à jour (cf. {@link LEGACY_TAKEOVER_DELAY}).
+ */
+const sourceTripUpdatedAt = new Map<string, number>();
 const registry = useVehicleRegistry(restored?.vehicles);
 const movementTracker = useMovementTracker(restored?.movements);
 const vehicleOccupancyStatuses = useVehicleOccupancyStatuses();
@@ -636,14 +644,13 @@ function freshVerification(vehicleId: string, nowSeconds: number): VerifiedVehic
 
 async function pollTripUpdates() {
 	try {
-		const response = await fetch(TRIP_UPDATES_URL);
-		if (!response.ok || response.status === 204) {
-			console.error(`✘ Trip updates fetch failed (HTTP ${response.status}).`);
-			return;
-		}
-
-		const buffer = Buffer.from(await response.arrayBuffer());
-		const feed = GtfsRealtime.transit_realtime.FeedMessage.decode(buffer);
+		// L'ancien GTFS-RT prend le relais du flux SAE, course par course : c'est lui qui alimente le feed
+		// quand le SAE est en panne. Faute de l'un comme de l'autre, le relevé précédent est conservé.
+		const [feed, legacyFeed] = await Promise.all([
+			fetchFeed(TRIP_UPDATES_URL, "Trip updates"),
+			fetchFeed(LEGACY_TRIP_UPDATES_URL, "Legacy trip updates"),
+		]);
+		if (feed === undefined && legacyFeed === undefined) return;
 
 		const nowSeconds = Math.floor(Date.now() / 1000);
 
@@ -658,21 +665,45 @@ async function pollTripUpdates() {
 		// Les courses dont le flux source parle : celles-là n'ont pas à être reconstruites depuis
 		// l'horaire théorique, ce qu'il en annonce l'emportant toujours.
 		const covered = new Set<string>();
+		/** Les courses déjà reprises de l'ancien GTFS-RT, pour qu'il ne serve pas deux fois la même. */
+		const legacyRuns = new Set<string>();
+
+		// Passé le délai de reprise, ce que le SAE a publié d'une course n'empêche plus rien.
+		for (const [run, updatedAt] of sourceTripUpdatedAt)
+			if (nowSeconds - updatedAt > LEGACY_TAKEOVER_DELAY) sourceTripUpdatedAt.delete(run);
 		/** Réseau → courses que sa source annonce et qui sortent dans le feed. */
 		const sourceTrips = new Map<string, number>();
 		let realtimeTrips = 0;
 		let scheduleOnly = 0;
 		let cancelledTrips = 0;
 		let unresolvedTrips = 0;
+		let legacyTrips = 0;
+		let discardedLegacyTrips = 0;
 
-		// Le flux TCAR, puis ceux des réseaux relayés : tous suivent le même chemin, le GTFS les connaissant
-		// tous. Seul le tri des lignes sans vrai temps réel est propre à TCAR (cf. `REALTIME_LINES`).
+		// Le flux TCAR, puis l'ancien GTFS-RT, puis les réseaux relayés : tous suivent le même chemin, le
+		// GTFS les connaissant tous. Seul le tri des lignes sans vrai temps réel est propre à TCAR (cf.
+		// `REALTIME_LINES`). L'ancien GTFS-RT passe après le flux SAE, qui l'emporte sur les courses dont
+		// tous deux parlent (cf. `covered`) ; ses courses sont rapportées au GTFS publié avant d'entrer
+		// (cf. `legacyTripUpdate`).
+		const legacyEntities = (legacyFeed?.entity ?? []).flatMap(({ id, tripUpdate }) => {
+			const converted = tripUpdate ? legacyTripUpdate(legacyGtfs.trips, staticGtfs.data, tripUpdate) : undefined;
+			if (converted === undefined) discardedLegacyTrips += 1;
+			return converted ? [{ network: HOME_NETWORK, id, tripUpdate: converted, legacy: true }] : [];
+		});
+		// Les courses que l'ancien GTFS-RT annonce sous leur propre nom. Il annonce parfois en même temps
+		// celle d'une autre grille que la plus proche ramène à l'une d'elles : c'est alors l'annonce
+		// directe qui fait foi.
+		const legacyAnnounced = new Set(legacyEntities.map(({ tripUpdate }) => tripUpdate.trip?.tripId));
+
 		const entities = [
-			...feed.entity.flatMap(({ id, tripUpdate }) => (tripUpdate ? [{ network: HOME_NETWORK, id, tripUpdate }] : [])),
+			...(feed?.entity ?? []).flatMap(({ id, tripUpdate }) =>
+				tripUpdate ? [{ network: HOME_NETWORK, id, tripUpdate, legacy: false }] : [],
+			),
+			...legacyEntities,
 			...relayedNetworks
 				.tripUpdates()
 				.flatMap(({ network, tripUpdates }) =>
-					tripUpdates.map((tripUpdate) => ({ network, id: tripUpdate.trip?.tripId ?? "", tripUpdate })),
+					tripUpdates.map((tripUpdate) => ({ network, id: tripUpdate.trip?.tripId ?? "", tripUpdate, legacy: false })),
 				),
 		];
 
@@ -689,9 +720,39 @@ async function pollTripUpdates() {
 			//
 			// Le `start_date` que le producteur déclare parfois lui-même n'est plus retenu : une source qui
 			// se trompe de version de la course se trompe de journée par la même occasion.
-			const run = tripId
-				? resolveServiceRun(staticGtfs.data, candidateDays, tripId, announcedTime(entity.tripUpdate) ?? nowSeconds)
-				: undefined;
+			//
+			// L'ancien GTFS-RT, lui, se trompe de grille, comme pour les positions : il annonce le dimanche des
+			// courses du samedi. On se rabat alors sur la plus proche qui circule (cf. `resolveNearestRun`).
+			const reference = announcedTime(entity.tripUpdate) ?? nowSeconds;
+			const run = !tripId
+				? undefined
+				: entity.legacy
+					? resolveNearestRun(staticGtfs.data, candidateDays, tripId, reference)
+					: resolveServiceRun(staticGtfs.data, candidateDays, tripId, reference);
+
+			// Faute de course qui circule, celle de l'ancien GTFS-RT est écartée : à la différence du flux SAE,
+			// ce qu'il annonce hors de toute journée de service est faux, pas en avance sur le GTFS. Celle que
+			// le flux SAE a déjà servie n'a pas à l'être une seconde fois, ni celle qu'il annonce lui-même
+			// sous son propre nom (cf. `legacyAnnounced`).
+			//
+			// Une course que le flux SAE publie lui reste tant qu'il l'a mise à jour depuis moins de
+			// {@link LEGACY_TAKEOVER_DELAY} : l'ancien GTFS-RT ne la reprend qu'au-delà, et remplace alors ce
+			// que le SAE en dit encore, sous le même identifiant d'entité.
+			if (entity.legacy) {
+				if (
+					run === undefined ||
+					nowSeconds - (sourceTripUpdatedAt.get(tripRun(run.tripId, run.date)) ?? Number.NEGATIVE_INFINITY) <=
+						LEGACY_TAKEOVER_DELAY ||
+					legacyRuns.has(tripRun(run.tripId, run.date)) ||
+					(run.tripId !== tripId && legacyAnnounced.has(run.tripId))
+				) {
+					discardedLegacyTrips += 1;
+					continue;
+				}
+				if (run.tripId !== tripId) rebaseStops(entity.tripUpdate, run.tripId);
+				legacyRuns.add(tripRun(run.tripId, run.date));
+				legacyTrips += 1;
+			}
 
 			if (tripId && run === undefined) {
 				unresolvedTrips += 1;
@@ -736,7 +797,17 @@ async function pollTripUpdates() {
 				if (departure !== undefined) store.tripDepartures.set(resolvedTripId, departure);
 			}
 
-			if (resolvedTripId && startDate) covered.add(tripRun(resolvedTripId, startDate));
+			if (resolvedTripId && startDate) {
+				covered.add(tripRun(resolvedTripId, startDate));
+
+				// La mise à jour est datée par le SAE lui-même : une course qu'il continue de publier sans plus la
+				// rafraîchir vieillit comme une course qu'il a lâchée. Faute de date, c'est celle du relevé ; une
+				// date à venir ne compte que pour maintenant.
+				if (network === HOME_NETWORK && !entity.legacy) {
+					const updatedAt = Number(entity.tripUpdate.timestamp ?? 0) || nowSeconds;
+					sourceTripUpdatedAt.set(tripRun(resolvedTripId, startDate), Math.min(updatedAt, nowSeconds));
+				}
+			}
 
 			// L'identifiant est celui de la course retenue, et non celui qu'annonce l'entité : la course a pu
 			// être réappariée, et il désignerait alors l'exemplaire d'une autre journée. C'est le moule des
@@ -808,7 +879,7 @@ async function pollTripUpdates() {
 		for (const [id, tripUpdate] of scheduled) store.tripUpdates.set(id, tripUpdate);
 
 		console.log(
-			`✓ ${store.tripUpdates.size} trip updates (${[...sourceTrips].map(([network, count]) => `${count} ${network}`).join(", ")} from sources; ${realtimeTrips} realtime, ${scheduleOnly} source without realtime, ${cancelledTrips} source cancelled, ${scheduled.size} rebuilt from schedule, ${store.tripDepartures.size} departures announced, ${unresolvedTrips} unresolved trips).`,
+			`✓ ${store.tripUpdates.size} trip updates (${[...sourceTrips].map(([network, count]) => `${count} ${network}`).join(", ")} from sources; ${realtimeTrips} realtime, ${scheduleOnly} source without realtime, ${cancelledTrips} source cancelled, ${scheduled.size} rebuilt from schedule, ${store.tripDepartures.size} departures announced, ${unresolvedTrips} unresolved trips, ${legacyTrips} relayed from the legacy feed, ${discardedLegacyTrips} legacy trips discarded).`,
 		);
 
 		rebuildDetourEntities();
@@ -837,6 +908,42 @@ function rebuildDetourEntities() {
 	} catch (cause) {
 		console.error("✘ Failed to build detour entities:", cause);
 	}
+}
+
+/** Le GTFS-RT publié à cette adresse, ou `undefined` s'il n'a pas pu être relevé. */
+async function fetchFeed(url: string, label: string): Promise<GtfsRealtime.transit_realtime.FeedMessage | undefined> {
+	try {
+		const response = await fetch(url);
+		if (!response.ok || response.status === 204) {
+			console.error(`✘ ${label} fetch failed (HTTP ${response.status}).`);
+			return undefined;
+		}
+
+		return GtfsRealtime.transit_realtime.FeedMessage.decode(Buffer.from(await response.arrayBuffer()));
+	} catch (cause) {
+		console.error(`✘ ${label} fetch failed:`, cause);
+		return undefined;
+	}
+}
+
+/**
+ * Reporte les arrêts d'un trip update sur une autre course, d'après leur quai : la course retenue à
+ * la place de celle qu'annonçait la source (cf. `resolveNearestRun`) part et arrive aux mêmes quais,
+ * mais ne dessert pas forcément les mêmes entre les deux, ni au même rang. Un arrêt qu'elle ne
+ * dessert pas est écarté. Les quais se cherchent dans l'ordre, pour qu'une ligne qui repasse par le
+ * même ne le confonde pas avec son second passage.
+ */
+function rebaseStops(tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate, tripId: string) {
+	const schedule = staticGtfs.data.tripStopSequences.get(tripId) ?? [];
+	let from = 0;
+
+	tripUpdate.stopTimeUpdate = (tripUpdate.stopTimeUpdate ?? []).flatMap((stopTimeUpdate) => {
+		const index = schedule.findIndex(({ stopId }, i) => i >= from && stopId === stopTimeUpdate.stopId);
+		if (index === -1) return [];
+
+		from = index + 1;
+		return [{ ...stopTimeUpdate, stopSequence: schedule[index]?.stopSequence }];
+	});
 }
 
 /**
