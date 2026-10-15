@@ -3,6 +3,8 @@ import GtfsRealtime from "gtfs-realtime-bindings";
 const CANCELED = GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.CANCELED;
 
 export function createFeed(
+	/** La dernière modification du contenu, en secondes epoch (cf. `useChangeTracker`). */
+	timestamp: number,
 	tripUpdates: Map<string, GtfsRealtime.transit_realtime.ITripUpdate> | null,
 	vehiclePositions: Map<string, GtfsRealtime.transit_realtime.IVehiclePosition> | null,
 	/**
@@ -21,7 +23,7 @@ export function createFeed(
 		header: {
 			gtfsRealtimeVersion: "2.0",
 			incrementality: GtfsRealtime.transit_realtime.FeedHeader.Incrementality.FULL_DATASET,
-			timestamp: Math.floor(Temporal.Now.instant().epochMilliseconds / 1000),
+			timestamp,
 		},
 		entity: [
 			...(tripUpdates !== null

@@ -7,12 +7,27 @@ import { createFeed } from "./create-feed.js";
 export function handleRequest(
 	c: Context,
 	output: "protobuf" | "json",
+	timestamp: number,
 	tripUpdates: Map<string, GtfsRealtime.transit_realtime.ITripUpdate> | null,
 	vehiclePositions: Map<string, GtfsRealtime.transit_realtime.IVehiclePosition> | null,
 	detourEntities: readonly GtfsRealtime.transit_realtime.IFeedEntity[] | null = null,
 	alertEntities: readonly GtfsRealtime.transit_realtime.IFeedEntity[] | null = null,
 ) {
-	const feed = createFeed(tripUpdates, vehiclePositions, detourEntities, alertEntities);
+	if (timestamp > 0) {
+		c.header("Last-Modified", new Date(timestamp * 1000).toUTCString());
+
+		const ifModifiedSince = Date.parse(c.req.header("If-Modified-Since") ?? "");
+		if (!Number.isNaN(ifModifiedSince) && timestamp * 1000 <= ifModifiedSince) {
+			return c.body(null, 304);
+		}
+	}
+
+	if (c.req.method === "HEAD") {
+		c.header("Content-Type", output === "json" ? "application/json" : "application/octet-stream");
+		return c.body(null, 200);
+	}
+
+	const feed = createFeed(timestamp, tripUpdates, vehiclePositions, detourEntities, alertEntities);
 
 	if (output === "json") {
 		c.header("Content-Type", "application/json");

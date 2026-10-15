@@ -50,6 +50,7 @@ import {
 	serviceDays,
 	tripRun,
 } from "./gtfs-rt/scheduled-trips.js";
+import { useChangeTracker } from "./gtfs-rt/track-changes.js";
 import { legacyTripUpdate, matchLegacyTrip, useLegacyGtfs } from "./gtfs-rt/use-legacy-gtfs.js";
 import { type Movement, useMovementTracker } from "./gtfs-rt/use-movement-tracker.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
@@ -96,6 +97,13 @@ const restored = loadState(STATE_CACHE_PATH, Math.floor(Date.now() / 1000));
 
 const store = useRealtimeStore();
 /**
+ * La date de dernière modification de chaque flux, réseau par réseau, sous « flux:réseau » : celle que
+ * portent `header.timestamp` et `Last-Modified`. Les trip updates et les infos trafic se datent à leur
+ * relevé (cf. `stampTripUpdates`, `stampAlerts`) ; les positions à la requête, car un véhicule sort du
+ * feed en vieillissant, sans attendre de relevé (cf. `positionsModifiedAt`).
+ */
+const changes = useChangeTracker();
+/**
  * Course et journée de service (cf. `tripRun`) → dernière mise à jour que le flux SAE en a publiée, en
  * secondes epoch. Elle survit aux relevés : c'est elle qui dit quand l'ancien GTFS-RT peut reprendre
  * une course que le SAE a cessé de tenir à jour (cf. {@link LEGACY_TAKEOVER_DELAY}).
@@ -124,9 +132,10 @@ const detourStore = useDetourStore(DETOURS_DB_PATH);
 // ce qui crée celles que l'IA propose sans ambiguïté, et qui tient à jour les arrêts à sauter. Le
 // premier relevé attend le réseau, l'index est donc là avant lui — celles saisies à la main ne
 // dépendent pas du flux, et n'ont pas à disparaître de l'interface tant qu'il n'a pas répondu.
-const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs, () =>
-	modificationIndex.reindex(),
-);
+const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs, () => {
+	modificationIndex.reindex();
+	stampAlerts();
+});
 const modificationIndex = useModificationIndex(detourStore, staticGtfs, () => serviceAlerts.alerts);
 // Sa présence est constatée ici, ses octets ne seront lus qu'au premier accrochage.
 const roadGraph = useRoadGraph(ROAD_GRAPH_PATH);
@@ -169,7 +178,10 @@ if (ADMIN_USERNAME && ADMIN_PASSWORD) {
 			serviceAlerts,
 			modificationIndex,
 			roadGraph,
-			rebuild: () => rebuildDetourEntities(),
+			rebuild: () => {
+				rebuildDetourEntities();
+				stampTripUpdates();
+			},
 		}),
 	);
 	console.log("➔ Detour administration mounted on /admin.");
@@ -239,29 +251,83 @@ const publishedAlerts = (networks: ReadonlySet<string>) =>
 		.filter((alert) => [...alert.networks].some((network) => networks.has(network)))
 		.map((alert) => alert.entity);
 
-hono.get("/vehicle-positions", (c) => handleRequest(c, "protobuf", null, publishedPositions(requestedNetworks(c))));
-hono.get("/vehicle-positions.json", (c) => handleRequest(c, "json", null, publishedPositions(requestedNetworks(c))));
+/** La dernière modification d'un flux, la plus récente parmi les réseaux demandés (cf. `changes`). */
+const modifiedAt = (feed: string, networks: ReadonlySet<string>) =>
+	Math.max(0, ...[...networks].map((network) => changes.modifiedAt(`${feed}:${network}`)));
+
+/** Constate les positions à émettre, réseau par réseau, et rend la date de leur dernière modification. */
+const positionsModifiedAt = (
+	positions: Map<string, GtfsRealtime.transit_realtime.IVehiclePosition>,
+	networks: ReadonlySet<string>,
+) =>
+	Math.max(
+		0,
+		...[...networks].map((network) =>
+			changes.stamp(`vehicle-positions:${network}`, [...ofNetworks(positions, new Set([network]))]),
+		),
+	);
+
+hono.get("/vehicle-positions", (c) => {
+	const networks = requestedNetworks(c);
+	const positions = publishedPositions(networks);
+	return handleRequest(c, "protobuf", positionsModifiedAt(positions, networks), null, positions);
+});
+hono.get("/vehicle-positions.json", (c) => {
+	const networks = requestedNetworks(c);
+	const positions = publishedPositions(networks);
+	return handleRequest(c, "json", positionsModifiedAt(positions, networks), null, positions);
+});
 hono.get("/trip-updates", (c) => {
-	const networks = requestedNetworks(c);
-	return handleRequest(c, "protobuf", publishedTripUpdates(networks), null, publishedDetourEntities(networks));
-});
-hono.get("/trip-updates.json", (c) => {
-	const networks = requestedNetworks(c);
-	return handleRequest(c, "json", publishedTripUpdates(networks), null, publishedDetourEntities(networks));
-});
-hono.get("/service-alerts", (c) =>
-	handleRequest(c, "protobuf", null, null, null, publishedAlerts(requestedNetworks(c))),
-);
-hono.get("/service-alerts.json", (c) =>
-	handleRequest(c, "json", null, null, null, publishedAlerts(requestedNetworks(c))),
-);
-hono.get("/", (c) => {
 	const networks = requestedNetworks(c);
 	return handleRequest(
 		c,
-		c.req.query("format") === "json" ? "json" : "protobuf",
+		"protobuf",
+		modifiedAt("trip-updates", networks),
 		publishedTripUpdates(networks),
-		publishedPositions(networks),
+		null,
+		publishedDetourEntities(networks),
+	);
+});
+hono.get("/trip-updates.json", (c) => {
+	const networks = requestedNetworks(c);
+	return handleRequest(
+		c,
+		"json",
+		modifiedAt("trip-updates", networks),
+		publishedTripUpdates(networks),
+		null,
+		publishedDetourEntities(networks),
+	);
+});
+hono.get("/service-alerts", (c) => {
+	const networks = requestedNetworks(c);
+	return handleRequest(
+		c,
+		"protobuf",
+		modifiedAt("service-alerts", networks),
+		null,
+		null,
+		null,
+		publishedAlerts(networks),
+	);
+});
+hono.get("/service-alerts.json", (c) => {
+	const networks = requestedNetworks(c);
+	return handleRequest(c, "json", modifiedAt("service-alerts", networks), null, null, null, publishedAlerts(networks));
+});
+hono.get("/", (c) => {
+	const networks = requestedNetworks(c);
+	const positions = publishedPositions(networks);
+	return handleRequest(
+		c,
+		c.req.query("format") === "json" ? "json" : "protobuf",
+		Math.max(
+			modifiedAt("trip-updates", networks),
+			positionsModifiedAt(positions, networks),
+			modifiedAt("service-alerts", networks),
+		),
+		publishedTripUpdates(networks),
+		positions,
 		publishedDetourEntities(networks),
 		publishedAlerts(networks),
 	);
@@ -938,6 +1004,27 @@ async function pollTripUpdates() {
 		rebuildDetourEntities();
 	} catch (cause) {
 		console.error("✘ Trip updates poll error:", cause);
+	} finally {
+		// Même un relevé en échec a pu toucher au store : c'est ce qui est servi qui se date.
+		stampTripUpdates();
+	}
+}
+
+/**
+ * Date les trip updates de chaque réseau, avec les modifications qui les accompagnent : leur date ne
+ * bouge que si leur contenu a changé depuis le dernier relevé (cf. `changes`).
+ */
+function stampTripUpdates() {
+	for (const network of ALL_NETWORKS) {
+		const networks = new Set([network]);
+		changes.stamp(`trip-updates:${network}`, [[...publishedTripUpdates(networks)], publishedDetourEntities(networks)]);
+	}
+}
+
+/** Date les infos trafic de chaque réseau, comme `stampTripUpdates` les trip updates. */
+function stampAlerts() {
+	for (const network of ALL_NETWORKS) {
+		changes.stamp(`service-alerts:${network}`, publishedAlerts(new Set([network])));
 	}
 }
 
