@@ -1,9 +1,11 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
 import {
+	type AlertAnalysis,
 	type AlertInput,
 	type AlertPeriod,
 	type AlertRouteContext,
 	analyzeAlerts,
+	cachedAnalyses,
 	type DailyWindow,
 	flushCache,
 	pruneCache,
@@ -113,9 +115,15 @@ type ServedStopIndex = Map<string, Map<string, Set<string>>>;
 export type AlertEntity = { networks: ReadonlySet<string>; entity: GtfsRealtime.transit_realtime.IFeedEntity };
 
 type AlertsState = { headerTimestamp: string | null };
-type PollResult = {
-	alerts: AnalyzedAlert[];
+
+/** Un relevé du flux amont : les infos trafic à republier, et de quoi les analyser. */
+type AlertsSnapshot = {
 	entities: AlertEntity[];
+	inputs: AlertInput[];
+	routesById: Map<string, Set<string>>;
+	/** Les alertes telles que republiées : l'analyse leur ajoute leur période d'impact. */
+	republishedById: Map<string, GtfsRealtime.transit_realtime.IAlert>;
+	feedAlertIds: Set<string>;
 	headerTimestamp: string | null;
 };
 
@@ -133,13 +141,17 @@ let currentInterval: NodeJS.Timeout | undefined;
  * Les infos trafic, relevées puis analysées.
  *
  * Ce module ne fait que lire et analyser : ce qu'on en tire — les modifications, les suggestions, les
- * arrêts à sauter — se rebâtit ailleurs, à chaque relevé, par `onAnalyzed` (cf. `useModificationIndex`).
+ * arrêts à sauter — se rebâtit ailleurs, à chaque analyse, par `onAnalyzed` (cf. `useModificationIndex`).
+ *
+ * Les infos trafic republiées sont toujours celles du dernier relevé réussi : elles sont publiées dès
+ * le relevé (`onPublished`), sans attendre l'IA. L'analyse suit, en arrière-plan ; elle ajoute leur
+ * période d'impact à celles que le cache ne connaissait pas encore.
  */
 export function useServiceAlerts(
 	url: string,
 	pollInterval: number,
 	gtfs: { data: StaticGtfs },
-	onAnalyzed: () => void,
+	{ onPublished, onAnalyzed }: { onPublished: () => void; onAnalyzed: () => void },
 ) {
 	const state: AlertsState = { headerTimestamp: null };
 	const resource = {
@@ -153,23 +165,60 @@ export function useServiceAlerts(
 		entities: [] as AlertEntity[],
 		importedAt: Temporal.Now.instant(),
 	};
-	let running = false;
+	let fetching = false;
+	let analyzing = false;
+	/** Le dernier relevé publié qui attend son analyse. */
+	let pending: AlertsSnapshot | undefined;
 
-	// Le premier build (analyse IA de toutes les alertes) tourne en arrière-plan : il ne doit
-	// pas immobiliser le démarrage du serveur. L'index se remplit dès que l'analyse est prête.
 	const runPoll = async () => {
-		if (running) return; // évite tout chevauchement si un poll dépasse l'intervalle
-		running = true;
+		if (fetching) return; // évite tout chevauchement si un relevé dépasse l'intervalle
+		fetching = true;
 		try {
-			const next = await pollAlerts(url, gtfs.data, state);
-			if (!next) return; // flux inchangé, erreur, ou GTFS indisponible → on garde l'index courant
-			resource.alerts = next.alerts;
-			resource.entities = next.entities;
-			onAnalyzed();
+			const snapshot = await fetchAlerts(url, gtfs.data, state);
+			if (snapshot === null) return; // erreur, ou GTFS indisponible → on garde le relevé courant
+
+			// Les périodes d'impact que le cache connaît sont posées avant publication : une alerte déjà
+			// analysée ne perd pas la sienne le temps que l'analyse repasse.
+			applyImpactPeriods(snapshot, cachedAnalyses(snapshot.inputs), Temporal.Now.instant());
+			resource.entities = snapshot.entities;
 			resource.importedAt = Temporal.Now.instant();
-			state.headerTimestamp = next.headerTimestamp;
+			state.headerTimestamp = snapshot.headerTimestamp;
+			onPublished();
+
+			pending = snapshot;
+			void runAnalysis();
 		} finally {
-			running = false;
+			fetching = false;
+		}
+	};
+
+	// L'analyse rejoue TOUJOURS, même à flux inchangé : les périodes qu'elle porte ont des heures
+	// (travaux de nuit), et l'indexation qui suit doit les re-jauger. Aucun réappel IA n'en découle :
+	// à texte inchangé, `analyzeAlerts` sert entièrement le cache.
+	const runAnalysis = async () => {
+		if (analyzing) return; // celle en cours reprendra le dernier relevé en finissant
+		analyzing = true;
+		try {
+			while (pending !== undefined) {
+				const snapshot = pending;
+				pending = undefined;
+				try {
+					const analyses = await analyzeAlerts(snapshot.inputs);
+					// Un relevé plus récent a été publié entre-temps : c'est lui qu'il reste à analyser.
+					if (resource.entities !== snapshot.entities) continue;
+
+					applyImpactPeriods(snapshot, analyses, Temporal.Now.instant());
+					resource.alerts = analyzedAlerts(snapshot, analyses, gtfs.data);
+					// Persiste le cache IA (alertes disparues purgées) pour éviter tout réappel au redémarrage.
+					pruneCache(snapshot.feedAlertIds);
+					flushCache();
+					onAnalyzed();
+				} catch (cause) {
+					console.error("✘ Failed to analyze service alerts!", cause);
+				}
+			}
+		} finally {
+			analyzing = false;
 		}
 	};
 
@@ -384,16 +433,23 @@ export function declareCancelled(tripUpdate: GtfsRealtime.transit_realtime.ITrip
 
 // ---
 
-async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState): Promise<PollResult | null> {
+/** Délai au-delà duquel un relevé du flux amont est abandonné : le suivant le remplacera. */
+const FETCH_TIMEOUT = 30_000;
+
+/**
+ * Relève le flux amont et en tire les infos trafic à republier — celles qui citent une ligne du
+ * réseau —, sans rien analyser. `null` si le relevé échoue, ou si le GTFS statique manque encore.
+ */
+async function fetchAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState): Promise<AlertsSnapshot | null> {
 	console.log("➔ Fetching service alerts.");
 
 	if (gtfs.stopNameIndex.size === 0) {
-		console.warn("✘ Static GTFS unavailable — skipping service-alert analysis.");
+		console.warn("✘ Static GTFS unavailable — skipping service alerts.");
 		return null;
 	}
 
 	try {
-		const response = await fetch(url);
+		const response = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT) });
 		if (!response.ok || response.status === 204) {
 			console.error(`✘ Failed to fetch service alerts (HTTP ${response.status}).`);
 			return null;
@@ -402,26 +458,20 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 		const buffer = Buffer.from(await response.arrayBuffer());
 		const feed = GtfsRealtime.transit_realtime.FeedMessage.decode(buffer);
 		const headerTimestamp = feed.header?.timestamp != null ? String(feed.header.timestamp) : null;
-		const now = Temporal.Now.instant();
-		const today = now.toZonedDateTimeISO(TIME_ZONE).toPlainDate().toString();
+		const today = Temporal.Now.instant().toZonedDateTimeISO(TIME_ZONE).toPlainDate().toString();
 
-		// L'analyse est TOUJOURS rejouée, même à flux inchangé : les périodes qu'elle porte ont des heures
-		// (travaux de nuit), et l'indexation qui suit doit les re-jauger. Aucun réappel IA n'en découle :
-		// à texte inchangé, `analyzeAlerts` sert entièrement le cache.
 		if (headerTimestamp !== null && headerTimestamp === previous.headerTimestamp) {
 			console.log(`✓ Service alerts unchanged (feed ${headerTimestamp}) — re-evaluating periods.`);
 		}
 
-		const feedAlertIds = new Set<string>();
-		// Résolu à chaque poll : le GTFS statique se recharge sous nos pieds, et avec lui les quais.
-		const servedStops = resolveServedStops(gtfs);
-
-		// 1. Collecte des alertes touchant une ligne du réseau.
-		const inputs: AlertInput[] = [];
-		const entities: AlertEntity[] = [];
-		const routesById = new Map<string, Set<string>>();
-		/** Les alertes telles que republiées : l'analyse leur ajoute leur période d'impact. */
-		const republishedById = new Map<string, GtfsRealtime.transit_realtime.IAlert>();
+		const snapshot: AlertsSnapshot = {
+			entities: [],
+			inputs: [],
+			routesById: new Map(),
+			republishedById: new Map(),
+			feedAlertIds: new Set(),
+			headerTimestamp,
+		};
 		for (const entity of feed.entity) {
 			const alert = entity.alert;
 			if (!alert) continue;
@@ -429,23 +479,23 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 			// lecture, pour que l'alerte garde l'identifiant que citent déjà la base, le cache d'analyse et
 			// les quais desservis (cf. `SERVED_STOPS`).
 			const alertId = entity.id.replace(/^alert:/, "");
-			feedAlertIds.add(alertId);
+			snapshot.feedAlertIds.add(alertId);
 
 			const routeIds = collectNetworkRoutes(alert, gtfs);
 			if (routeIds.size === 0) continue;
 
-			routesById.set(alertId, routeIds);
+			snapshot.routesById.set(alertId, routeIds);
 			// La période active du flux amont est sa fenêtre de publication — des mois, souvent jusqu'à la
 			// fin de l'année —, et non celle de la perturbation : c'est la période de communication. La
-			// période d'impact vient de l'analyse, une fois qu'elle a tourné (cf. étape 3).
+			// période d'impact vient de l'analyse (cf. `applyImpactPeriods`).
 			const republished = withAccessibilityStops(withCanonicalStops(plainAlert(alert), gtfs), routeIds, gtfs);
 			republished.communicationPeriod = alert.activePeriod ?? [];
-			republishedById.set(alertId, republished);
-			entities.push({
+			snapshot.republishedById.set(alertId, republished);
+			snapshot.entities.push({
 				networks: new Set([...routeIds].map(networkOf)),
 				entity: { id: republishedAlertId(alertId), alert: republished },
 			});
-			inputs.push({
+			snapshot.inputs.push({
 				id: alertId,
 				headerText: joinTranslations(alert.headerText),
 				descriptionText: joinTranslations(alert.descriptionText),
@@ -454,66 +504,76 @@ async function pollAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState):
 			});
 		}
 
-		// 2. Analyse groupée (un seul appel IA pour toutes les alertes nouvelles/modifiées).
-		const analyses = await analyzeAlerts(inputs);
-
-		// 3. Résolution des noms d'arrêt en quais, ligne par ligne et sens par sens.
-		//
-		// Elle tourne pour TOUTES les alertes, en vigueur ou non : c'est l'indexation qui départage —
-		// le feed ne doit annoncer que ce qui est en vigueur, quand l'interface doit aussi montrer ce
-		// qui vient, un tracé de déviation se préparant à l'avance.
-		const alerts: AnalyzedAlert[] = [];
-		for (const input of inputs) {
-			const analysis = analyses.get(input.id);
-			if (!analysis) continue;
-
-			const republished = republishedById.get(input.id);
-			if (republished !== undefined) {
-				republished.impactPeriod = impactPeriods(analysis.periods, republished.communicationPeriod ?? [], now);
-			}
-
-			const routeIds = routesById.get(input.id) ?? new Set();
-			const served = servedStops.get(alertNumber(input.id));
-			const contributions: AlertContribution[] = [];
-
-			for (const removedStop of analysis.removedStops) {
-				for (const route of removedStop.routes) {
-					if (!routeIds.has(route.routeId)) continue;
-					const servedIds = served?.get(route.routeId) ?? EMPTY_SERVED;
-					const { routeId, directionId } = route;
-
-					for (const [bucketDirection, stopIds] of resolveRemovedStop(
-						gtfs,
-						removedStop,
-						routeId,
-						directionId,
-						servedIds,
-					)) {
-						contributions.push({ routeId, directionId: bucketDirection, stopIds });
-					}
-				}
-			}
-
-			alerts.push({
-				alertId: input.id,
-				alertNumber: alertNumber(input.id),
-				headerText: input.headerText,
-				descriptionText: input.descriptionText,
-				periods: analysis.periods,
-				routeIds: [...routeIds],
-				contributions,
-			});
-		}
-
-		// Persiste le cache IA (alertes disparues purgées) pour éviter tout réappel au redémarrage.
-		pruneCache(feedAlertIds);
-		flushCache();
-
-		return { alerts, entities, headerTimestamp };
+		return snapshot;
 	} catch (cause) {
 		console.error("✘ Failed to load service alerts!", cause);
 		return null;
 	}
+}
+
+/** Pose sur les alertes republiées la période d'impact que donne leur analyse, quand elle est connue. */
+function applyImpactPeriods(snapshot: AlertsSnapshot, analyses: Map<string, AlertAnalysis>, now: Temporal.Instant) {
+	for (const [alertId, republished] of snapshot.republishedById) {
+		const analysis = analyses.get(alertId);
+		if (analysis === undefined) continue;
+		republished.impactPeriod = impactPeriods(analysis.periods, republished.communicationPeriod ?? [], now);
+	}
+}
+
+/**
+ * Les alertes analysées, leurs noms d'arrêt résolus en quais, ligne par ligne et sens par sens.
+ *
+ * La résolution tourne pour TOUTES les alertes, en vigueur ou non : c'est l'indexation qui départage —
+ * le feed ne doit annoncer que ce qui est en vigueur, quand l'interface doit aussi montrer ce qui
+ * vient, un tracé de déviation se préparant à l'avance.
+ */
+function analyzedAlerts(
+	snapshot: AlertsSnapshot,
+	analyses: Map<string, AlertAnalysis>,
+	gtfs: StaticGtfs,
+): AnalyzedAlert[] {
+	// Résolu à chaque analyse : le GTFS statique se recharge sous nos pieds, et avec lui les quais.
+	const servedStops = resolveServedStops(gtfs);
+
+	const alerts: AnalyzedAlert[] = [];
+	for (const input of snapshot.inputs) {
+		const analysis = analyses.get(input.id);
+		if (!analysis) continue;
+
+		const routeIds = snapshot.routesById.get(input.id) ?? new Set();
+		const served = servedStops.get(alertNumber(input.id));
+		const contributions: AlertContribution[] = [];
+
+		for (const removedStop of analysis.removedStops) {
+			for (const route of removedStop.routes) {
+				if (!routeIds.has(route.routeId)) continue;
+				const servedIds = served?.get(route.routeId) ?? EMPTY_SERVED;
+				const { routeId, directionId } = route;
+
+				for (const [bucketDirection, stopIds] of resolveRemovedStop(
+					gtfs,
+					removedStop,
+					routeId,
+					directionId,
+					servedIds,
+				)) {
+					contributions.push({ routeId, directionId: bucketDirection, stopIds });
+				}
+			}
+		}
+
+		alerts.push({
+			alertId: input.id,
+			alertNumber: alertNumber(input.id),
+			headerText: input.headerText,
+			descriptionText: input.descriptionText,
+			periods: analysis.periods,
+			routeIds: [...routeIds],
+			contributions,
+		});
+	}
+
+	return alerts;
 }
 
 /**
@@ -781,7 +841,7 @@ function buildRouteContext(routeIds: Set<string>, gtfs: StaticGtfs): AlertRouteC
  * par bucket de sens — `null` valant « les deux ». Rien à sauter, ou hors périmètre → aucune entrée.
  *
  * Le versement dans l'index est laissé à l'appelant : les mêmes quais alimentent aussi le périmètre
- * des déviations, qui ne retient pas les mêmes alertes (cf. la passe commune de `pollAlerts`).
+ * des déviations, qui ne retient pas les mêmes alertes (cf. la passe commune de `analyzedAlerts`).
  *
  * `served` porte les quais que l'alerte en cours ne doit pas faire sauter (cf. {@link SERVED_STOPS}) :
  * ils sont retranchés de chaque contribution.

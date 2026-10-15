@@ -132,9 +132,12 @@ const detourStore = useDetourStore(DETOURS_DB_PATH);
 // ce qui crée celles que l'IA propose sans ambiguïté, et qui tient à jour les arrêts à sauter. Le
 // premier relevé attend le réseau, l'index est donc là avant lui — celles saisies à la main ne
 // dépendent pas du flux, et n'ont pas à disparaître de l'interface tant qu'il n'a pas répondu.
-const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs, () => {
-	modificationIndex.reindex();
-	stampAlerts();
+const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs, {
+	onPublished: () => stampAlerts(),
+	onAnalyzed: () => {
+		modificationIndex.reindex();
+		stampAlerts();
+	},
 });
 const modificationIndex = useModificationIndex(detourStore, staticGtfs, () => serviceAlerts.alerts);
 // Sa présence est constatée ici, ses octets ne seront lus qu'au premier accrochage.

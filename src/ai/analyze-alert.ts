@@ -293,26 +293,32 @@ export function flushCache() {
 }
 
 /**
- * Analyse un lot d'alertes. Les alertes déjà en cache (hash inchangé) ne sont pas renvoyées à
- * l'IA ; toutes les autres partent en appels de {@link BATCH_SIZE}. Renvoie un résultat par alerte.
+ * Les analyses que le cache sert sans appel à l'IA : celles des alertes dont le texte et le contexte
+ * n'ont pas changé (hash inchangé). Les autres sont absentes du résultat.
  */
-export async function analyzeAlerts(alerts: AlertInput[]): Promise<Map<string, AlertAnalysis>> {
+export function cachedAnalyses(alerts: AlertInput[]): Map<string, AlertAnalysis> {
 	const result = new Map<string, AlertAnalysis>();
-	const hashById = new Map<string, string>();
-	const toAnalyze: AlertInput[] = [];
 
 	for (const alert of alerts) {
-		const hash = hashAlert(alert);
-		hashById.set(alert.id, hash);
 		const cached = cache.get(alert.id);
-		if (cached?.hash === hash) {
+		if (cached?.hash === hashAlert(alert)) {
 			// Le cache conserve la sortie brute de l'IA : les garde-fous sont réappliqués à chaque fois,
 			// pour qu'une correction de leur logique profite aussi aux alertes déjà analysées.
 			result.set(alert.id, applyGuards(cached.result, alert));
-		} else {
-			toAnalyze.push(alert);
 		}
 	}
+
+	return result;
+}
+
+/**
+ * Analyse un lot d'alertes. Les alertes déjà en cache (cf. {@link cachedAnalyses}) ne sont pas
+ * renvoyées à l'IA ; toutes les autres partent en appels de {@link BATCH_SIZE}. Renvoie un résultat
+ * par alerte.
+ */
+export async function analyzeAlerts(alerts: AlertInput[]): Promise<Map<string, AlertAnalysis>> {
+	const result = cachedAnalyses(alerts);
+	const toAnalyze = alerts.filter((alert) => !result.has(alert.id));
 
 	if (toAnalyze.length > 0) {
 		const analyses = await runBatch(toAnalyze);
@@ -321,7 +327,7 @@ export async function analyzeAlerts(alerts: AlertInput[]): Promise<Map<string, A
 			if (analysis !== undefined) {
 				// Mise en cache uniquement des alertes réellement renvoyées : une troncature ou une
 				// erreur ne fige pas un résultat vide (elles seront réanalysées au prochain changement).
-				cache.set(alert.id, { hash: hashById.get(alert.id)!, result: analysis });
+				cache.set(alert.id, { hash: hashAlert(alert), result: analysis });
 				dirty = true;
 				result.set(alert.id, applyGuards(analysis, alert));
 			} else {

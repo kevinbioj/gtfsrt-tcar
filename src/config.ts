@@ -427,7 +427,7 @@ export const TRIP_MODIFICATIONS_HORIZON = Temporal.Duration.from({ hours: 7 * 24
  */
 export const FINISHED_TRIP_RETENTION = Temporal.Duration.from({ hours: 1 }).total("seconds");
 
-export const ALERTS_POLL_INTERVAL = Temporal.Duration.from({ minutes: 5 }).total("milliseconds");
+export const ALERTS_POLL_INTERVAL = Temporal.Duration.from({ minutes: 1 }).total("milliseconds");
 /**
  * Intervalle de vérification de fraîcheur du GTFS statique : une simple requête HEAD compare la
  * signature (ETag/Last-Modified) et ne déclenche un retéléchargement que si le fichier a changé.
