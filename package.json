@@ -14,19 +14,19 @@
 		"check": "biome check",
 		"check:fix": "biome check --fix"
 	},
-	"packageManager": "pnpm@11.22.0+sha512.1ff870c4c6133dfd88fb2afc46dd13d47f09c9794b438c6fdb47ca98caf3bc16381ee0be93a091b8e3824cf01f889f46d7d9e20910fb0be1ab0fb5baa80dd621",
+	"packageManager": "pnpm@12.11.2",
 	"dependencies": {
-		"@anthropic-ai/sdk": "^0.117.1",
-		"@hono/node-server": "^2.1.1",
+		"@anthropic-ai/sdk": "^0.134.0",
+		"@hono/node-server": "^2.1.5",
 		"fflate": "^0.8.3",
 		"gtfs-realtime-bindings": "^2.2.0",
-		"hono": "^4.13.2",
-		"hono-rate-limiter": "^0.5.3"
+		"hono": "^4.13.13",
+		"hono-rate-limiter": "^0.5.4"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.5.8",
-		"@types/node": "^26.2.0",
-		"tsx": "^4.23.12",
+		"@biomejs/biome": "^2.5.15",
+		"@types/node": "^26.6.5",
+		"tsx": "^4.23.15",
 		"typescript": "^7.0.2"
 	}
 }
