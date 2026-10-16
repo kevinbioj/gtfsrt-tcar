@@ -1,5 +1,11 @@
 import type { AlertPeriod } from "../ai/analyze-alert.js";
-import { type AnalyzedAlert, type CancelIndex, isActive, type SkipIndex } from "../gtfs-rt/use-service-alerts.js";
+import {
+	type AnalyzedAlert,
+	type CancelIndex,
+	isActive,
+	lastPeriodEnd,
+	type SkipIndex,
+} from "../gtfs-rt/use-service-alerts.js";
 import { courseKey, type OrderedStop, type RoutePattern, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
 import { rangeOn } from "./bounds.js";
 import { type DetourStore, type Modification, type ModificationOrigin, type Proposal, scopeKey } from "./store.js";
@@ -24,10 +30,17 @@ export type ResolvedModification = {
 	directionId: number;
 	/** Les tracés visés, ou aucun pour tous. */
 	patternIds: string[];
-	/** La période saisie, sinon celles de l'info trafic. */
+	/** Les périodes saisies, sinon celles de l'info trafic. */
 	periods: AlertPeriod[];
 	/** Vrai lorsque l'une des périodes couvre l'instant de l'indexation. */
 	active: boolean;
+	/**
+	 * La période de communication de ses trip modifications, en secondes epoch : de son dernier
+	 * enregistrement à la fin de sa dernière période, exclue — `null` si rien ne la borne. Ce n'est
+	 * que pendant celle-ci qu'elles sortent dans le feed, pour les courses qui passent pendant l'une
+	 * des périodes (cf. `buildDetourEntities`).
+	 */
+	communication: { start: number; end: number | null };
 	disabled: boolean;
 	/**
 	 * Ses tronçons écrasés à l'instant de l'indexation : rang du tronçon → tracés sur lesquels un
@@ -261,12 +274,13 @@ function indexModifications(
 		if (key !== null) covered.add(key);
 
 		const periods: AlertPeriod[] =
-			record.period !== null
-				? [{ start: record.period.start, end: record.period.end, dailyWindow: null }]
+			record.periods.length > 0
+				? record.periods.map((period) => ({ start: period.start, end: period.end, dailyWindow: null }))
 				: (alert?.periods ?? []);
 		const analysisStopIds = new Set(key === null ? [] : (reading.removed.get(key) ?? []));
 		const removedStopIds = record.removedStopIds !== null ? new Set(record.removedStopIds) : analysisStopIds;
 		const active = isActive(periods, now);
+		const end = lastPeriodEnd(periods);
 
 		modifications.set(record.uid, {
 			uid: record.uid,
@@ -281,6 +295,10 @@ function indexModifications(
 			patternIds: record.patternIds,
 			periods,
 			active,
+			communication: {
+				start: record.updatedAt,
+				end: end === null ? null : Math.floor(end.epochMilliseconds / 1000),
+			},
 			disabled: record.disabled,
 			removedStopIds,
 			removedFromAnalysis: record.removedStopIds === null,
@@ -485,7 +503,7 @@ function hasInput(record: Modification): boolean {
 		record.segments.length > 0 ||
 		record.cancelledDepartures.length > 0 ||
 		record.label !== null ||
-		record.period !== null ||
+		record.periods.length > 0 ||
 		record.removedStopIds !== null
 	);
 }

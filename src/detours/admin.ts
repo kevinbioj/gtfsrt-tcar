@@ -118,7 +118,7 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 
 	/**
 	 * Crée une modification à la main. Rattachée à une info trafic, elle en hérite ce qu'on ne saisit
-	 * pas ; sans info trafic, sa raison et sa période sont obligatoires.
+	 * pas ; sans info trafic, sa raison et au moins une période sont obligatoires.
 	 */
 	admin.post("/api/modifications", async (c) => {
 		const payload = await readObject(c);
@@ -156,14 +156,14 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		if ("message" in patternIds) return c.json({ code: 400, message: patternIds.message }, 400);
 
 		const created = deps.store.createManual(
-			{ alertNumber, routeId, directionId, label: header.label, period: header.period, patternIds: patternIds.ids },
+			{ alertNumber, routeId, directionId, label: header.label, periods: header.periods, patternIds: patternIds.ids },
 			nowSeconds(),
 		);
 		refresh();
 		return c.json({ uid: created.uid });
 	});
 
-	/** Enregistre tout d'un bloc : raison, période, tracés, arrêts supprimés, tronçons. */
+	/** Enregistre tout d'un bloc : raison, périodes, tracés, arrêts supprimés, tronçons. */
 	admin.put("/api/modifications/:uid", async (c) => {
 		const modification = resolve(c);
 		if (modification === undefined) return c.json({ code: 404, message: "Modification inconnue." }, 404);
@@ -309,7 +309,7 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 				routeId: suggestion.routeId,
 				directionId: suggestion.directionId,
 				label: null,
-				period: null,
+				periods: [],
 				patternIds: [],
 			},
 			nowSeconds(),
@@ -797,7 +797,7 @@ function summarizeOrphan(record: Modification, deps: AdminDependencies) {
 		lineCode: lineCode(record.routeId),
 		directionId: record.directionId,
 		headsigns: headsignsOf(gtfs, record.routeId, record.directionId),
-		periods: record.period === null ? [] : [{ start: record.period.start, end: record.period.end, dailyWindow: null }],
+		periods: record.periods.map((period) => ({ start: period.start, end: period.end, dailyWindow: null })),
 		phase: "orphan" as const,
 		disabled: record.disabled,
 		removedStopCount: record.removedStopIds?.length ?? 0,
@@ -900,13 +900,10 @@ function detail(modification: ResolvedModification, deps: AdminDependencies) {
 		...summarize(modification, deps, Temporal.Now.instant()),
 		// Ce qui a été saisi, et ce qui s'hérite : l'interface montre le second en attente du premier.
 		labelInput: record.label,
-		periodInput:
-			record.period === null
-				? null
-				: {
-						start: splitBound(record.period.start),
-						end: record.period.end === null ? null : splitBound(record.period.end),
-					},
+		periodInputs: record.periods.map((period) => ({
+			start: splitBound(period.start),
+			end: period.end === null ? null : splitBound(period.end),
+		})),
 		alertPeriods: alert?.periods ?? [],
 		// Le texte d'une info trafic est du HTML : le flux amont reprend ce que le CMS de l'exploitant a
 		// saisi, listes et plans de déviation compris. Il part nettoyé plutôt qu'échappé — la page
@@ -1064,31 +1061,59 @@ function countTripsByPattern(
 }
 
 /**
- * La raison et la période d'une modification. Rattachée à une info trafic, l'une et l'autre peuvent
- * rester vides : elles suivent alors l'info trafic. Sans elle, les deux sont obligatoires.
+ * La raison et les périodes d'une modification. Rattachée à une info trafic, la raison peut rester
+ * vide et les périodes manquer : elles suivent alors l'info trafic. Sans elle, la raison et au moins
+ * une période sont obligatoires.
  *
- * Chaque borne est un objet `{ date, time }` : la date est obligatoire, l'heure facultative. La fin
- * peut manquer — la période est alors ouverte — et doit sinon venir après le début.
+ * `periods` est une liste de `{ start, end }`, chaque borne un objet `{ date, time }` : la date est
+ * obligatoire, l'heure facultative. Une période laissée entièrement vide est passée sous silence —
+ * c'est une ligne du formulaire qu'on n'a pas remplie. Les périodes repartent dans l'ordre de leur
+ * début ; elles peuvent se recouvrir, la modification vaut alors sur leur réunion.
  */
 function parseHeader(
 	payload: Record<string, unknown>,
 	attached: boolean,
-): { label: string | null; period: ModificationPeriod | null } | { message: string } {
+): { label: string | null; periods: ModificationPeriod[] } | { message: string } {
 	if (payload.label !== undefined && payload.label !== null && typeof payload.label !== "string") {
 		return { message: "Raison attendue : un texte." };
 	}
 	const label = typeof payload.label === "string" && payload.label.trim().length > 0 ? payload.label.trim() : null;
 	if (label === null && !attached) return { message: "La raison est obligatoire sans info trafic." };
 
-	const start = readBound(payload.start, "début");
+	const raw = payload.periods ?? [];
+	if (!Array.isArray(raw)) return { message: "Périodes attendues : une liste." };
+
+	const periods: ModificationPeriod[] = [];
+	for (const [index, entry] of raw.entries()) {
+		const which = raw.length > 1 ? `Période ${index + 1} : ` : "";
+		const parsed = parsePeriod(entry);
+		if ("message" in parsed) return { message: which + parsed.message };
+		if (parsed.period !== null) periods.push(parsed.period);
+	}
+
+	if (periods.length === 0 && !attached) return { message: "Au moins une période est obligatoire sans info trafic." };
+
+	// « AAAA-MM-JJ » se range avant « AAAA-MM-JJTHH:MM » du même jour : c'est bien minuit.
+	periods.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+	return { label, periods };
+}
+
+/**
+ * Une période saisie, ou `null` si elle a été laissée vide. La fin peut manquer — la période est
+ * alors ouverte — et doit sinon venir après le début.
+ */
+function parsePeriod(raw: unknown): { period: ModificationPeriod | null } | { message: string } {
+	if (typeof raw !== "object" || raw === null) return { message: "Période illisible." };
+	const entry = raw as Record<string, unknown>;
+
+	const start = readBound(entry.start, "début");
 	if ("message" in start) return start;
-	const end = readBound(payload.end, "fin");
+	const end = readBound(entry.end, "fin");
 	if ("message" in end) return end;
 
 	if (start.bound === null) {
 		if (end.bound !== null) return { message: "Une fin sans début : saisir aussi la date de début." };
-		if (!attached) return { message: "La date de début est obligatoire sans info trafic." };
-		return { label, period: null };
+		return { period: null };
 	}
 
 	// La fin se compare comme elle se jauge : exclusive, et à la journée entière quand elle est sans
@@ -1099,7 +1124,7 @@ function parseHeader(
 		if (Temporal.PlainDateTime.compare(until, from) <= 0) return { message: "La fin doit venir après le début." };
 	}
 
-	return { label, period: { start: start.bound, end: end.bound } };
+	return { period: { start: start.bound, end: end.bound } };
 }
 
 /**
@@ -1202,7 +1227,7 @@ function parseInput(
 	return {
 		input: {
 			label: header.label,
-			period: header.period,
+			periods: header.periods,
 			patternIds: patternIds.ids,
 			removedStopIds,
 			segments,

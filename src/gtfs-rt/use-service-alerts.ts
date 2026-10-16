@@ -599,6 +599,20 @@ export function hasEnded(periods: AlertPeriod[], now: Temporal.Instant): boolean
 }
 
 /**
+ * La fin de la dernière période, exclue. `null` quand rien ne borne la fin : une période ouverte, ou
+ * aucune période du tout — c'est « sans borne », comme pour {@link hasEnded}.
+ */
+export function lastPeriodEnd(periods: AlertPeriod[]): Temporal.Instant | null {
+	let last: Temporal.Instant | null = null;
+	for (const period of periods) {
+		const endExclusive = period.end ? periodEnd(period.end) : null;
+		if (endExclusive === null) return null;
+		if (last === null || Temporal.Instant.compare(endExclusive, last) > 0) last = endExclusive;
+	}
+	return last;
+}
+
+/**
  * Deux listes de périodes ont-elles un instant en commun ? Chaque période se prend de sa borne de
  * début à sa borne de fin, tranche horaire comprise : c'est l'enveloppe qui compte ici. Aucune
  * période du tout veut dire « sans borne », et croise donc tout.

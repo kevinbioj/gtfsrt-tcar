@@ -149,6 +149,7 @@ export function buildDetourEntities(
 		modifications,
 		provisional,
 		problems,
+		nowSeconds,
 		days[0]?.midnight ?? retainedSince,
 		horizon,
 	);
@@ -404,6 +405,7 @@ function collectCandidates(
 	modifications: ReadonlyMap<number, ResolvedModification>,
 	provisional: ReadonlyMap<string, ProvisionalStop>,
 	problems: Set<string>,
+	nowSeconds: number,
 	from: number,
 	horizon: number,
 ): Map<string, Candidate[]> {
@@ -411,10 +413,14 @@ function collectCandidates(
 	const window: AlertPeriod[] = [{ start: minuteOf(from), end: minuteOf(horizon), dailyWindow: null }];
 
 	for (const modification of modifications.values()) {
-		// Invisible, ou sans période dans les jours à venir, la modification ne s'annonce pas : c'est un
-		// choix ou un calendrier, pas un problème, et le journal n'a rien à en dire. Celles dont l'info
-		// trafic a quitté le flux ne sont pas même indexées.
-		if (modification.disabled || !periodsOverlap(modification.periods, window)) continue;
+		// Invisible, hors de sa période de communication — de son dernier enregistrement à la fin de sa
+		// dernière période —, ou sans période dans les jours à venir, la modification ne s'annonce pas :
+		// c'est un choix ou un calendrier, pas un problème, et le journal n'a rien à en dire. Celles dont
+		// l'info trafic a quitté le flux ne sont pas même indexées.
+		const { communication } = modification;
+		if (modification.disabled) continue;
+		if (nowSeconds < communication.start || (communication.end !== null && nowSeconds >= communication.end)) continue;
+		if (!periodsOverlap(modification.periods, window)) continue;
 		const record = modification.record;
 
 		record.segments.forEach((segment, rank) => {

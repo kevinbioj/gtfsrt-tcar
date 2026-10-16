@@ -234,8 +234,27 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		flex: none; font-weight: 400; }
 	.heading .badges > div { display: flex; gap: 4px; }
 	.heading .badges .badge.tag { margin-left: 0; }
-	/* La raison et la période, un champ par ligne, un peu d'air entre eux. */
+	/* La raison et les périodes, un champ par ligne, un peu d'air entre eux. */
 	.fields .field { margin-bottom: 8px; }
+	/*
+	 * Les périodes : une ligne chacune, début et fin côte à côte, dans un cadre de hauteur bornée qui
+	 * défile — l'en-tête reste en vue. Une seule grille pour toutes, les lignes n'étant que des
+	 * groupes (« display: contents ») : les colonnes s'alignent d'une ligne à l'autre et sur l'en-tête.
+	 * Les champs rapetissent un peu pour tenir à quatre dans le panneau : la date garde son calendrier
+	 * et prend la place, l'heure perd son horloge — elle se tape au clavier.
+	 */
+	.periods { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto minmax(0, 2fr) minmax(0, 1fr) auto;
+		gap: 4px; align-items: center; max-height: 148px; overflow-y: auto; padding: 0 6px 6px;
+		border: 1px solid var(--line); border-radius: 6px; }
+	.periods .head { position: sticky; top: 0; z-index: 1; background: var(--panel); padding: 6px 0 2px;
+		font-size: 12px; color: var(--muted); align-self: stretch; }
+	.periods .span2 { grid-column: span 2; }
+	.periods .period { display: contents; }
+	.periods input { padding: 4px 5px; font-size: 13px; }
+	.periods input[type="time"]::-webkit-calendar-picker-indicator { display: none; }
+	.periods .to { color: var(--muted); font-size: 12px; }
+	.periods .removePeriod { padding: 3px 7px; font-size: 12px; }
+	.periodActions { margin-top: 6px; }
 	dialog .fields .field label { width: 104px; }
 	dialog .fields .field input, dialog .fields .field select { flex: 1; min-width: 0; }
 	details > summary { cursor: pointer; color: var(--muted); font-size: 13px; margin: 4px 0; }
@@ -536,7 +555,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		// vise la modification.
 		focusPattern: null,
 		// Les lecteurs des champs de période : celui de la création, et celui de l'édition.
-		readNewPeriod: null, readPeriod: null
+		readNewPeriods: null, readPeriods: null
 	};
 
 	/** Le tronçon en cours d'édition. Il y en a toujours au moins un dès qu'un détail est ouvert. */
@@ -1613,34 +1632,73 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	// --- création ---
 
 	/**
-	 * Les champs d'une période : une date de début, une date de fin, et leurs heures, toutes
-	 * facultatives dans la saisie — c'est le serveur qui exige le début quand il n'y a pas d'info
-	 * trafic à suivre. Une heure de fin sans date de fin ne voudrait rien dire, et son champ reste
-	 * grisé tant qu'il en manque. Renvoie de quoi les relire, dans la forme que le serveur attend.
+	 * Les champs des périodes : pour chacune une date de début, une date de fin, et leurs heures,
+	 * toutes facultatives dans la saisie — c'est le serveur qui exige une période quand il n'y a pas
+	 * d'info trafic à suivre, et qui passe sous silence une période laissée vide. Une heure de fin sans
+	 * date de fin ne voudrait rien dire, et son champ reste grisé tant qu'il en manque. Il y a toujours
+	 * au moins une ligne à remplir. Renvoie de quoi les relire, dans la forme que le serveur attend.
 	 */
-	function periodFields(container, period, hint, inherited) {
-		container.innerHTML =
-			'<div class="field"><label>Début</label><input type="date" class="startDate">' +
-				'<input type="time" class="startTime"></div>' +
-			'<div class="field"><label>Fin</label><input type="date" class="endDate">' +
-				'<input type="time" class="endTime"></div>' +
-			'<p class="note hint"></p>';
+	function periodFields(container, periods, hint, inherited) {
+		container.innerHTML = '<div class="periods">'
+				+ '<span class="head span2">Début</span><span class="head"></span><span class="head span2">Fin</span>'
+				+ '<span class="head"></span></div>'
+			+ '<div class="actions periodActions"><button type="button" class="addPeriod">Ajouter une période</button></div>'
+			+ '<p class="note hint"></p>';
+		container.querySelector(".hint").textContent = hint;
+		var list = container.querySelector(".periods");
 
-		function field(name) { return container.querySelector("." + name); }
+		function addRow(period) {
+			var row = document.createElement("div");
+			row.className = "period";
+			row.innerHTML =
+				'<input type="date" class="startDate" title="Date de début"><input type="time" class="startTime" title="Heure de début">' +
+				'<span class="to">→</span>' +
+				'<input type="date" class="endDate" title="Date de fin"><input type="time" class="endTime" title="Heure de fin">' +
+				'<button type="button" class="removePeriod" title="Retirer cette période">✕</button>';
 
-		field("startDate").value = period ? period.start.date : "";
-		field("startTime").value = period && period.start.time ? period.start.time : "";
-		field("endDate").value = period && period.end ? period.end.date : "";
-		field("endTime").value = period && period.end && period.end.time ? period.end.time : "";
-		field("hint").textContent = hint;
+			function field(name) { return row.querySelector("." + name); }
 
-		// Ce que la période suit quand on la laisse vide, en indication dans les champs — jamais en valeur.
-		// Un champ de date n'affiche pas d'indication : vide, il se fait champ de texte, et redevient
-		// champ de date dès qu'on y entre.
-		if (inherited) {
+			field("startDate").value = period ? period.start.date : "";
+			field("startTime").value = period && period.start.time ? period.start.time : "";
+			field("endDate").value = period && period.end ? period.end.date : "";
+			field("endTime").value = period && period.end && period.end.time ? period.end.time : "";
+
+			function syncEnd() {
+				field("endTime").disabled = field("endDate").value === "";
+				if (field("endTime").disabled) field("endTime").value = "";
+			}
+			field("endDate").oninput = syncEnd;
+			syncEnd();
+
+			field("removePeriod").onclick = function () {
+				row.remove();
+				sync();
+			};
+
+			list.appendChild(row);
+			sync();
+			return row;
+		}
+
+		// La dernière période qui reste ne se retire pas, elle se vide : son bouton s'efface sans laisser
+		// de trou dans la grille.
+		function sync() {
+			var rows = list.querySelectorAll(".period");
+			Array.prototype.forEach.call(rows, function (row) {
+				row.querySelector(".removePeriod").style.visibility = rows.length === 1 ? "hidden" : "";
+			});
+		}
+
+		(periods && periods.length > 0 ? periods : [null]).forEach(addRow);
+
+		// Ce que les périodes suivent quand on les laisse vides, en indication dans la première ligne —
+		// jamais en valeur. Un champ de date n'affiche pas d'indication : vide, il se fait champ de
+		// texte, et redevient champ de date dès qu'on y entre.
+		if (inherited && !(periods && periods.length > 0)) {
+			var first = list.querySelector(".period");
 			[["startDate", inherited.start.date], ["startTime", inherited.start.time],
 				["endDate", inherited.end.date], ["endTime", inherited.end.time]].forEach(function (entry) {
-				var input = field(entry[0]);
+				var input = first.querySelector("." + entry[0]);
 				var type = input.type;
 				if (!entry[1]) return;
 				input.placeholder = entry[1];
@@ -1651,18 +1709,18 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			});
 		}
 
-		function syncEnd() {
-			field("endTime").disabled = field("endDate").value === "";
-			if (field("endTime").disabled) field("endTime").value = "";
-		}
-		field("endDate").oninput = syncEnd;
-		syncEnd();
+		container.querySelector(".addPeriod").onclick = function () {
+			addRow(null).querySelector(".startDate").focus();
+		};
 
 		return function () {
-			return {
-				start: field("startDate").value === "" ? null : { date: field("startDate").value, time: field("startTime").value },
-				end: field("endDate").value === "" ? null : { date: field("endDate").value, time: field("endTime").value }
-			};
+			return Array.prototype.map.call(list.querySelectorAll(".period"), function (row) {
+				function field(name) { return row.querySelector("." + name); }
+				return {
+					start: field("startDate").value === "" ? null : { date: field("startDate").value, time: field("startTime").value },
+					end: field("endDate").value === "" ? null : { date: field("endDate").value, time: field("endTime").value }
+				};
+			});
 		};
 	}
 
@@ -1680,11 +1738,12 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		return { start: split(first && first.start), end: split(last && last.end) };
 	}
 
-	/** Ce que la période devient quand on ne la saisit pas. */
+	/** Ce que les périodes deviennent quand on ne les saisit pas, et quand la modification est publiée. */
 	function periodHint(attached) {
-		return attached
+		return (attached
 			? "Laisser vide pour suivre les dates de l'info trafic. Heures facultatives."
-			: "Date de début obligatoire. Heures facultatives ; sans fin, la période reste ouverte.";
+			: "Au moins une période, date de début obligatoire. Heures facultatives ; sans fin, la période reste ouverte.")
+			+ " Publiée dès l'enregistrement, jusqu'à la fin de la dernière période.";
 	}
 
 	/**
@@ -1711,14 +1770,14 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			routes.onchange = renderNewDirections;
 
 			el("newLabel").value = "";
-			state.readNewPeriod = periodFields(el("newPeriod"), null, periodHint(false));
+			state.readNewPeriods = periodFields(el("newPeriod"), [], periodHint(false));
 			renderNewAlert();
 			renderNewDirections();
 			el("newStatus").textContent = "";
 		}).catch(function (error) { alert(error.message); go(""); });
 	}
 
-	/** Rattachée à une info trafic, la raison et la période s'en héritent : les champs le disent. */
+	/** Rattachée à une info trafic, la raison et les périodes s'en héritent : les champs le disent. */
 	function renderNewAlert() {
 		var number = el("newAlert").value;
 		var attached = state.alerts.filter(function (alert) { return alert.alertNumber === number; })[0];
@@ -1775,15 +1834,13 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			return;
 		}
 
-		var period = state.readNewPeriod();
 		var body = {
 			alertNumber: el("newAlert").value || null,
 			routeId: route.routeId,
 			directionId: direction.directionId,
 			patternIds: checked.length === direction.patterns.length ? [] : checked,
 			label: el("newLabel").value,
-			start: period.start,
-			end: period.end
+			periods: state.readNewPeriods()
 		};
 
 		status.textContent = "Création…";
@@ -2440,13 +2497,13 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				+ "<details><summary>Texte de l'info trafic</summary><div class='richtext'>" + detail.alertDescriptionHtml + "</div></details>");
 	}
 
-	/** La raison et la période : saisies, ou héritées de l'info trafic — ce que disent les champs vides. */
+	/** La raison et les périodes : saisies, ou héritées de l'info trafic — ce que disent les champs vides. */
 	function renderHeader() {
 		var detail = state.detail;
 		var attached = detail.alertNumber !== null;
 		el("label").value = detail.labelInput || "";
 		el("label").placeholder = attached ? detail.alertHeader : "obligatoire";
-		state.readPeriod = periodFields(el("period"), detail.periodInput, periodHint(attached)
+		state.readPeriods = periodFields(el("period"), detail.periodInputs, periodHint(attached)
 			+ (attached ? " Info trafic : " + describePeriods(detail.alertPeriods) + "." : ""),
 			attached ? inheritedBounds(detail.alertPeriods) : null);
 		renderPatterns();
@@ -2469,7 +2526,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			state.detail.disabled = !visible;
 			renderHeading();
 			renderPublication();
-			setStatus(visible ? "Visible : publiée pendant sa période." : "Invisible : plus rien n'est publié.", "ok");
+			setStatus(visible ? "Visible : publiée jusqu'à la fin de sa dernière période." : "Invisible : plus rien n'est publié.", "ok");
 		}).catch(function (error) { setStatus(error.message, "error"); });
 	}
 
@@ -3518,7 +3575,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		return segment.stops.length > 0 || segment.path.length >= 2;
 	}
 
-	/** Tout part d'un bloc : raison, période, tracés, arrêts supprimés, tronçons. */
+	/** Tout part d'un bloc : raison, périodes, tracés, arrêts supprimés, tronçons. */
 	function save() {
 		// Aucun tracé coché s'enverrait comme une liste vide, que le serveur lit « tous » : c'est le
 		// seul cas qu'on refuse avant d'envoyer.
@@ -3527,13 +3584,11 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			return;
 		}
 
-		var period = state.readPeriod();
 		var kept = state.segments.filter(hasContent);
 		var dropped = state.segments.length - kept.length;
 		var payload = {
 			label: el("label").value,
-			start: period.start,
-			end: period.end,
+			periods: state.readPeriods(),
 			patternIds: state.patterns.length === state.detail.patterns.length ? [] : state.patterns,
 			removedStopIds: state.removed,
 			cancelledDepartures: state.cancelled,

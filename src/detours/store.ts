@@ -198,6 +198,29 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 		CHECK (wheelchair_boarding IN (0, 1, 2));
 	ALTER TABLE provisional_stops ADD COLUMN platform_code TEXT;
 	`,
+	// Une modification peut porter plusieurs périodes : les week-ends d'un chantier, deux soirées de
+	// concert. Elles quittent la table des modifications pour la leur ; la période saisie jusqu'ici
+	// devient la première. Aucune : celles de l'info trafic, comme l'était une période NULL.
+	`
+	CREATE TABLE modification_periods (
+		uid        INTEGER NOT NULL REFERENCES modifications (uid) ON DELETE CASCADE,
+		position   INTEGER NOT NULL,
+		-- AAAA-MM-JJ et HH:MM. Sans fin, la période est ouverte.
+		start_date TEXT    NOT NULL,
+		start_time TEXT,
+		end_date   TEXT,
+		end_time   TEXT,
+		PRIMARY KEY (uid, position)
+	) STRICT;
+
+	INSERT INTO modification_periods (uid, position, start_date, start_time, end_date, end_time)
+		SELECT uid, 0, start_date, start_time, end_date, end_time FROM modifications WHERE start_date IS NOT NULL;
+
+	ALTER TABLE modifications DROP COLUMN start_date;
+	ALTER TABLE modifications DROP COLUMN start_time;
+	ALTER TABLE modifications DROP COLUMN end_date;
+	ALTER TABLE modifications DROP COLUMN end_time;
+	`,
 ];
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
@@ -306,7 +329,7 @@ export type DetourLegMode = "route" | "free";
 export type ModificationOrigin = "ai" | "manual";
 
 /**
- * La période saisie d'une modification, bornes au format « AAAA-MM-JJ » ou « AAAA-MM-JJTHH:MM » —
+ * Une période saisie d'une modification, bornes au format « AAAA-MM-JJ » ou « AAAA-MM-JJTHH:MM » —
  * celui des périodes d'info trafic, qui se jaugent de la même façon (cf. `isActive`). Sans fin, elle
  * est ouverte.
  */
@@ -325,8 +348,8 @@ export type Modification = {
 	directionId: number;
 	/** `null` : le titre de l'info trafic. */
 	label: string | null;
-	/** `null` : les périodes de l'info trafic. */
-	period: ModificationPeriod | null;
+	/** Les périodes saisies, dans l'ordre chronologique de leur début. Aucune : celles de l'info trafic. */
+	periods: ModificationPeriod[];
 	/**
 	 * Les tracés empruntés visés (cf. `RoutePattern`), ou aucun pour les viser tous. La modification
 	 * ne touche que les courses de ces tracés — ses tronçons comme ses arrêts supprimés.
@@ -360,13 +383,13 @@ export type CancelledDeparture = { stopId: string; departure: number };
 /** Ce qu'un enregistrement porte : tout ce qui se saisit, d'un bloc. */
 export type ModificationInput = Pick<
 	Modification,
-	"label" | "period" | "patternIds" | "removedStopIds" | "segments" | "cancelledDepartures" | "priority"
+	"label" | "periods" | "patternIds" | "removedStopIds" | "segments" | "cancelledDepartures" | "priority"
 >;
 
 /** Ce qu'il faut pour créer une modification à la main. Le reste se saisit ensuite. */
 export type ManualInput = Pick<
 	Modification,
-	"alertNumber" | "routeId" | "directionId" | "label" | "period" | "patternIds"
+	"alertNumber" | "routeId" | "directionId" | "label" | "periods" | "patternIds"
 >;
 
 export type DetourStore = ReturnType<typeof useDetourStore>;
@@ -454,13 +477,7 @@ export function useDetourStore(path: string) {
 				routeId: row.route_id,
 				directionId: row.direction_id,
 				label: row.label,
-				period:
-					row.start_date === null
-						? null
-						: {
-								start: joinBound(row.start_date, row.start_time),
-								end: row.end_date === null ? null : joinBound(row.end_date, row.end_time),
-							},
+				periods: [],
 				patternIds: [],
 				removedStopIds: row.removed_overridden === 1 ? [] : null,
 				disabled: row.disabled === 1,
@@ -469,6 +486,13 @@ export function useDetourStore(path: string) {
 				updatedAt: row.updated_at,
 				segments: [],
 				cancelledDepartures: [],
+			});
+		}
+
+		for (const row of db.prepare("SELECT * FROM modification_periods ORDER BY uid, position").all() as PeriodRow[]) {
+			modifications.get(row.uid)?.periods.push({
+				start: joinBound(row.start_date, row.start_time),
+				end: row.end_date === null ? null : joinBound(row.end_date, row.end_time),
 			});
 		}
 
@@ -540,6 +564,18 @@ export function useDetourStore(path: string) {
 		}
 		reload();
 		return result;
+	};
+
+	/** Les périodes saisies, ou aucune pour suivre l'info trafic. Rangées telles qu'elles viennent. */
+	const writePeriods = (uid: number, periods: readonly ModificationPeriod[]) => {
+		db.prepare("DELETE FROM modification_periods WHERE uid = ?").run(uid);
+		const insert = db.prepare(
+			`INSERT INTO modification_periods (uid, position, start_date, start_time, end_date, end_time)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+		);
+		periods.forEach((period, position) => {
+			insert.run(uid, position, ...periodColumns(period));
+		});
 	};
 
 	const writePatterns = (uid: number, patternIds: readonly string[]) => {
@@ -675,19 +711,16 @@ export function useDetourStore(path: string) {
 		 * a pas d'analyse à suivre : ses arrêts supprimés sont saisis — aucun, pour commencer.
 		 */
 		createManual(input: ManualInput, nowSeconds: number): Modification {
-			const bounds = periodColumns(input.period);
-
 			const uid = transaction(() => {
 				const { lastInsertRowid } = db
 					.prepare(
-						`INSERT INTO modifications
-							(origin, alert_number, route_id, direction_id, label, start_date, start_time, end_date, end_time,
-							 created_at, updated_at)
-						 VALUES ('manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+						`INSERT INTO modifications (origin, alert_number, route_id, direction_id, label, created_at, updated_at)
+						 VALUES ('manual', ?, ?, ?, ?, ?, ?)`,
 					)
-					.run(input.alertNumber, input.routeId, input.directionId, input.label, ...bounds, nowSeconds, nowSeconds);
+					.run(input.alertNumber, input.routeId, input.directionId, input.label, nowSeconds, nowSeconds);
 				const uid = Number(lastInsertRowid);
 
+				writePeriods(uid, input.periods);
 				writePatterns(uid, input.patternIds);
 				if (input.alertNumber === null) writeRemoved(uid, []);
 				return uid;
@@ -704,11 +737,13 @@ export function useDetourStore(path: string) {
 			if (!modifications.has(uid)) return undefined;
 
 			transaction(() => {
-				db.prepare(
-					`UPDATE modifications
-					 SET label = ?, start_date = ?, start_time = ?, end_date = ?, end_time = ?, priority = ?, updated_at = ?
-					 WHERE uid = ?`,
-				).run(input.label, ...periodColumns(input.period), input.priority, nowSeconds, uid);
+				db.prepare("UPDATE modifications SET label = ?, priority = ?, updated_at = ? WHERE uid = ?").run(
+					input.label,
+					input.priority,
+					nowSeconds,
+					uid,
+				);
+				writePeriods(uid, input.periods);
 				writePatterns(uid, input.patternIds);
 				writeRemoved(uid, input.removedStopIds);
 				writeSegments(uid, input.segments);
@@ -872,11 +907,8 @@ function splitBound(bound: string): [string, string | null] {
 	return [date as string, time ?? null];
 }
 
-/** Les quatre colonnes d'une période saisie, dans l'ordre de la table ; toutes nulles sans période. */
-function periodColumns(
-	period: ModificationPeriod | null,
-): [string | null, string | null, string | null, string | null] {
-	if (period === null) return [null, null, null, null];
+/** Les quatre colonnes d'une période saisie, dans l'ordre de la table. */
+function periodColumns(period: ModificationPeriod): [string, string | null, string | null, string | null] {
 	const [startDate, startTime] = splitBound(period.start);
 	const [endDate, endTime] = period.end === null ? [null, null] : splitBound(period.end);
 	return [startDate, startTime, endDate, endTime];
@@ -891,15 +923,20 @@ type ModificationRow = {
 	route_id: string;
 	direction_id: number;
 	label: string | null;
-	start_date: string | null;
-	start_time: string | null;
-	end_date: string | null;
-	end_time: string | null;
 	removed_overridden: number;
 	disabled: number;
 	priority: number;
 	created_at: number;
 	updated_at: number;
+};
+
+type PeriodRow = {
+	uid: number;
+	position: number;
+	start_date: string;
+	start_time: string | null;
+	end_date: string | null;
+	end_time: string | null;
 };
 
 type PatternRow = { uid: number; pattern_id: string };
