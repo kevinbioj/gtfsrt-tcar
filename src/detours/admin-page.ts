@@ -19,7 +19,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 <style>
 	:root {
 		--bg: #f6f7f9; --panel: #fff; --ink: #14181f; --muted: #67707d; --line: #dfe3e9;
-		--accent: #1f6feb; --danger: #d1242f; --warn: #9a6700; --ok: #1a7f37;
+		--accent: #1f6feb; --danger: #d1242f; --warn: #9a6700; --ok: #1a7f37; --pin: #8250df;
 	}
 	* { box-sizing: border-box; }
 	body { margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -55,6 +55,23 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	button.danger { color: var(--danger); }
 	button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 	button:disabled { opacity: .5; cursor: not-allowed; }
+	/*
+	 * Les actions des tableaux se reconnaissent d'un coup d'œil : une icône, et une teinte qui dit ce
+	 * qu'elles font — jaune pour ouvrir, vert pour publier, rouge pour défaire. La teinte est
+	 * translucide : le fond de la ligne, survolée ou choisie, transparaît dessous.
+	 */
+	button.tone, a.button.tone { --tone: var(--muted); color: var(--tone);
+		background: color-mix(in srgb, var(--tone) 10%, transparent);
+		border-color: color-mix(in srgb, var(--tone) 28%, transparent); }
+	button.tone:hover, a.button.tone:hover { background: color-mix(in srgb, var(--tone) 18%, transparent);
+		border-color: color-mix(in srgb, var(--tone) 55%, transparent); }
+	.tone.edit { --tone: var(--warn); }
+	.tone.show, .tone.accept { --tone: var(--ok); }
+	.tone.attach { --tone: var(--accent); }
+	.tone.pin { --tone: var(--pin); }
+	.tone.danger { --tone: var(--danger); }
+	/* L'icône précède le texte, et laisse le clic au bouton : c'est lui que les lignes reconnaissent. */
+	svg.icon { width: 13px; height: 13px; margin-right: 4px; vertical-align: -2px; pointer-events: none; }
 	input, select { font: inherit; padding: 5px 8px; border: 1px solid var(--line);
 		border-radius: 6px; background: var(--panel); color: var(--ink); width: 100%; }
 	.wrap { padding: 20px; }
@@ -334,12 +351,12 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		<a class="button primary" href="#/new">Nouvelle modification</a>
 		<span id="bulkBar" class="bulk hidden">
 			<span class="note" id="bulkCount"></span>
-			<button id="bulkHide">Masquer</button>
-			<button id="bulkShow">Afficher</button>
-			<button id="bulkAttach">Rattacher…</button>
-			<button id="bulkPin">Épingler</button>
-			<button id="bulkUnpin">Désépingler</button>
-			<button id="bulkDiscard" class="danger"></button>
+			<button id="bulkHide" class="tone hide" data-icon="hide">Masquer</button>
+			<button id="bulkShow" class="tone show" data-icon="show">Afficher</button>
+			<button id="bulkAttach" class="tone attach" data-icon="attach">Rattacher…</button>
+			<button id="bulkPin" class="tone pin" data-icon="pin">Épingler</button>
+			<button id="bulkUnpin" class="tone unpin" data-icon="unpin">Désépingler</button>
+			<button id="bulkDiscard" class="tone danger"></button>
 		</span>
 		<span class="grow"></span>
 		<label class="note">grouper <select id="groupBy">
@@ -391,7 +408,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			</select></label>
 		</div>
 		<table>
-			<thead><tr><th>Arrêt</th><th style="width:180px"></th></tr></thead>
+			<thead><tr><th>Arrêt</th><th style="width:210px"></th></tr></thead>
 			<tbody id="stopsBody"></tbody>
 		</table>
 		<p id="stopsEmpty" class="note hidden"></p>
@@ -814,7 +831,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 */
 	var GROUPINGS = {
 		line: {
-			columns: [["select", "32px"], ["sens", "18%"], ["what", "32%"], ["stops", "6%"], ["period", "14%"], ["status", "14%"], ["actions", "16%"]],
+			columns: [["select", "32px"], ["sens", "18%"], ["what", "26%"], ["stops", "6%"], ["period", "14%"], ["status", "14%"], ["actions", "22%"]],
 			keyOf: function (row) { return row.routeId; },
 			heading: function (rows) {
 				return lineChip(rows[0].lineCode, rows[0].line) + "<span class='title' style='margin-left:8px'>Ligne "
@@ -823,7 +840,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			}
 		},
 		alert: {
-			columns: [["select", "32px"], ["lineAndSens", "26%"], ["description", "18%"], ["origin", "14%"], ["stops", "6%"], ["status", "16%"], ["actions", "20%"]],
+			columns: [["select", "32px"], ["lineAndSens", "24%"], ["description", "16%"], ["origin", "14%"], ["stops", "6%"], ["status", "16%"], ["actions", "24%"]],
 			keyOf: function (row) { return row.alertNumber !== null ? "A" + row.alertNumber : "R" + row.label; },
 			heading: function (rows) {
 				var row = rows[0];
@@ -1047,9 +1064,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			// Groupées par info trafic, elle s'épingle depuis son bandeau.
 			if (grouping === GROUPINGS.alert && rows[0].alertNumber !== null) {
 				var pinned = rows[0].pinned;
-				bar.appendChild(actionButton(pinned ? "Désépingler" : "Épingler", "", function () {
+				bar.appendChild(actionButton(pinned ? "Désépingler" : "Épingler", pinned ? "tone unpin" : "tone pin", function () {
 					setPinned([rows[0].alertNumber], !pinned).then(loadList).catch(function (error) { alert(error.message); });
-				}));
+				}, pinned ? "unpin" : "pin"));
 			}
 			body.appendChild(head);
 
@@ -1124,21 +1141,21 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var suggestions = rows.filter(function (row) { return row.kind === "suggestion"; }).length;
 
 		el("bulkCount").textContent = rows.length + (rows.length > 1 ? " cochées" : " cochée");
-		el("bulkHide").className = orphans === rows.length ? "hidden" : "";
-		el("bulkShow").className = orphans === rows.length ? "hidden" : "";
+		el("bulkHide").classList.toggle("hidden", orphans === rows.length);
+		el("bulkShow").classList.toggle("hidden", orphans === rows.length);
 		el("bulkHide").disabled = published.length - hidden === 0;
 		el("bulkShow").disabled = hidden === 0;
-		el("bulkAttach").className = orphans > 0 ? "" : "hidden";
+		el("bulkAttach").classList.toggle("hidden", orphans === 0);
 		el("bulkAttach").disabled = orphans !== rows.length;
 
 		// L'épingle vaut pour l'info trafic : chaque bouton dit s'il en reste à épingler, ou à désépingler.
 		var attached = rows.filter(function (row) { return row.alertNumber !== null; });
-		el("bulkPin").className = attached.length > 0 ? "" : "hidden";
-		el("bulkUnpin").className = attached.length > 0 ? "" : "hidden";
+		el("bulkPin").classList.toggle("hidden", attached.length === 0);
+		el("bulkUnpin").classList.toggle("hidden", attached.length === 0);
 		el("bulkPin").disabled = !attached.some(function (row) { return !row.pinned; });
 		el("bulkUnpin").disabled = !attached.some(function (row) { return row.pinned; });
-		el("bulkDiscard").textContent = suggestions === rows.length ? "Ignorer"
-			: suggestions === 0 ? "Supprimer" : "Ignorer / supprimer";
+		labelButton(el("bulkDiscard"), suggestions === rows.length ? "dismiss" : "remove",
+			suggestions === rows.length ? "Ignorer" : suggestions === 0 ? "Supprimer" : "Ignorer / supprimer");
 	}
 
 	/**
@@ -1208,34 +1225,58 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 		var cell = tr.querySelector("td.act");
 		if (row.kind === "suggestion") {
-			cell.appendChild(actionButton("Accepter", "", function () { acceptSuggestion(row); }));
-			cell.appendChild(actionButton("Ignorer", "danger", function () { dismissSuggestion(row); }));
+			cell.appendChild(actionButton("Accepter", "tone accept", function () { acceptSuggestion(row); }, "accept"));
+			cell.appendChild(actionButton("Ignorer", "tone danger", function () { dismissSuggestion(row); }, "dismiss"));
 		} else if (row.kind === "orphan") {
-			cell.appendChild(actionButton("Rattacher…", "", function () { reattach([row]); }));
-			cell.appendChild(actionButton("Supprimer", "danger", function () { removeOrphan(row); }));
+			cell.appendChild(actionButton("Rattacher…", "tone attach", function () { reattach([row]); }, "attach"));
+			cell.appendChild(actionButton("Supprimer", "tone danger", function () { removeOrphan(row); }, "remove"));
 		} else {
 			var edit = document.createElement("a");
-			edit.className = "button";
+			edit.className = "button tone edit";
 			edit.href = href;
-			edit.textContent = "Éditer";
+			labelButton(edit, "edit", "Éditer");
 			cell.appendChild(edit);
-			cell.appendChild(actionButton(row.disabled ? "Afficher" : "Masquer", "", function () {
+			cell.appendChild(actionButton(row.disabled ? "Afficher" : "Masquer", row.disabled ? "tone show" : "tone hide", function () {
 				setVisible(row.uid, row.disabled).then(loadList).catch(function (error) { alert(error.message); });
-			}));
-			cell.appendChild(actionButton("Supprimer", "danger", function () {
+			}, row.disabled ? "show" : "hide"));
+			cell.appendChild(actionButton("Supprimer", "tone danger", function () {
 				removeModification(row).then(function (done) { if (done) loadList(); });
-			}));
+			}, "remove"));
 		}
 
 		return tr;
 	}
 
-	function actionButton(text, className, onclick) {
+	/** Un bouton qui agit ; avec une icône s'il en nomme une (cf. ICONS). */
+	function actionButton(text, className, onclick, icon) {
 		var button = document.createElement("button");
-		button.textContent = text;
+		if (icon) labelButton(button, icon, text);
+		else button.textContent = text;
 		button.className = className;
 		button.onclick = onclick;
 		return button;
+	}
+
+	/**
+	 * Les icônes des actions, au trait sur une grille de 24, un chemin chacune : le bouton les colore
+	 * de sa teinte (currentColor).
+	 */
+	var ICONS = {
+		edit: "M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z",
+		show: "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
+		hide: "M9.9 4.24A9.1 9.1 0 0 1 12 4c6.5 0 10 8 10 8a13.2 13.2 0 0 1-1.67 2.68M6.61 6.61A13.5 13.5 0 0 0 2 12s3.5 8 10 8a9.7 9.7 0 0 0 5.39-1.61M14.12 14.12a3 3 0 1 1-4.24-4.24M2 2l20 20",
+		remove: "M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6",
+		accept: "M20 6 9 17l-5-5",
+		dismiss: "M18 6 6 18M6 6l12 12",
+		attach: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71",
+		pin: "M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1Z",
+		unpin: "M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1ZM2 2l20 20"
+	};
+
+	/** Habille un bouton — ou un lien qui en a l'air — de son icône, suivie de son texte. */
+	function labelButton(button, icon, text) {
+		button.innerHTML = "<svg class='icon' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'"
+			+ " stroke-linecap='round' stroke-linejoin='round'><path d='" + ICONS[icon] + "'/></svg>" + escapeHtml(text);
 	}
 
 	/** Accepte une suggestion, et ouvre la modification qu'elle devient. */
@@ -1501,8 +1542,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				"<td class='act'></td>";
 
 			var cell = tr.querySelector("td.act");
-			cell.appendChild(actionButton("Modifier", "", function () { editProvisional(stop); }));
-			cell.appendChild(actionButton("Supprimer", "danger", function () { deleteProvisional(stop); }));
+			cell.appendChild(actionButton("Modifier", "tone edit", function () { editProvisional(stop); }, "edit"));
+			cell.appendChild(actionButton("Supprimer", "tone danger", function () { deleteProvisional(stop); }, "remove"));
 
 			// Cliquer la ligne choisit l'arrêt : son marqueur passe au rouge, et la carte s'y centre.
 			tr.onclick = function (event) {
@@ -3824,6 +3865,11 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		renderStopsTable();
 	};
 	el("stopsQuery").oninput = renderStopsTable;
+	// Les actions de masse prennent leur icône une fois pour toutes ; celle qui change de texte la
+	// reçoit à chaque fois (cf. renderBulk).
+	Array.prototype.forEach.call(document.querySelectorAll("button[data-icon]"), function (button) {
+		labelButton(button, button.dataset.icon, button.textContent);
+	});
 	el("bulkHide").onclick = function () { bulk("hide"); };
 	el("bulkShow").onclick = function () { bulk("show"); };
 	el("bulkDiscard").onclick = function () { bulk("discard"); };
