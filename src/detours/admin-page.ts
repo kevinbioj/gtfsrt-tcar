@@ -405,6 +405,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				<div id="summary"></div>
 				<div class="fields">
 					<div class="field"><label>Raison</label><input id="label"></div>
+					<div class="field"><label>Description</label><input id="description" maxlength="80" placeholder="pour la reconnaître dans la liste — non publiée"></div>
 					<div id="period"></div>
 					<div class="field"><label>Priorité</label><input id="priority" type="number" step="1" value="0"></div>
 					<p class="note">En vigueur, ses tronçons écrasent ceux, de priorité moindre, qu'ils recouvrent. Le reste des modifications écrasées s'applique toujours.</p>
@@ -762,7 +763,12 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			return "<span class='toward' style='margin-left:0'>" + escapeHtml(towardOf(row)) + "</span>";
 		} },
 		what: { label: "Modification", cell: function (row) {
-			return perturbationRef(row) + escapeHtml(row.label) + originBadge(row);
+			return perturbationRef(row) + escapeHtml(row.label)
+				+ (row.description ? "<span class='toward'>" + escapeHtml(row.description) + "</span>" : "")
+				+ originBadge(row);
+		} },
+		description: { label: "Description", cell: function (row) {
+			return row.description ? escapeHtml(row.description) : "";
 		} },
 		origin: { label: "Origine", cell: function (row) {
 			// La raison ne se répète que si elle diffère du titre de l'info trafic, déjà dans le bandeau.
@@ -793,7 +799,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			}
 		},
 		alert: {
-			columns: [["select", "32px"], ["lineAndSens", "34%"], ["origin", "20%"], ["stops", "8%"], ["status", "18%"], ["actions", "20%"]],
+			columns: [["select", "32px"], ["lineAndSens", "26%"], ["description", "18%"], ["origin", "14%"], ["stops", "6%"], ["status", "16%"], ["actions", "20%"]],
 			keyOf: function (row) { return row.alertNumber !== null ? "A" + row.alertNumber : "R" + row.label; },
 			heading: function (rows) {
 				var row = rows[0];
@@ -2502,6 +2508,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var detail = state.detail;
 		var attached = detail.alertNumber !== null;
 		el("label").value = detail.labelInput || "";
+		el("description").value = detail.description || "";
 		el("label").placeholder = attached ? detail.alertHeader : "obligatoire";
 		state.readPeriods = periodFields(el("period"), detail.periodInputs, periodHint(attached)
 			+ (attached ? " Info trafic : " + describePeriods(detail.alertPeriods) + "." : ""),
@@ -3588,6 +3595,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var dropped = state.segments.length - kept.length;
 		var payload = {
 			label: el("label").value,
+			description: el("description").value,
 			periods: state.readPeriods(),
 			patternIds: state.patterns.length === state.detail.patterns.length ? [] : state.patterns,
 			removedStopIds: state.removed,

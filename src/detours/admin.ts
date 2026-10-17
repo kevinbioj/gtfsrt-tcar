@@ -719,6 +719,7 @@ function summarize(modification: ResolvedModification, deps: AdminDependencies, 
 		alertNumber: modification.alertNumber,
 		alertHeader: modification.alertHeader,
 		label: modification.label,
+		description: record.description,
 		routeId: modification.routeId,
 		line: lineName(gtfs, modification.routeId),
 		lineCode: lineCode(modification.routeId),
@@ -792,6 +793,7 @@ function summarizeOrphan(record: Modification, deps: AdminDependencies) {
 		alertNumber,
 		alertHeader,
 		label: record.label ?? alertHeader,
+		description: record.description,
 		routeId: record.routeId,
 		line: lineName(gtfs, record.routeId),
 		lineCode: lineCode(record.routeId),
@@ -1098,6 +1100,20 @@ function parseHeader(
 	return { label, periods };
 }
 
+/** Assez pour distinguer deux modifications d'une même info trafic, pas pour en refaire la raison. */
+const DESCRIPTION_MAX_LENGTH = 80;
+
+/** La description d'une modification, ou `null` si elle a été laissée vide. */
+function parseDescription(raw: unknown): string | null | { message: string } {
+	if (raw === undefined || raw === null) return null;
+	if (typeof raw !== "string") return { message: "Description attendue : un texte." };
+	const description = raw.trim();
+	if (description.length > DESCRIPTION_MAX_LENGTH) {
+		return { message: `Description trop longue : ${DESCRIPTION_MAX_LENGTH} caractères au plus.` };
+	}
+	return description.length > 0 ? description : null;
+}
+
 /**
  * Une période saisie, ou `null` si elle a été laissée vide. La fin peut manquer — la période est
  * alors ouverte — et doit sinon venir après le début.
@@ -1164,6 +1180,9 @@ function parseInput(
 	const header = parseHeader(payload, attached);
 	if ("message" in header) return header;
 
+	const description = parseDescription(payload.description);
+	if (typeof description === "object" && description !== null) return description;
+
 	const patternIds = parsePatterns(
 		payload.patternIds,
 		patternsFor(gtfs, modification.routeId, modification.directionId),
@@ -1227,6 +1246,7 @@ function parseInput(
 	return {
 		input: {
 			label: header.label,
+			description,
 			periods: header.periods,
 			patternIds: patternIds.ids,
 			removedStopIds,

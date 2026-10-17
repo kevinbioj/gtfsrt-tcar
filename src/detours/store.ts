@@ -221,6 +221,9 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 	ALTER TABLE modifications DROP COLUMN end_date;
 	ALTER TABLE modifications DROP COLUMN end_time;
 	`,
+	`
+	ALTER TABLE modifications ADD COLUMN description TEXT;
+	`,
 ];
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
@@ -348,6 +351,8 @@ export type Modification = {
 	directionId: number;
 	/** `null` : le titre de l'info trafic. */
 	label: string | null;
+	/** Une description courte, pour la reconnaître dans la liste. Rien n'en est publié ; `null` : aucune. */
+	description: string | null;
 	/** Les périodes saisies, dans l'ordre chronologique de leur début. Aucune : celles de l'info trafic. */
 	periods: ModificationPeriod[];
 	/**
@@ -383,7 +388,14 @@ export type CancelledDeparture = { stopId: string; departure: number };
 /** Ce qu'un enregistrement porte : tout ce qui se saisit, d'un bloc. */
 export type ModificationInput = Pick<
 	Modification,
-	"label" | "periods" | "patternIds" | "removedStopIds" | "segments" | "cancelledDepartures" | "priority"
+	| "label"
+	| "description"
+	| "periods"
+	| "patternIds"
+	| "removedStopIds"
+	| "segments"
+	| "cancelledDepartures"
+	| "priority"
 >;
 
 /** Ce qu'il faut pour créer une modification à la main. Le reste se saisit ensuite. */
@@ -477,6 +489,7 @@ export function useDetourStore(path: string) {
 				routeId: row.route_id,
 				directionId: row.direction_id,
 				label: row.label,
+				description: row.description,
 				periods: [],
 				patternIds: [],
 				removedStopIds: row.removed_overridden === 1 ? [] : null,
@@ -737,12 +750,9 @@ export function useDetourStore(path: string) {
 			if (!modifications.has(uid)) return undefined;
 
 			transaction(() => {
-				db.prepare("UPDATE modifications SET label = ?, priority = ?, updated_at = ? WHERE uid = ?").run(
-					input.label,
-					input.priority,
-					nowSeconds,
-					uid,
-				);
+				db.prepare(
+					"UPDATE modifications SET label = ?, description = ?, priority = ?, updated_at = ? WHERE uid = ?",
+				).run(input.label, input.description, input.priority, nowSeconds, uid);
 				writePeriods(uid, input.periods);
 				writePatterns(uid, input.patternIds);
 				writeRemoved(uid, input.removedStopIds);
@@ -923,6 +933,7 @@ type ModificationRow = {
 	route_id: string;
 	direction_id: number;
 	label: string | null;
+	description: string | null;
 	removed_overridden: number;
 	disabled: number;
 	priority: number;
