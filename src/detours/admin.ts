@@ -351,6 +351,31 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		return c.json(routes);
 	});
 
+	/**
+	 * Épingle des infos trafic, ou les désépingle. Épinglée, une info trafic qui sort du flux garde ses
+	 * modifications rattachées : elles se résolvent d'après son dernier relevé, sans rien publier.
+	 */
+	admin.post("/api/alerts/pin", async (c) => {
+		const payload = await readObject(c);
+		if ("message" in payload) return c.json({ code: 400, message: payload.message }, 400);
+		if (typeof payload.pinned !== "boolean") return c.json({ code: 400, message: "Booléen « pinned » attendu." }, 400);
+
+		const alertNumbers = Array.isArray(payload.alertNumbers) ? payload.alertNumbers.map(String) : [];
+		if (alertNumbers.length === 0) return c.json({ code: 400, message: "Aucune info trafic désignée." }, 400);
+		// Sans dernier relevé, une info trafic sortie du flux ne se résoudrait pas : rien à épingler.
+		const unknown = alertNumbers.find((alertNumber) => !deps.store.alertSnapshots.has(alertNumber));
+		if (payload.pinned && unknown !== undefined) {
+			return c.json({ code: 400, message: `Info trafic ${unknown} jamais relevée : elle ne s'épingle pas.` }, 400);
+		}
+
+		const count = deps.store.setPinned(alertNumbers, payload.pinned, nowSeconds());
+		refresh();
+		return c.json({
+			code: 200,
+			message: `${count} info(s) trafic ${payload.pinned ? "épinglée(s)" : "désépinglée(s)"}.`,
+		});
+	});
+
 	/** Les infos trafic du flux, pour y rattacher une modification. */
 	admin.get("/api/alerts", (c) => {
 		const alerts = deps.serviceAlerts.alerts
@@ -699,11 +724,31 @@ function headsignsOf(gtfs: StaticGtfs, routeId: string, directionId: number): st
 
 /**
  * Où se range une ligne du tableau : ce qui n'a pas commencé, ce qui court, ce qui est fini. Une
- * période sans borne court toujours.
+ * période sans borne court toujours. Une ligne dont l'info trafic, épinglée, a quitté le flux n'est
+ * dans aucun de ces onglets : seulement dans celui des épinglées.
  */
-function phaseOf(periods: AlertPeriod[], active: boolean, now: Temporal.Instant): "upcoming" | "current" | "ended" {
+function phaseOf(
+	periods: AlertPeriod[],
+	active: boolean,
+	withdrawn: boolean,
+	now: Temporal.Instant,
+): "upcoming" | "current" | "ended" | "withdrawn" {
+	if (withdrawn) return "withdrawn";
 	if (active) return "current";
 	return hasEnded(periods, now) ? "ended" : "upcoming";
+}
+
+/**
+ * Ce que dit le témoin d'une info trafic épinglée : « live » tant qu'elle est au flux et que sa
+ * dernière période n'est pas finie — ses modifications publient —, sinon terminée ou retirée.
+ */
+function alertStatus(
+	periods: AlertPeriod[],
+	withdrawn: boolean,
+	now: Temporal.Instant,
+): "live" | "ended" | "withdrawn" {
+	if (withdrawn) return "withdrawn";
+	return hasEnded(periods, now) ? "ended" : "live";
 }
 
 /** Ce que le tableau affiche d'une modification, sans la géographie que seule l'édition demande. */
@@ -726,7 +771,9 @@ function summarize(modification: ResolvedModification, deps: AdminDependencies, 
 		directionId: modification.directionId,
 		headsigns: headsignsOf(gtfs, modification.routeId, modification.directionId),
 		periods: modification.periods,
-		phase: phaseOf(modification.periods, modification.active, now),
+		phase: phaseOf(modification.periods, modification.active, modification.withdrawn, now),
+		pinned: modification.alertNumber !== null && deps.store.pinnedAlerts.has(modification.alertNumber),
+		alertStatus: alertStatus(modification.alertPeriods, modification.withdrawn, now),
 		disabled: modification.disabled,
 		priority: record.priority,
 		// Les tronçons écrasés en ce moment par un tronçon plus prioritaire, sur au moins un tracé.
@@ -770,7 +817,9 @@ function summarizeSuggestion(suggestion: Suggestion, deps: AdminDependencies, no
 		directionId: suggestion.directionId,
 		headsigns: headsignsOf(gtfs, suggestion.routeId, suggestion.directionId),
 		periods: suggestion.periods,
-		phase: phaseOf(suggestion.periods, suggestion.active, now),
+		phase: phaseOf(suggestion.periods, suggestion.active, suggestion.withdrawn, now),
+		pinned: deps.store.pinnedAlerts.has(suggestion.alertNumber),
+		alertStatus: alertStatus(suggestion.periods, suggestion.withdrawn, now),
 		removedStopCount: suggestion.removedStopIds.length,
 		firstSeenAt: suggestion.firstSeenAt,
 	};
@@ -801,6 +850,9 @@ function summarizeOrphan(record: Modification, deps: AdminDependencies) {
 		headsigns: headsignsOf(gtfs, record.routeId, record.directionId),
 		periods: record.periods.map((period) => ({ start: period.start, end: period.end, dailyWindow: null })),
 		phase: "orphan" as const,
+		// Une info trafic épinglée ne laisse pas d'orpheline : seulement celle qui n'a jamais été relevée.
+		pinned: false,
+		alertStatus: "withdrawn" as const,
 		disabled: record.disabled,
 		removedStopCount: record.removedStopIds?.length ?? 0,
 		patternCount: record.patternIds.length,
@@ -848,10 +900,6 @@ function detail(modification: ResolvedModification, deps: AdminDependencies) {
 	const gtfs = deps.gtfs.data;
 	const record = modification.record;
 	const { routeId, directionId } = modification;
-	const alert =
-		modification.alertNumber === null
-			? undefined
-			: deps.serviceAlerts.alerts.find((candidate) => candidate.alertNumber === modification.alertNumber);
 
 	// Les tracés empruntés du sens, services partiels compris : la modification peut n'en viser que
 	// certains, et c'est sur leurs arrêts que se choisissent les bornes de ses tronçons.
@@ -906,7 +954,7 @@ function detail(modification: ResolvedModification, deps: AdminDependencies) {
 			start: splitBound(period.start),
 			end: period.end === null ? null : splitBound(period.end),
 		})),
-		alertPeriods: alert?.periods ?? [],
+		alertPeriods: modification.alertPeriods,
 		// Le texte d'une info trafic est du HTML : le flux amont reprend ce que le CMS de l'exploitant a
 		// saisi, listes et plans de déviation compris. Il part nettoyé plutôt qu'échappé — la page
 		// l'affiche tel quel, et n'a pas à savoir d'où il vient (cf. `sanitizeHtml`).
@@ -952,14 +1000,16 @@ function detail(modification: ResolvedModification, deps: AdminDependencies) {
 
 /**
  * Les modifications visibles dont un tronçon recouvre l'un de ceux-ci, et dont la période croise
- * celle-ci. Invisible, celle-ci n'en a aucune : elle ne publie rien qui puisse se recouvrir.
+ * celle-ci. Invisible, ou son info trafic sortie du flux, celle-ci n'en a aucune : elle ne publie rien
+ * qui puisse se recouvrir.
  */
 function rivals(modification: ResolvedModification, deps: AdminDependencies): ResolvedModification[] {
-	if (modification.disabled) return [];
+	if (modification.disabled || modification.withdrawn) return [];
 	return [...deps.modificationIndex.modifications.values()].filter(
 		(other) =>
 			other.uid !== modification.uid &&
 			!other.disabled &&
+			!other.withdrawn &&
 			periodsOverlap(modification.periods, other.periods) &&
 			collides(modification, other, deps.gtfs.data),
 	);
@@ -1266,7 +1316,7 @@ function describeOther(modification: ResolvedModification, deps: AdminDependenci
 		alertNumber: modification.alertNumber,
 		label: modification.label,
 		periods: modification.periods,
-		phase: phaseOf(modification.periods, modification.active, now),
+		phase: phaseOf(modification.periods, modification.active, modification.withdrawn, now),
 		disabled: modification.disabled,
 		priority: modification.record.priority,
 		segmentCount: modification.record.segments.length,

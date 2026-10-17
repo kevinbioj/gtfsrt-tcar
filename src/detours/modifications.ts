@@ -32,8 +32,15 @@ export type ResolvedModification = {
 	patternIds: string[];
 	/** Les périodes saisies, sinon celles de l'info trafic. */
 	periods: AlertPeriod[];
+	/** Les périodes de l'info trafic, saisies ou non — aucune sans info trafic. */
+	alertPeriods: AlertPeriod[];
 	/** Vrai lorsque l'une des périodes couvre l'instant de l'indexation. */
 	active: boolean;
+	/**
+	 * Vrai lorsque son info trafic, épinglée, a quitté le flux : elle se résout d'après son dernier
+	 * relevé, mais ne publie rien — ni tronçon, ni arrêt sauté, ni course annulée.
+	 */
+	withdrawn: boolean;
 	/**
 	 * La période de communication de ses trip modifications, en secondes epoch : de son dernier
 	 * enregistrement à la fin de sa dernière période, exclue — `null` si rien ne la borne. Ce n'est
@@ -75,6 +82,8 @@ export type Suggestion = {
 	removedStopIds: string[];
 	periods: AlertPeriod[];
 	active: boolean;
+	/** Vrai lorsque son info trafic, épinglée, a quitté le flux (cf. `ResolvedModification.withdrawn`). */
+	withdrawn: boolean;
 	firstSeenAt: number;
 };
 
@@ -110,10 +119,21 @@ export function useModificationIndex(
 
 			store.recordAlerts(current, nowSeconds);
 
-			const reading = readAnalysis(current, gtfs.data);
-			store.syncAi(reading.proposals, nowSeconds);
+			// Les infos trafic épinglées sorties du flux restent, telles que relevées la dernière fois.
+			const live = new Set(current.map((alert) => alert.alertNumber));
+			const withdrawn = [...store.pinnedAlerts].flatMap((alertNumber) => {
+				const snapshot = live.has(alertNumber) ? undefined : store.alertSnapshots.get(alertNumber);
+				return snapshot === undefined ? [] : [snapshot];
+			});
 
-			const indexed = indexModifications(current, reading, store, gtfs.data, now);
+			const reading = readAnalysis([...current, ...withdrawn], gtfs.data);
+			// L'IA ne crée rien sur une info trafic sortie du flux : ce qu'elle y avait à créer l'a été.
+			store.syncAi(
+				reading.proposals.filter((proposal) => live.has(proposal.alertNumber)),
+				nowSeconds,
+			);
+
+			const indexed = indexModifications(current, withdrawn, reading, store, gtfs.data, now);
 			resource.modifications = indexed.modifications;
 			resource.suggestions = indexed.suggestions;
 			resource.orphans = indexed.orphans;
@@ -243,6 +263,9 @@ function runsOf(stops: readonly OrderedStop[], removed: ReadonlySet<string>): st
  * trafic par une autre, sous un autre numéro, avant la fin de la perturbation (« reprise du parcours
  * le … »), et ce qui a été saisi se rattache alors à la nouvelle plutôt que de se refaire.
  *
+ * Sauf si l'info trafic est épinglée (`withdrawn`) : elle se résout alors d'après son dernier relevé,
+ * comme si elle était encore au flux, et ne publie rien pour autant.
+ *
  * La priorité départage les tronçons qui se recouvrent (cf. `resolveOverrides`) : une déviation qui
  * en recouvre une autre le temps d'un chantier l'emporte, sans que les deux se replient l'une dans
  * l'autre. Le reste de la modification écrasée — ses autres tronçons, ses arrêts supprimés ailleurs,
@@ -250,12 +273,14 @@ function runsOf(stops: readonly OrderedStop[], removed: ReadonlySet<string>): st
  */
 function indexModifications(
 	alerts: readonly AnalyzedAlert[],
+	withdrawnAlerts: readonly AnalyzedAlert[],
 	reading: Reading,
 	store: DetourStore,
 	gtfs: StaticGtfs,
 	now: Temporal.Instant,
 ) {
-	const byNumber = new Map(alerts.map((alert) => [alert.alertNumber, alert]));
+	const byNumber = new Map([...alerts, ...withdrawnAlerts].map((alert) => [alert.alertNumber, alert]));
+	const withdrawnNumbers = new Set(withdrawnAlerts.map((alert) => alert.alertNumber));
 	const modifications = new Map<number, ResolvedModification>();
 	const skipIndex: SkipIndex = new Map();
 	const cancelIndex: CancelIndex = new Map();
@@ -281,6 +306,7 @@ function indexModifications(
 		const removedStopIds = record.removedStopIds !== null ? new Set(record.removedStopIds) : analysisStopIds;
 		const active = isActive(periods, now);
 		const end = lastPeriodEnd(periods);
+		const withdrawn = alert !== undefined && withdrawnNumbers.has(alert.alertNumber);
 
 		modifications.set(record.uid, {
 			uid: record.uid,
@@ -294,7 +320,9 @@ function indexModifications(
 			directionId: record.directionId,
 			patternIds: record.patternIds,
 			periods,
+			alertPeriods: alert?.periods ?? [],
 			active,
+			withdrawn,
 			communication: {
 				start: record.updatedAt,
 				end: end === null ? null : Math.floor(end.epochMilliseconds / 1000),
@@ -313,16 +341,17 @@ function indexModifications(
 	}
 
 	const contenders = [...modifications.values()].filter(
-		(modification) => modification.active && !modification.disabled,
+		(modification) => modification.active && !modification.disabled && !modification.withdrawn,
 	);
 	const yielded = resolveOverrides(contenders, gtfs);
 
 	for (const modification of modifications.values()) {
 		const { record, periods, removedStopIds } = modification;
-		// Invisible, elle ne fait rien sauter. Hors période, si : ses arrêts ne sautent que sur les courses
-		// qui passent à leurs bornes pendant l'une de ses périodes, et le feed porte les vingt-quatre
-		// heures à venir.
-		if (!record.disabled && removedStopIds.size > 0) {
+		// Invisible, ou son info trafic sortie du flux, elle ne fait rien sauter ni n'annule rien.
+		const silent = record.disabled || modification.withdrawn;
+		// Hors période, si : ses arrêts ne sautent que sur les courses qui passent à leurs bornes pendant
+		// l'une de ses périodes, et le feed porte les vingt-quatre heures à venir.
+		if (!silent && removedStopIds.size > 0) {
 			const buckets = skipIndex.get(record.routeId) ?? [];
 			const ceded = yielded.get(record.uid);
 			if (ceded === undefined) {
@@ -352,8 +381,9 @@ function indexModifications(
 		}
 
 		// Les annulations, elles, ne se jaugent pas maintenant mais course par course, à son départ
-		// (cf. `isCancelled`) : seule l'invisibilité les écarte d'emblée. Aucun tronçon ne les écrase.
-		if (!record.disabled) {
+		// (cf. `isCancelled`) : seul ce qui fait taire la modification les écarte d'emblée. Aucun tronçon
+		// ne les écrase.
+		if (!silent) {
 			const entry = { patternIds: record.patternIds.length === 0 ? null : new Set(record.patternIds), periods };
 			for (const { stopId, departure } of record.cancelledDepartures) {
 				const key = courseKey(record.routeId, record.directionId, stopId, departure);
@@ -378,6 +408,7 @@ function indexModifications(
 			removedStopIds: [...(reading.removed.get(key) ?? [])],
 			periods: alert.periods,
 			active: isActive(alert.periods, now),
+			withdrawn: withdrawnNumbers.has(alert.alertNumber),
 			firstSeenAt: store.alertFirstSeen.get(alert.alertNumber) ?? Math.floor(now.epochMilliseconds / 1000),
 		});
 	}

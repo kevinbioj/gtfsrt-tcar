@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import type { AnalyzedAlert } from "../gtfs-rt/use-service-alerts.js";
 import type { Coordinates } from "../utils/geometry.js";
 
 /**
@@ -223,6 +224,12 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 	`,
 	`
 	ALTER TABLE modifications ADD COLUMN description TEXT;
+	`,
+	// Le dernier relevé de chaque info trafic, analyse comprise (cf. `encodeAlert`) : une info trafic
+	// épinglée qui sort du flux se résout encore d'après lui. Et l'épingle elle-même — NULL : aucune.
+	`
+	ALTER TABLE alert_first_seen ADD COLUMN snapshot TEXT;
+	ALTER TABLE alert_first_seen ADD COLUMN pinned_at INTEGER;
 	`,
 ];
 
@@ -447,6 +454,10 @@ export function useDetourStore(path: string) {
 	const dismissed = new Set<string>();
 	const firstSeen = new Map<string, number>();
 	const headers = new Map<string, string>();
+	/** Le dernier relevé de chaque info trafic, tel qu'il est rangé : de quoi ne réécrire que ce qui change. */
+	const encoded = new Map<string, string>();
+	const snapshots = new Map<string, AnalyzedAlert>();
+	const pinned = new Set<string>();
 
 	const reload = () => {
 		modifications.clear();
@@ -454,6 +465,9 @@ export function useDetourStore(path: string) {
 		dismissed.clear();
 		firstSeen.clear();
 		headers.clear();
+		encoded.clear();
+		snapshots.clear();
+		pinned.clear();
 
 		for (const row of db.prepare("SELECT * FROM provisional_stops ORDER BY stop_uid").all() as ProvisionalRow[]) {
 			const stopId = provisionalStopId(row.stop_uid);
@@ -479,6 +493,11 @@ export function useDetourStore(path: string) {
 		for (const row of db.prepare("SELECT * FROM alert_first_seen").all() as FirstSeenRow[]) {
 			firstSeen.set(row.alert_number, row.first_seen_at);
 			if (row.header_text !== null) headers.set(row.alert_number, row.header_text);
+			if (row.snapshot !== null) {
+				encoded.set(row.alert_number, row.snapshot);
+				snapshots.set(row.alert_number, decodeAlert(row.snapshot));
+			}
+			if (row.pinned_at !== null) pinned.add(row.alert_number);
 		}
 
 		for (const row of db.prepare("SELECT * FROM modifications ORDER BY uid").all() as ModificationRow[]) {
@@ -669,23 +688,51 @@ export function useDetourStore(path: string) {
 		/** Numéro d'info trafic → dernier titre relevé, qu'elle soit encore au flux ou non. */
 		alertHeaders: headers as ReadonlyMap<string, string>,
 
+		/** Numéro d'info trafic → dernier relevé, analyse comprise, qu'elle soit encore au flux ou non. */
+		alertSnapshots: snapshots as ReadonlyMap<string, AnalyzedAlert>,
+
 		/**
-		 * Retient la première apparition des infos trafic du flux, et leur dernier titre. Une info trafic
+		 * Les infos trafic épinglées, par numéro. Sorties du flux, leurs modifications restent rattachées
+		 * et se résolvent d'après leur dernier relevé — sans rien publier.
+		 */
+		pinnedAlerts: pinned as ReadonlySet<string>,
+
+		/**
+		 * Retient la première apparition des infos trafic du flux, et leur dernier relevé. Une info trafic
 		 * déjà vue garde sa date : c'est l'ordre dans lequel elles sont arrivées, pas celui de leur
 		 * dernier passage.
 		 */
-		recordAlerts(alerts: Iterable<{ alertNumber: string; headerText: string }>, nowSeconds: number) {
+		recordAlerts(alerts: Iterable<AnalyzedAlert>, nowSeconds: number) {
 			const upsert = db.prepare(
-				`INSERT INTO alert_first_seen (alert_number, first_seen_at, header_text) VALUES (?, ?, ?)
-				 ON CONFLICT (alert_number) DO UPDATE SET header_text = excluded.header_text`,
+				`INSERT INTO alert_first_seen (alert_number, first_seen_at, header_text, snapshot) VALUES (?, ?, ?, ?)
+				 ON CONFLICT (alert_number) DO UPDATE SET header_text = excluded.header_text, snapshot = excluded.snapshot`,
 			);
-			for (const { alertNumber, headerText } of alerts) {
-				if (firstSeen.has(alertNumber) && headers.get(alertNumber) === headerText) continue;
+			for (const alert of alerts) {
+				const { alertNumber, headerText } = alert;
+				const snapshot = encodeAlert(alert);
+				if (firstSeen.has(alertNumber) && encoded.get(alertNumber) === snapshot) continue;
 				const seenAt = firstSeen.get(alertNumber) ?? nowSeconds;
-				upsert.run(alertNumber, seenAt, headerText);
+				upsert.run(alertNumber, seenAt, headerText, snapshot);
 				firstSeen.set(alertNumber, seenAt);
 				headers.set(alertNumber, headerText);
+				encoded.set(alertNumber, snapshot);
+				snapshots.set(alertNumber, decodeAlert(snapshot));
 			}
+		},
+
+		/**
+		 * Épingle des infos trafic, ou les désépingle. Seules celles déjà relevées s'épinglent : il faut
+		 * un dernier relevé pour les résoudre une fois sorties du flux. Renvoie le nombre de changements.
+		 */
+		setPinned(alertNumbers: Iterable<string>, pin: boolean, nowSeconds: number): number {
+			return transaction(() => {
+				const update = db.prepare("UPDATE alert_first_seen SET pinned_at = ? WHERE alert_number = ?");
+				let changes = 0;
+				for (const alertNumber of new Set(alertNumbers)) {
+					changes += Number(update.run(pin ? nowSeconds : null, alertNumber).changes);
+				}
+				return changes;
+			});
 		},
 
 		/**
@@ -907,6 +954,33 @@ function provisionalColumns(fields: ProvisionalStopFields) {
 	] as const;
 }
 
+/**
+ * Le relevé d'une info trafic en JSON. Les quais supprimés de chaque contribution sont un `Set`, que
+ * JSON ne sait pas écrire : ils passent en tableau, et en reviennent à la lecture.
+ */
+function encodeAlert(alert: AnalyzedAlert): string {
+	return JSON.stringify({
+		...alert,
+		contributions: alert.contributions.map((contribution) => ({
+			...contribution,
+			stopIds: [...contribution.stopIds],
+		})),
+	});
+}
+
+function decodeAlert(snapshot: string): AnalyzedAlert {
+	const raw = JSON.parse(snapshot) as Omit<AnalyzedAlert, "contributions"> & {
+		contributions: { routeId: string; directionId: number | null; stopIds: string[] }[];
+	};
+	return {
+		...raw,
+		contributions: raw.contributions.map((contribution) => ({
+			...contribution,
+			stopIds: new Set(contribution.stopIds),
+		})),
+	};
+}
+
 /** « 2026-09-24 » et « 08:30 » donnent « 2026-09-24T08:30 » ; sans heure, la date seule. */
 function joinBound(date: string, time: string | null): string {
 	return time === null ? date : `${date}T${time}`;
@@ -956,7 +1030,13 @@ type RemovedRow = { uid: number; stop_id: string };
 
 type DismissedRow = { alert_number: string; route_id: string; direction_id: number; dismissed_at: number };
 
-type FirstSeenRow = { alert_number: string; first_seen_at: number; header_text: string | null };
+type FirstSeenRow = {
+	alert_number: string;
+	first_seen_at: number;
+	header_text: string | null;
+	snapshot: string | null;
+	pinned_at: number | null;
+};
 
 type ProvisionalRow = {
 	stop_uid: number;

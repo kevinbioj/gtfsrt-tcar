@@ -90,12 +90,24 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	.line.plain .code { display: inline-block; }
 	.toward { color: var(--muted); margin-left: 8px; }
 	.ref { font-variant-numeric: tabular-nums; color: var(--muted); margin-right: 8px; }
+	/* Le témoin d'une info trafic épinglée : vert tant qu'elle publie, rouge terminée ou retirée. */
+	.lamp { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px;
+		vertical-align: 1px; }
+	.lamp.on { background: #2da44e; box-shadow: 0 0 4px #2da44e; }
+	.lamp.off { background: var(--danger); box-shadow: 0 0 4px var(--danger); }
 	/* Les regroupements : un bandeau par ligne ou par info trafic, et ses déviations dessous. */
-	tr.group { cursor: default; }
+	tr.group { cursor: pointer; }
 	tr.group td { background: #eef2f7; padding: 4px 10px; }
 	tr.group:hover td { background: #eef2f7; }
 	tr.group .bar { display: flex; align-items: center; gap: 8px; }
 	tr.group .bar .grow { flex: 1; }
+	tr.group .bar button { padding: 1px 8px; font-size: 12px; }
+	/* Le chevron qui replie le groupe : le bandeau entier le fait aussi, il ne fait que le montrer. */
+	tr.group .bar button.fold { border: none; background: none; padding: 0; width: 22px; height: 22px; flex: none;
+		display: inline-flex; align-items: center; justify-content: center; color: var(--ink); border-radius: 4px; }
+	tr.group .bar button.fold:hover { background: #dde3ec; }
+	tr.group .bar button.fold svg { width: 18px; height: 18px; transition: transform .12s; }
+	tr.group .bar button.fold.collapsed svg { transform: rotate(-90deg); }
 	tr.group .title { font-weight: 600; min-width: 0; overflow: hidden;
 		text-overflow: ellipsis; white-space: nowrap; }
 	.badge { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 12px;
@@ -325,6 +337,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			<button id="bulkHide">Masquer</button>
 			<button id="bulkShow">Afficher</button>
 			<button id="bulkAttach">Rattacher…</button>
+			<button id="bulkPin">Épingler</button>
+			<button id="bulkUnpin">Désépingler</button>
 			<button id="bulkDiscard" class="danger"></button>
 		</span>
 		<span class="grow"></span>
@@ -513,6 +527,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			<div class="actions">
 				<button id="save" class="primary">Enregistrer</button>
 				<button id="toggleVisible"></button>
+				<button id="togglePinned"></button>
 				<span class="grow"></span>
 				<button id="remove" class="danger"></button>
 			</div>
@@ -528,10 +543,12 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	var state = {
 		detail: null, rows: [], alerts: [], routes: [], segments: [], active: 0, mode: "idle",
-		// L'onglet du tableau : « current », « upcoming », « ended » ou « orphan ».
+		// L'onglet du tableau : « current », « upcoming », « ended », « orphan » ou « pinned ».
 		phase: "current",
 		// Les lignes cochées du tableau, par identifiant (cf. rowId).
 		selected: new Set(),
+		// Les groupes repliés du tableau, par groupement et clé de groupe (cf. groupKey).
+		collapsed: new Set(),
 		// La base des arrêts provisoires : sa carte, ses marqueurs par identifiant, et la pose en cours.
 		stopsMap: null, stopsLayer: null, provisionalStops: [], fareAreas: [], stations: [], stopMarkersById: {}, placingStop: false,
 		// L'arrêt provisoire choisi au tableau ou sur la carte, par identifiant publié.
@@ -746,10 +763,17 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	var LINE_CARTRIDGE = "https://storage.googleapis.com/bus-tracker-assets/line-cartridges/astuce/";
 
 	/**
-	 * Les onglets du tableau : ce qui court, ce qui vient, ce qui est fini, et ce dont l'info trafic a
-	 * quitté le flux — à rattacher à celle qui lui succède, ou à supprimer.
+	 * Les onglets du tableau : les infos trafic épinglées — qui ne disparaissent pas, même sorties du
+	 * flux —, puis ce qui court, ce qui vient, ce qui est fini, et ce dont l'info trafic a quitté le
+	 * flux — à rattacher à celle qui lui succède, ou à supprimer.
 	 */
-	var PHASES = [["current", "En cours"], ["upcoming", "À venir"], ["ended", "Terminées"], ["orphan", "Info trafic retirée"]];
+	var PHASES = [["pinned", "Épinglées"], ["current", "En cours"], ["upcoming", "À venir"], ["ended", "Terminées"],
+		["orphan", "Info trafic retirée"]];
+
+	/** La ligne figure-t-elle dans cet onglet ? Une épinglée n'est que dans le sien, quelle que soit sa phase. */
+	function inTab(row, phase) {
+		return phase === "pinned" ? row.pinned : !row.pinned && row.phase === phase;
+	}
 
 	/**
 	 * Les colonnes que le tableau sait rendre. Chaque groupement choisit les siennes : ce qui est commun
@@ -763,7 +787,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			return "<span class='toward' style='margin-left:0'>" + escapeHtml(towardOf(row)) + "</span>";
 		} },
 		what: { label: "Modification", cell: function (row) {
-			return perturbationRef(row) + escapeHtml(row.label)
+			return perturbationRef(row, state.phase === "pinned") + escapeHtml(row.label)
 				+ (row.description ? "<span class='toward'>" + escapeHtml(row.description) + "</span>" : "")
 				+ originBadge(row);
 		} },
@@ -803,7 +827,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			keyOf: function (row) { return row.alertNumber !== null ? "A" + row.alertNumber : "R" + row.label; },
 			heading: function (rows) {
 				var row = rows[0];
-				return perturbationRef(row)
+				return perturbationRef(row, state.phase === "pinned")
 					+ "<span class='title'>" + escapeHtml(row.alertNumber !== null ? row.alertHeader : row.label) + "</span>"
 					+ "<span class='grow'></span>"
 					+ "<span class='note'>" + countLabel(rows) + "</span>"
@@ -861,9 +885,23 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		return row.headsigns.length ? "→ " + row.headsigns.join(" / ") : "sens " + row.directionId;
 	}
 
-	/** Le numéro de l'info trafic, s'il y en a une. */
-	function perturbationRef(row) {
-		return row.alertNumber !== null ? "<span class='ref'>" + escapeHtml(row.alertNumber) + "</span>" : "";
+	/** Ce que dit le témoin d'une info trafic, au survol. */
+	var ALERT_STATUS = {
+		live: "Info trafic active : ses modifications sont publiées",
+		ended: "Info trafic inactive : terminée",
+		withdrawn: "Info trafic inactive : retirée du flux"
+	};
+
+	/**
+	 * Le numéro de l'info trafic, s'il y en a une — précédé, si « lamp », du témoin qui dit si elle est
+	 * active : au flux et pas terminée. L'infobulle couvre le témoin et le numéro : la pastille seule
+	 * est une cible bien petite.
+	 */
+	function perturbationRef(row, lamp) {
+		if (row.alertNumber === null) return "";
+		if (!lamp) return "<span class='ref'>" + escapeHtml(row.alertNumber) + "</span>";
+		return "<span class='ref' title='" + escapeHtml(ALERT_STATUS[row.alertStatus]) + "'><span class='lamp "
+			+ (row.alertStatus === "live" ? "on" : "off") + "'></span>" + escapeHtml(row.alertNumber) + "</span>";
 	}
 
 	/** D'où vient la ligne : l'analyse, une saisie, ou une suggestion à trancher. Il suit ce qu'il qualifie. */
@@ -932,7 +970,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var tabs = el("phaseTabs");
 		tabs.innerHTML = "";
 		PHASES.forEach(function (phase) {
-			var count = state.rows.filter(function (row) { return row.phase === phase[0]; }).length;
+			var count = state.rows.filter(function (row) { return inTab(row, phase[0]); }).length;
 			var button = document.createElement("button");
 			button.textContent = phase[1] + " (" + count + ")";
 			button.className = state.phase === phase[0] ? "active" : "";
@@ -954,7 +992,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 		var grouping = GROUPINGS[el("groupBy").value] || GROUPINGS.line;
 		var sort = SORTS[el("sortBy").value] || SORTS.number;
-		var visible = state.rows.filter(function (row) { return row.phase === state.phase; });
+		var visible = state.rows.filter(function (row) { return inTab(row, state.phase); });
 
 		// On n'agit que sur ce qu'on voit : ce qui a quitté l'onglet, ou la liste, se décoche.
 		var shown = new Set(visible.map(rowId));
@@ -988,19 +1026,54 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		body.innerHTML = "";
 
 		ordered.forEach(function (rows) {
+			var key = groupKey(grouping, rows[0]);
+			var collapsed = state.collapsed.has(key);
 			var head = document.createElement("tr");
 			head.className = "group";
 			head.innerHTML = "<td colspan='" + grouping.columns.length + "'><div class='bar'>"
 				+ grouping.heading(rows) + "</div></td>";
 			var bar = head.querySelector(".bar");
+			var fold = actionButton("", collapsed ? "fold collapsed" : "fold", function () {});
+			fold.innerHTML = "<svg viewBox='0 0 16 16' fill='none' stroke='currentColor' stroke-width='2'"
+				+ " stroke-linecap='round' stroke-linejoin='round'><path d='M4 6l4 4 4-4'/></svg>";
+			fold.title = collapsed ? "Déplier" : "Replier";
+			bar.insertBefore(fold, bar.firstChild);
 			bar.insertBefore(pickBox(rows), bar.firstChild);
+			// Tout le bandeau replie, sauf ce qui y agit déjà : la case, et les boutons d'action.
+			head.onclick = function (event) {
+				if (event.target.tagName === "INPUT" || (event.target.tagName === "BUTTON" && event.target !== fold)) return;
+				toggleGroup(key);
+			};
+			// Groupées par info trafic, elle s'épingle depuis son bandeau.
+			if (grouping === GROUPINGS.alert && rows[0].alertNumber !== null) {
+				var pinned = rows[0].pinned;
+				bar.appendChild(actionButton(pinned ? "Désépingler" : "Épingler", "", function () {
+					setPinned([rows[0].alertNumber], !pinned).then(loadList).catch(function (error) { alert(error.message); });
+				}));
+			}
 			body.appendChild(head);
 
-			rows.forEach(function (row) { body.appendChild(listRow(row, grouping)); });
+			if (!collapsed) rows.forEach(function (row) { body.appendChild(listRow(row, grouping)); });
 		});
 
 		el("listEmpty").className = visible.length === 0 ? "note" : "note hidden";
 		renderBulk();
+	}
+
+	/**
+	 * La clé d'un groupe, pour le retenir replié : le groupement en fait partie, une ligne et une info
+	 * trafic n'ont rien à voir l'une avec l'autre. Le repli vaut dans tous les onglets.
+	 */
+	function groupKey(grouping, row) {
+		return (grouping === GROUPINGS.alert ? "alert:" : "line:") + grouping.keyOf(row);
+	}
+
+	/** Replie ou déplie un groupe, et s'en souvient d'une visite à l'autre. */
+	function toggleGroup(key) {
+		if (state.collapsed.has(key)) state.collapsed.delete(key);
+		else state.collapsed.add(key);
+		remember("modifications.collapsed", JSON.stringify(Array.from(state.collapsed)));
+		renderList();
 	}
 
 	/** L'identifiant d'une ligne du tableau, pour la sélection. */
@@ -1057,6 +1130,13 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		el("bulkShow").disabled = hidden === 0;
 		el("bulkAttach").className = orphans > 0 ? "" : "hidden";
 		el("bulkAttach").disabled = orphans !== rows.length;
+
+		// L'épingle vaut pour l'info trafic : chaque bouton dit s'il en reste à épingler, ou à désépingler.
+		var attached = rows.filter(function (row) { return row.alertNumber !== null; });
+		el("bulkPin").className = attached.length > 0 ? "" : "hidden";
+		el("bulkUnpin").className = attached.length > 0 ? "" : "hidden";
+		el("bulkPin").disabled = !attached.some(function (row) { return !row.pinned; });
+		el("bulkUnpin").disabled = !attached.some(function (row) { return row.pinned; });
 		el("bulkDiscard").textContent = suggestions === rows.length ? "Ignorer"
 			: suggestions === 0 ? "Supprimer" : "Ignorer / supprimer";
 	}
@@ -1108,7 +1188,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	function listRow(row, grouping) {
 		var tr = document.createElement("tr");
 		var href = row.kind === "modification" ? "#/modification/" + row.uid : null;
-		tr.className = row.kind === "suggestion" ? "suggestion" : row.kind === "orphan" || row.disabled ? "muted" : "";
+		tr.className = row.kind === "suggestion" ? "suggestion"
+			: row.kind === "orphan" || row.disabled || row.phase === "withdrawn" ? "muted" : "";
 
 		tr.innerHTML = grouping.columns.map(function (column) {
 			var definition = COLUMNS[column[0]];
@@ -1227,6 +1308,26 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ action: "discard", uids: [row.uid], suggestions: [] })
 		}).then(loadList).catch(function (error) { alert(error.message); });
+	}
+
+	/** Épingle ou désépingle des infos trafic, par numéro. */
+	function setPinned(alertNumbers, pinned) {
+		return request(API + "/api/alerts/pin", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ alertNumbers: alertNumbers, pinned: pinned })
+		});
+	}
+
+	/** Épingle ou désépingle les infos trafic des lignes cochées. */
+	function bulkPin(pinned) {
+		var numbers = Array.from(new Set(selectedRows()
+			.filter(function (row) { return row.alertNumber !== null; })
+			.map(function (row) { return row.alertNumber; })));
+		setPinned(numbers, pinned).then(function () {
+			state.selected.clear();
+			loadList();
+		}).catch(function (error) { alert(error.message); });
 	}
 
 	/** Rend une modification visible ou invisible. */
@@ -2484,6 +2585,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	function phaseBadge(row) {
 		if (row.phase === "current") return '<span class="badge ok">en cours</span>';
 		if (row.phase === "ended") return '<span class="badge off">terminée</span>';
+		if (row.phase === "withdrawn") return '<span class="badge warn">info trafic retirée du flux</span>';
 		return '<span class="badge off">à venir</span>';
 	}
 
@@ -2520,6 +2622,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	function renderPublication() {
 		var detail = state.detail;
 		el("toggleVisible").textContent = detail.disabled ? "Afficher" : "Masquer";
+		el("togglePinned").textContent = detail.pinned ? "Désépingler l'info trafic" : "Épingler l'info trafic";
+		el("togglePinned").className = detail.alertNumber === null ? "hidden" : "";
 		el("remove").textContent = "Supprimer";
 	}
 
@@ -2534,6 +2638,17 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			renderHeading();
 			renderPublication();
 			setStatus(visible ? "Visible : publiée jusqu'à la fin de sa dernière période." : "Invisible : plus rien n'est publié.", "ok");
+		}).catch(function (error) { setStatus(error.message, "error"); });
+	}
+
+	/** L'épingle s'applique tout de suite, comme la visibilité : elle vaut pour l'info trafic entière. */
+	function togglePinned() {
+		var pinned = !state.detail.pinned;
+		setPinned([state.detail.alertNumber], pinned).then(function () {
+			state.detail.pinned = pinned;
+			renderPublication();
+			setStatus(pinned ? "Info trafic épinglée : ses modifications restent, même sortie du flux."
+				: "Info trafic désépinglée.", "ok");
 		}).catch(function (error) { setStatus(error.message, "error"); });
 	}
 
@@ -3660,6 +3775,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	el("sortBy").value = SORTS[recall("modifications.sortBy")] ? recall("modifications.sortBy") : "number";
 	state.phase = PHASES.some(function (phase) { return phase[0] === recall("modifications.phase"); })
 		? recall("modifications.phase") : "current";
+	try {
+		var collapsed = JSON.parse(recall("modifications.collapsed") || "[]");
+		if (Array.isArray(collapsed)) state.collapsed = new Set(collapsed.map(String));
+	} catch (error) { /* rien de retenu de lisible : tout est déplié */ }
 	el("groupBy").onchange = function (event) {
 		remember("modifications.groupBy", event.target.value);
 		renderList();
@@ -3697,6 +3816,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		selectSegment(Math.min(state.active, state.segments.length - 1));
 	};
 	el("toggleVisible").onclick = toggleVisible;
+	el("togglePinned").onclick = togglePinned;
 	el("dialogCancel").onclick = function () { el("dialog").close(); };
 	el("stopsSort").value = STOP_SORTS[recall("stops.sortBy")] ? recall("stops.sortBy") : "name";
 	el("stopsSort").onchange = function (event) {
@@ -3707,6 +3827,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	el("bulkHide").onclick = function () { bulk("hide"); };
 	el("bulkShow").onclick = function () { bulk("show"); };
 	el("bulkDiscard").onclick = function () { bulk("discard"); };
+	el("bulkPin").onclick = function () { bulkPin(true); };
+	el("bulkUnpin").onclick = function () { bulkPin(false); };
 	el("bulkAttach").onclick = function () {
 		reattach(selectedRows().filter(function (row) { return row.kind === "orphan"; }));
 	};

@@ -416,9 +416,9 @@ function collectCandidates(
 		// Invisible, hors de sa période de communication — de son dernier enregistrement à la fin de sa
 		// dernière période —, ou sans période dans les jours à venir, la modification ne s'annonce pas :
 		// c'est un choix ou un calendrier, pas un problème, et le journal n'a rien à en dire. Celles dont
-		// l'info trafic a quitté le flux ne sont pas même indexées.
+		// l'info trafic a quitté le flux ne sont pas même indexées, sauf épinglée : elles ne publient rien.
 		const { communication } = modification;
-		if (modification.disabled) continue;
+		if (modification.disabled || modification.withdrawn) continue;
 		if (nowSeconds < communication.start || (communication.end !== null && nowSeconds >= communication.end)) continue;
 		if (!periodsOverlap(modification.periods, window)) continue;
 		const record = modification.record;
