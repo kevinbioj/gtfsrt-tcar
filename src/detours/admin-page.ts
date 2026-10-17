@@ -67,7 +67,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		border-color: color-mix(in srgb, var(--tone) 55%, transparent); }
 	.tone.edit { --tone: var(--warn); }
 	.tone.show, .tone.accept { --tone: var(--ok); }
-	.tone.attach { --tone: var(--accent); }
+	.tone.attach, .tone.read { --tone: var(--accent); }
 	.tone.pin { --tone: var(--pin); }
 	.tone.danger { --tone: var(--danger); }
 	/* L'icône précède le texte, et laisse le clic au bouton : c'est lui que les lignes reconnaissent. */
@@ -231,6 +231,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	/* Les boîtes de dialogue des arrêts provisoires : un titre, un contenu, les actions en bas à droite. */
 	dialog { width: 440px; max-width: calc(100vw - 32px); padding: 16px; border: 1px solid var(--line);
 		border-radius: 8px; background: var(--panel); color: var(--ink); }
+	/* Celle qui donne à lire une info trafic s'élargit : ses tableaux et ses plans y tiennent mieux. */
+	dialog.wide { width: 720px; }
 	dialog::backdrop { background: rgba(20, 24, 31, .35); }
 	dialog h2 { font-size: 15px; margin: 0 0 12px; }
 	dialog .actions { justify-content: flex-end; }
@@ -1067,6 +1069,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				bar.appendChild(actionButton(pinned ? "Désépingler" : "Épingler", pinned ? "tone unpin" : "tone pin", function () {
 					setPinned([rows[0].alertNumber], !pinned).then(loadList).catch(function (error) { alert(error.message); });
 				}, pinned ? "unpin" : "pin"));
+				bar.appendChild(actionButton("Lire", "tone read", function () { showAlert(rows[0].alertNumber); }, "read"));
 			}
 			body.appendChild(head);
 
@@ -1270,13 +1273,31 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		dismiss: "M18 6 6 18M6 6l12 12",
 		attach: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71",
 		pin: "M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1Z",
-		unpin: "M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1ZM2 2l20 20"
+		unpin: "M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1ZM2 2l20 20",
+		read: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6M16 13H8M16 17H8M10 9H8"
 	};
 
 	/** Habille un bouton — ou un lien qui en a l'air — de son icône, suivie de son texte. */
 	function labelButton(button, icon, text) {
 		button.innerHTML = "<svg class='icon' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'"
 			+ " stroke-linecap='round' stroke-linejoin='round'><path d='" + ICONS[icon] + "'/></svg>" + escapeHtml(text);
+	}
+
+	/**
+	 * Le texte d'une info trafic, sans passer par l'une de ses modifications : son titre, ses périodes,
+	 * et son contenu déplié — on l'ouvre pour le lire.
+	 */
+	function showAlert(alertNumber) {
+		request(API + "/api/alerts/" + encodeURIComponent(alertNumber)).then(function (alert) {
+			openDialog({
+				title: "Info trafic " + alert.alertNumber,
+				wide: true,
+				body: "<p style='margin:0 0 4px'><strong>" + escapeHtml(alert.headerText) + "</strong></p>"
+					+ "<p class='note' style='margin:0 0 10px'>" + escapeHtml(describePeriods(alert.periods))
+					+ (alert.inFeed ? "" : " · retirée du flux, dernier relevé") + "</p>"
+					+ "<div class='richtext'>" + alert.descriptionHtml + "</div>"
+			});
+		}).catch(function (error) { alert(error.message); });
 	}
 
 	/** Accepte une suggestion, et ouvre la modification qu'elle devient. */
@@ -1644,15 +1665,20 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 */
 	function openDialog(options) {
 		var dialog = el("dialog");
+		// Sans « confirm », le dialogue ne fait que montrer : il n'a qu'un bouton, qui le ferme.
+		var readOnly = !options.confirm;
+		dialog.className = options.wide ? "wide" : "";
 		el("dialogTitle").textContent = options.title;
 		el("dialogBody").innerHTML = options.body;
 		el("dialogStatus").textContent = "";
-		el("dialogConfirm").textContent = options.confirmText;
-		el("dialogConfirm").className = options.danger ? "danger" : "primary";
+		el("dialogConfirm").textContent = options.confirmText || "";
+		el("dialogConfirm").className = readOnly ? "hidden" : options.danger ? "danger" : "primary";
 		el("dialogConfirm").disabled = false;
+		el("dialogCancel").textContent = readOnly ? "Fermer" : "Annuler";
 
 		el("dialogForm").onsubmit = function (event) {
 			event.preventDefault();
+			if (readOnly) return;
 			el("dialogConfirm").disabled = true;
 			options.confirm().then(function () {
 				dialog.close();

@@ -390,6 +390,27 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 	});
 
 	/**
+	 * Le texte d'une info trafic, pour le lire depuis la liste. Sortie du flux, elle se lit d'après son
+	 * dernier relevé : ce sont ses modifications qu'on trie, et c'est d'elle qu'il faut se souvenir.
+	 */
+	admin.get("/api/alerts/:alertNumber", (c) => {
+		const alertNumber = c.req.param("alertNumber");
+		const live = deps.serviceAlerts.alerts.find((alert) => alert.alertNumber === alertNumber);
+		const alert = live ?? deps.store.alertSnapshots.get(alertNumber);
+		if (alert === undefined) {
+			return c.json({ code: 404, message: `Info trafic ${alertNumber} jamais relevée.` }, 404);
+		}
+		return c.json({
+			alertNumber: alert.alertNumber,
+			headerText: alert.headerText,
+			periods: alert.periods,
+			inFeed: live !== undefined,
+			// Nettoyé plutôt qu'échappé, comme dans le détail d'une modification (cf. `sanitizeHtml`).
+			descriptionHtml: sanitizeHtml(alert.descriptionText),
+		});
+	});
+
+	/**
 	 * Les arrêts désignables, du GTFS comme de la base provisoire, dans une seule liste. C'est la même
 	 * chose du point de vue d'une déviation — un endroit où le véhicule s'arrête — et les séparer
 	 * obligerait à savoir d'avance dans laquelle des deux chercher.
