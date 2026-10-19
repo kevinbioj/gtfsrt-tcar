@@ -34,7 +34,7 @@ type Candidate = {
 	 * desserte : le tronçon publie une `Modification` de tracé seul (cf. `shapeOnly`).
 	 */
 	removes: boolean;
-	/** `null` pour une modification déclarée sans info trafic : il n'y a pas d'alerte à citer. */
+	/** `null` sans info trafic à citer : déclarée sans, ou la sienne sortie du flux. */
 	alertId: string | null;
 	routeId: string;
 	directionId: number;
@@ -416,9 +416,10 @@ function collectCandidates(
 		// Invisible, hors de sa période de communication — de son dernier enregistrement à la fin de sa
 		// dernière période —, ou sans période dans les jours à venir, la modification ne s'annonce pas :
 		// c'est un choix ou un calendrier, pas un problème, et le journal n'a rien à en dire. Celles dont
-		// l'info trafic a quitté le flux ne sont pas même indexées, sauf épinglée : elles ne publient rien.
+		// l'info trafic a quitté le flux ne sont pas même indexées, sauf épinglée : elles ne publient rien,
+		// sauf affichées à la main (cf. `silent`).
 		const { communication } = modification;
-		if (modification.disabled || modification.withdrawn) continue;
+		if (modification.silent) continue;
 		if (nowSeconds < communication.start || (communication.end !== null && nowSeconds >= communication.end)) continue;
 		if (!periodsOverlap(modification.periods, window)) continue;
 		const record = modification.record;
@@ -487,7 +488,8 @@ function collectCandidates(
 			const candidate: Candidate = {
 				label,
 				removes,
-				alertId: modification.alertId,
+				// Sortie du flux, l'info trafic n'est plus republiée : la citer renverrait à une alerte absente.
+				alertId: modification.withdrawn ? null : modification.alertId,
 				periods: modification.periods,
 				routeId: record.routeId,
 				directionId: record.directionId,

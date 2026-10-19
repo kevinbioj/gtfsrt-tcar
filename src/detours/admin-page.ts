@@ -355,6 +355,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			<span class="note" id="bulkCount"></span>
 			<button id="bulkHide" class="tone hide" data-icon="hide">Masquer</button>
 			<button id="bulkShow" class="tone show" data-icon="show">Afficher</button>
+			<button id="bulkAuto" class="tone" data-icon="auto">Automatique</button>
 			<button id="bulkAttach" class="tone attach" data-icon="attach">Rattacher…</button>
 			<button id="bulkPin" class="tone pin" data-icon="pin">Épingler</button>
 			<button id="bulkUnpin" class="tone unpin" data-icon="unpin">Désépingler</button>
@@ -546,6 +547,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			<div class="actions">
 				<button id="save" class="primary">Enregistrer</button>
 				<button id="toggleVisible"></button>
+				<button id="toggleAuto">Rendre à l'automatique</button>
 				<button id="togglePinned"></button>
 				<span class="grow"></span>
 				<button id="remove" class="danger"></button>
@@ -931,13 +933,14 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	/**
 	 * Ce que la modification déclare, en un coup d'œil : ses tronçons, ses tracés si elle n'en vise
-	 * qu'une partie, et qu'elle est invisible. Une suggestion ne déclare rien encore.
+	 * qu'une partie, et qu'elle est invisible ou affichée à la main. Une suggestion ne déclare rien encore.
 	 */
 	function statusBadges(row) {
 		if (row.kind === "suggestion") return "";
 
 		var badges = [];
 		if (row.disabled) badges.push('<span class="badge warn">invisible</span>');
+		if (row.forced) badges.push(FORCED_BADGE);
 		if (row.overriddenCount > 0) {
 			badges.push('<span class="badge warn">' + row.overriddenCount
 				+ (row.overriddenCount > 1 ? " tronçons écrasés" : " tronçon écrasé") + "</span>");
@@ -1128,10 +1131,22 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		return state.rows.filter(function (row) { return state.selected.has(rowId(row)); });
 	}
 
+	/** Une modification affichée à la main : rien d'automatique ne l'éteint. */
+	var FORCED_BADGE = '<span class="badge" title="Publiée même son info trafic retirée du flux ou terminée">affichée à la main</span>';
+
+	/**
+	 * Le bouton de visibilité d'une modification propose de l'afficher à la main quand elle est masquée,
+	 * ou quand elle ne publie plus d'elle-même — son info trafic sortie du flux. Sinon, de la masquer.
+	 */
+	function offersShow(row) {
+		return row.disabled || (!row.forced && row.phase === "withdrawn");
+	}
+
 	/**
 	 * La barre des actions de masse. Chaque bouton dit ce qu'il fera à la sélection : masquer ce qui est
-	 * visible, afficher ce qui est masqué, rattacher ce dont l'info trafic a quitté le flux, supprimer
-	 * les modifications — de l'IA ou saisies — et ignorer les suggestions.
+	 * visible, afficher à la main ce qui ne l'est pas déjà, rendre à l'automatique ce qui a été affiché
+	 * ou masqué à la main, rattacher ce dont l'info trafic a quitté le flux, supprimer les modifications
+	 * — de l'IA ou saisies — et ignorer les suggestions.
 	 */
 	function renderBulk() {
 		var rows = selectedRows();
@@ -1140,14 +1155,17 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 		var published = rows.filter(function (row) { return row.kind === "modification"; });
 		var hidden = published.filter(function (row) { return row.disabled; }).length;
+		var forced = published.filter(function (row) { return row.forced; }).length;
 		var orphans = rows.filter(function (row) { return row.kind === "orphan"; }).length;
 		var suggestions = rows.filter(function (row) { return row.kind === "suggestion"; }).length;
 
 		el("bulkCount").textContent = rows.length + (rows.length > 1 ? " cochées" : " cochée");
 		el("bulkHide").classList.toggle("hidden", orphans === rows.length);
 		el("bulkShow").classList.toggle("hidden", orphans === rows.length);
+		el("bulkAuto").classList.toggle("hidden", orphans === rows.length);
 		el("bulkHide").disabled = published.length - hidden === 0;
-		el("bulkShow").disabled = hidden === 0;
+		el("bulkShow").disabled = published.length - forced === 0;
+		el("bulkAuto").disabled = hidden + forced === 0;
 		el("bulkAttach").classList.toggle("hidden", orphans === 0);
 		el("bulkAttach").disabled = orphans !== rows.length;
 
@@ -1239,9 +1257,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			edit.href = href;
 			labelButton(edit, "edit", "Éditer");
 			cell.appendChild(edit);
-			cell.appendChild(actionButton(row.disabled ? "Afficher" : "Masquer", row.disabled ? "tone show" : "tone hide", function () {
-				setVisible(row.uid, row.disabled).then(loadList).catch(function (error) { alert(error.message); });
-			}, row.disabled ? "show" : "hide"));
+			var show = offersShow(row);
+			cell.appendChild(actionButton(show ? "Afficher" : "Masquer", show ? "tone show" : "tone hide", function () {
+				setVisibility(row.uid, show ? "shown" : "hidden").then(loadList).catch(function (error) { alert(error.message); });
+			}, show ? "show" : "hide"));
 			cell.appendChild(actionButton("Supprimer", "tone danger", function () {
 				removeModification(row).then(function (done) { if (done) loadList(); });
 			}, "remove"));
@@ -1274,6 +1293,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		attach: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71",
 		pin: "M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1Z",
 		unpin: "M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1ZM2 2l20 20",
+		auto: "M3 12a9 9 0 0 1 15.5-6.2L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.5 6.2L3 16M3 21v-5h5",
 		read: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6M16 13H8M16 17H8M10 9H8"
 	};
 
@@ -1392,12 +1412,12 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		}).catch(function (error) { alert(error.message); });
 	}
 
-	/** Rend une modification visible ou invisible. */
-	function setVisible(uid, visible) {
-		return request(API + "/api/modifications/" + uid + "/visible", {
+	/** Affiche une modification à la main (« shown »), la masque (« hidden »), ou la rend à l'automatique (« auto »). */
+	function setVisibility(uid, visibility) {
+		return request(API + "/api/modifications/" + uid + "/visibility", {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ visible: visible })
+			body: JSON.stringify({ visibility: visibility })
 		});
 	}
 
@@ -2662,6 +2682,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		var heading = "<div class='heading'>" + lineChip(detail.lineCode, detail.line)
 			+ "<span class='toward'>" + escapeHtml(towardOf(detail)) + "</span>"
 			+ "<span class='badges'><div>" + (detail.disabled ? '<span class="badge warn">invisible</span>' : "")
+			+ (detail.forced ? FORCED_BADGE : "")
 			+ (detail.overriddenCount > 0 ? '<span class="badge warn">écrasée en partie</span>' : "")
 			+ phaseBadge(detail) + "</div><div>" + originBadge(detail) + "</div></span></div>";
 
@@ -2688,7 +2709,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	/** Les deux actions qui ne passent pas par l'enregistrement : la visibilité, et la suppression. */
 	function renderPublication() {
 		var detail = state.detail;
-		el("toggleVisible").textContent = detail.disabled ? "Afficher" : "Masquer";
+		el("toggleVisible").textContent = offersShow(detail) ? "Afficher" : "Masquer";
+		el("toggleAuto").className = detail.disabled || detail.forced ? "" : "hidden";
 		el("togglePinned").textContent = detail.pinned ? "Désépingler l'info trafic" : "Épingler l'info trafic";
 		el("togglePinned").className = detail.alertNumber === null ? "hidden" : "";
 		el("remove").textContent = "Supprimer";
@@ -2696,16 +2718,32 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	/**
 	 * La visibilité s'applique tout de suite, sans enregistrer le reste : ce qui est en cours de saisie
-	 * reste où il est.
+	 * reste où il est. Seul l'état de publication est relu — la phase en dépend.
 	 */
-	function toggleVisible() {
-		var visible = state.detail.disabled;
-		setVisible(state.detail.uid, visible).then(function () {
-			state.detail.disabled = !visible;
+	function applyVisibility(visibility, message) {
+		var uid = state.detail.uid;
+		setVisibility(uid, visibility).then(function () {
+			return request(API + "/api/modifications/" + uid);
+		}).then(function (fresh) {
+			state.detail.disabled = fresh.disabled;
+			state.detail.forced = fresh.forced;
+			state.detail.phase = fresh.phase;
 			renderHeading();
 			renderPublication();
-			setStatus(visible ? "Visible : publiée jusqu'à la fin de sa dernière période." : "Invisible : plus rien n'est publié.", "ok");
+			setStatus(message, "ok");
 		}).catch(function (error) { setStatus(error.message, "error"); });
+	}
+
+	function toggleVisible() {
+		if (offersShow(state.detail)) {
+			applyVisibility("shown", "Affichée à la main : publiée même son info trafic retirée du flux ou terminée, jusqu'à ce qu'on la masque.");
+		} else {
+			applyVisibility("hidden", "Invisible : plus rien n'est publié.");
+		}
+	}
+
+	function toggleAuto() {
+		applyVisibility("auto", "Automatique : publiée tant que son info trafic est au flux et en vigueur.");
 	}
 
 	/** L'épingle s'applique tout de suite, comme la visibilité : elle vaut pour l'info trafic entière. */
@@ -3883,6 +3921,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		selectSegment(Math.min(state.active, state.segments.length - 1));
 	};
 	el("toggleVisible").onclick = toggleVisible;
+	el("toggleAuto").onclick = toggleAuto;
 	el("togglePinned").onclick = togglePinned;
 	el("dialogCancel").onclick = function () { el("dialog").close(); };
 	el("stopsSort").value = STOP_SORTS[recall("stops.sortBy")] ? recall("stops.sortBy") : "name";
@@ -3898,6 +3937,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	});
 	el("bulkHide").onclick = function () { bulk("hide"); };
 	el("bulkShow").onclick = function () { bulk("show"); };
+	el("bulkAuto").onclick = function () { bulk("auto"); };
 	el("bulkDiscard").onclick = function () { bulk("discard"); };
 	el("bulkPin").onclick = function () { bulkPin(true); };
 	el("bulkUnpin").onclick = function () { bulkPin(false); };

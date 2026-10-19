@@ -182,19 +182,26 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		return c.json(detail(saved, deps));
 	});
 
-	/** Visible ou invisible. Invisible, rien ne sort : ni ses tronçons, ni ses arrêts supprimés. */
-	admin.put("/api/modifications/:uid/visible", async (c) => {
+	/**
+	 * Affichée à la main, masquée, ou rendue à l'automatique. Affichée à la main, elle publie quoi que
+	 * devienne son info trafic ; invisible, rien ne sort : ni ses tronçons, ni ses arrêts supprimés.
+	 */
+	admin.put("/api/modifications/:uid/visibility", async (c) => {
 		const modification = resolve(c);
 		if (modification === undefined) return c.json({ code: 404, message: "Modification inconnue." }, 404);
 
 		const payload = await readObject(c);
 		if ("message" in payload) return c.json({ code: 400, message: payload.message }, 400);
-		if (typeof payload.visible !== "boolean")
-			return c.json({ code: 400, message: "Booléen « visible » attendu." }, 400);
+		const visibility = payload.visibility;
+		if (visibility !== "auto" && visibility !== "shown" && visibility !== "hidden")
+			return c.json({ code: 400, message: "Visibilité attendue : « auto », « shown » ou « hidden »." }, 400);
 
-		deps.store.setDisabled([modification.uid], !payload.visible);
+		deps.store.setVisibility([modification.uid], visibility);
 		refresh();
-		return c.json({ code: 200, message: payload.visible ? "Visible." : "Invisible." });
+		return c.json({
+			code: 200,
+			message: visibility === "shown" ? "Affichée." : visibility === "hidden" ? "Invisible." : "Automatique.",
+		});
 	});
 
 	/**
@@ -210,10 +217,10 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 	});
 
 	/**
-	 * Une action sur les lignes cochées du tableau, d'un bloc : les masquer, les afficher, ou les
-	 * écarter — supprimer les modifications, ignorer les suggestions. Masquer ou afficher ne vaut que
-	 * pour les modifications au flux ; une suggestion ne publie rien, elle ne s'ignore que, et une
-	 * modification dont l'info trafic est sortie du flux ne publie rien non plus.
+	 * Une action sur les lignes cochées du tableau, d'un bloc : les masquer, les afficher à la main, les
+	 * rendre à l'automatique, ou les écarter — supprimer les modifications, ignorer les suggestions.
+	 * Masquer ou afficher ne vaut que pour les modifications résolues ; une suggestion ne publie rien,
+	 * elle ne s'ignore que.
 	 *
 	 * Ce qui a disparu entre l'affichage et le clic est passé sous silence : le résultat est le même.
 	 */
@@ -222,8 +229,8 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		if ("message" in payload) return c.json({ code: 400, message: payload.message }, 400);
 
 		const action = payload.action;
-		if (action !== "hide" && action !== "show" && action !== "discard") {
-			return c.json({ code: 400, message: "Action attendue : « hide », « show » ou « discard »." }, 400);
+		if (action !== "hide" && action !== "show" && action !== "auto" && action !== "discard") {
+			return c.json({ code: 400, message: "Action attendue : « hide », « show », « auto » ou « discard »." }, 400);
 		}
 
 		const uids = Array.isArray(payload.uids) ? payload.uids : [];
@@ -238,9 +245,9 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		if (action === "discard") {
 			discard(deps, modifications, suggestions, orphans);
 		} else {
-			deps.store.setDisabled(
+			deps.store.setVisibility(
 				modifications.map((modification) => modification.uid),
-				action === "hide",
+				action === "hide" ? "hidden" : action === "show" ? "shown" : "auto",
 			);
 		}
 
@@ -792,10 +799,11 @@ function summarize(modification: ResolvedModification, deps: AdminDependencies, 
 		directionId: modification.directionId,
 		headsigns: headsignsOf(gtfs, modification.routeId, modification.directionId),
 		periods: modification.periods,
-		phase: phaseOf(modification.periods, modification.active, modification.withdrawn, now),
+		phase: phaseOf(modification.periods, modification.active, modification.withdrawn && !modification.forced, now),
 		pinned: modification.alertNumber !== null && deps.store.pinnedAlerts.has(modification.alertNumber),
 		alertStatus: alertStatus(modification.alertPeriods, modification.withdrawn, now),
 		disabled: modification.disabled,
+		forced: modification.forced,
 		priority: record.priority,
 		// Les tronçons écrasés en ce moment par un tronçon plus prioritaire, sur au moins un tracé.
 		overriddenCount: modification.overridden.size,
@@ -875,6 +883,7 @@ function summarizeOrphan(record: Modification, deps: AdminDependencies) {
 		pinned: false,
 		alertStatus: "withdrawn" as const,
 		disabled: record.disabled,
+		forced: record.forced,
 		removedStopCount: record.removedStopIds?.length ?? 0,
 		patternCount: record.patternIds.length,
 		patternTotal: patternsFor(gtfs, record.routeId, record.directionId).length,
@@ -1020,17 +1029,16 @@ function detail(modification: ResolvedModification, deps: AdminDependencies) {
 }
 
 /**
- * Les modifications visibles dont un tronçon recouvre l'un de ceux-ci, et dont la période croise
- * celle-ci. Invisible, ou son info trafic sortie du flux, celle-ci n'en a aucune : elle ne publie rien
- * qui puisse se recouvrir.
+ * Les modifications publiées dont un tronçon recouvre l'un de ceux-ci, et dont la période croise
+ * celle-ci. Muette — invisible, ou son info trafic sortie du flux —, celle-ci n'en a aucune : elle ne
+ * publie rien qui puisse se recouvrir.
  */
 function rivals(modification: ResolvedModification, deps: AdminDependencies): ResolvedModification[] {
-	if (modification.disabled || modification.withdrawn) return [];
+	if (modification.silent) return [];
 	return [...deps.modificationIndex.modifications.values()].filter(
 		(other) =>
 			other.uid !== modification.uid &&
-			!other.disabled &&
-			!other.withdrawn &&
+			!other.silent &&
 			periodsOverlap(modification.periods, other.periods) &&
 			collides(modification, other, deps.gtfs.data),
 	);
@@ -1337,8 +1345,9 @@ function describeOther(modification: ResolvedModification, deps: AdminDependenci
 		alertNumber: modification.alertNumber,
 		label: modification.label,
 		periods: modification.periods,
-		phase: phaseOf(modification.periods, modification.active, modification.withdrawn, now),
+		phase: phaseOf(modification.periods, modification.active, modification.withdrawn && !modification.forced, now),
 		disabled: modification.disabled,
+		forced: modification.forced,
 		priority: modification.record.priority,
 		segmentCount: modification.record.segments.length,
 		removedStopCount: removedOnCourse(modification, deps.gtfs.data).length,

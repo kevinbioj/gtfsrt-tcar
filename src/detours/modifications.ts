@@ -30,15 +30,18 @@ export type ResolvedModification = {
 	directionId: number;
 	/** Les tracés visés, ou aucun pour tous. */
 	patternIds: string[];
-	/** Les périodes saisies, sinon celles de l'info trafic. */
+	/**
+	 * Les périodes saisies, sinon celles de l'info trafic — aucune, donc sans fin, pour une modification
+	 * affichée à la main : rien d'automatique ne doit l'éteindre.
+	 */
 	periods: AlertPeriod[];
 	/** Les périodes de l'info trafic, saisies ou non — aucune sans info trafic. */
 	alertPeriods: AlertPeriod[];
 	/** Vrai lorsque l'une des périodes couvre l'instant de l'indexation. */
 	active: boolean;
 	/**
-	 * Vrai lorsque son info trafic, épinglée, a quitté le flux : elle se résout d'après son dernier
-	 * relevé, mais ne publie rien — ni tronçon, ni arrêt sauté, ni course annulée.
+	 * Vrai lorsque son info trafic, épinglée ou la modification affichée à la main, a quitté le flux :
+	 * elle se résout d'après son dernier relevé, et ne publie rien sauf affichée à la main (cf. `silent`).
 	 */
 	withdrawn: boolean;
 	/**
@@ -49,6 +52,13 @@ export type ResolvedModification = {
 	 */
 	communication: { start: number; end: number | null };
 	disabled: boolean;
+	/** Affichée à la main : publiée quoi que devienne son info trafic (cf. `Modification.forced`). */
+	forced: boolean;
+	/**
+	 * Ne publie rien — ni tronçon, ni arrêt sauté, ni course annulée : invisible, ou son info trafic
+	 * sortie du flux sans que la modification ait été affichée à la main.
+	 */
+	silent: boolean;
 	/**
 	 * Ses tronçons écrasés à l'instant de l'indexation : rang du tronçon → tracés sur lesquels un
 	 * tronçon plus prioritaire, en vigueur et visible, en recouvre la plage (cf. `resolveOverrides`).
@@ -119,9 +129,13 @@ export function useModificationIndex(
 
 			store.recordAlerts(current, nowSeconds);
 
-			// Les infos trafic épinglées sorties du flux restent, telles que relevées la dernière fois.
+			// Les infos trafic épinglées sorties du flux restent, telles que relevées la dernière fois — et
+			// celles des modifications affichées à la main, qui ne doivent pas disparaître d'elles-mêmes.
 			const live = new Set(current.map((alert) => alert.alertNumber));
-			const withdrawn = [...store.pinnedAlerts].flatMap((alertNumber) => {
+			const kept = new Set(store.pinnedAlerts);
+			for (const record of store.modifications.values())
+				if (record.forced && record.alertNumber !== null) kept.add(record.alertNumber);
+			const withdrawn = [...kept].flatMap((alertNumber) => {
 				const snapshot = live.has(alertNumber) ? undefined : store.alertSnapshots.get(alertNumber);
 				return snapshot === undefined ? [] : [snapshot];
 			});
@@ -263,8 +277,10 @@ function runsOf(stops: readonly OrderedStop[], removed: ReadonlySet<string>): st
  * trafic par une autre, sous un autre numéro, avant la fin de la perturbation (« reprise du parcours
  * le … »), et ce qui a été saisi se rattache alors à la nouvelle plutôt que de se refaire.
  *
- * Sauf si l'info trafic est épinglée (`withdrawn`) : elle se résout alors d'après son dernier relevé,
- * comme si elle était encore au flux, et ne publie rien pour autant.
+ * Sauf si l'info trafic est épinglée, ou la modification affichée à la main (`withdrawn`) : elle se
+ * résout alors d'après son dernier relevé, comme si elle était encore au flux. Elle ne publie rien
+ * pour autant, sauf affichée à la main : c'est ce qui distingue l'activation manuelle de l'automatique,
+ * qui s'éteint avec son info trafic.
  *
  * La priorité départage les tronçons qui se recouvrent (cf. `resolveOverrides`) : une déviation qui
  * en recouvre une autre le temps d'un chantier l'emporte, sans que les deux se replient l'une dans
@@ -298,10 +314,14 @@ function indexModifications(
 		const key = alert === undefined ? null : scopeKey(alert.alertNumber, record.routeId, record.directionId);
 		if (key !== null) covered.add(key);
 
+		// Affichée à la main, elle ne suit pas les périodes de son info trafic : elle s'éteindrait avec elles.
+		// Celles qu'on a saisies, si.
 		const periods: AlertPeriod[] =
 			record.periods.length > 0
 				? record.periods.map((period) => ({ start: period.start, end: period.end, dailyWindow: null }))
-				: (alert?.periods ?? []);
+				: record.forced
+					? []
+					: (alert?.periods ?? []);
 		const analysisStopIds = new Set(key === null ? [] : (reading.removed.get(key) ?? []));
 		const removedStopIds = record.removedStopIds !== null ? new Set(record.removedStopIds) : analysisStopIds;
 		const active = isActive(periods, now);
@@ -328,6 +348,8 @@ function indexModifications(
 				end: end === null ? null : Math.floor(end.epochMilliseconds / 1000),
 			},
 			disabled: record.disabled,
+			forced: record.forced,
+			silent: record.disabled || (withdrawn && !record.forced),
 			removedStopIds,
 			removedFromAnalysis: record.removedStopIds === null,
 			analysisStopIds,
@@ -340,15 +362,13 @@ function indexModifications(
 		});
 	}
 
-	const contenders = [...modifications.values()].filter(
-		(modification) => modification.active && !modification.disabled && !modification.withdrawn,
-	);
+	const contenders = [...modifications.values()].filter((modification) => modification.active && !modification.silent);
 	const yielded = resolveOverrides(contenders, gtfs);
 
 	for (const modification of modifications.values()) {
-		const { record, periods, removedStopIds } = modification;
-		// Invisible, ou son info trafic sortie du flux, elle ne fait rien sauter ni n'annule rien.
-		const silent = record.disabled || modification.withdrawn;
+		const { record, periods, removedStopIds, silent } = modification;
+		// Invisible, ou son info trafic sortie du flux sans affichage manuel, elle ne fait rien sauter ni
+		// n'annule rien.
 		// Hors période, si : ses arrêts ne sautent que sur les courses qui passent à leurs bornes pendant
 		// l'une de ses périodes, et le feed porte les vingt-quatre heures à venir.
 		if (!silent && removedStopIds.size > 0) {
@@ -531,6 +551,7 @@ function overlaps(a: Placement, b: Placement): boolean {
  */
 function hasInput(record: Modification): boolean {
 	return (
+		record.forced ||
 		record.segments.length > 0 ||
 		record.cancelledDepartures.length > 0 ||
 		record.label !== null ||

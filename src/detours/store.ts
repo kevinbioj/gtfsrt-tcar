@@ -231,6 +231,11 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 	ALTER TABLE alert_first_seen ADD COLUMN snapshot TEXT;
 	ALTER TABLE alert_first_seen ADD COLUMN pinned_at INTEGER;
 	`,
+	// Affichée à la main : publiée quoi que devienne son info trafic — retirée du flux ou terminée —,
+	// jusqu'à ce qu'on la masque ou la rende à l'automatique. Jamais en même temps que `disabled`.
+	`
+	ALTER TABLE modifications ADD COLUMN forced INTEGER NOT NULL DEFAULT 0;
+	`,
 ];
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
@@ -339,6 +344,12 @@ export type DetourLegMode = "route" | "free";
 export type ModificationOrigin = "ai" | "manual";
 
 /**
+ * Affichée à la main (`shown`), masquée (`hidden`), ou laissée à l'automatique (`auto`) : publiée
+ * tant que son info trafic est au flux et en vigueur.
+ */
+export type Visibility = "auto" | "shown" | "hidden";
+
+/**
  * Une période saisie d'une modification, bornes au format « AAAA-MM-JJ » ou « AAAA-MM-JJTHH:MM » —
  * celui des périodes d'info trafic, qui se jaugent de la même façon (cf. `isActive`). Sans fin, elle
  * est ouverte.
@@ -371,6 +382,11 @@ export type Modification = {
 	removedStopIds: string[] | null;
 	/** Invisible : ni publiée, ni ses arrêts sautés. */
 	disabled: boolean;
+	/**
+	 * Affichée à la main : rien d'automatique ne l'éteint. Elle publie même son info trafic retirée du
+	 * flux ou terminée, et sans période saisie, elle ne finit pas (cf. `indexModifications`).
+	 */
+	forced: boolean;
 	/**
 	 * Plus elle est élevée, plus la modification l'emporte : en vigueur et visible, elle écrase celles
 	 * de priorité moindre qui touchent les mêmes courses. 0 par défaut.
@@ -513,6 +529,7 @@ export function useDetourStore(path: string) {
 				patternIds: [],
 				removedStopIds: row.removed_overridden === 1 ? [] : null,
 				disabled: row.disabled === 1,
+				forced: row.forced === 1,
 				priority: row.priority,
 				createdAt: row.created_at,
 				updatedAt: row.updated_at,
@@ -824,12 +841,18 @@ export function useDetourStore(path: string) {
 			});
 		},
 
-		/** Rend des modifications visibles ou invisibles. Invisible, rien de ce qu'elle déclare ne sort. */
-		setDisabled(uids: Iterable<number>, disabled: boolean): number {
+		/**
+		 * Affiche des modifications à la main, les masque, ou les rend à l'automatique — publiées tant que
+		 * leur info trafic est au flux et en vigueur. Invisible, rien de ce qu'elle déclare ne sort.
+		 */
+		setVisibility(uids: Iterable<number>, visibility: Visibility): number {
 			return transaction(() => {
-				const update = db.prepare("UPDATE modifications SET disabled = ? WHERE uid = ?");
+				const update = db.prepare("UPDATE modifications SET disabled = ?, forced = ? WHERE uid = ?");
 				let changes = 0;
-				for (const uid of uids) changes += Number(update.run(disabled ? 1 : 0, uid).changes);
+				for (const uid of uids) {
+					const result = update.run(visibility === "hidden" ? 1 : 0, visibility === "shown" ? 1 : 0, uid);
+					changes += Number(result.changes);
+				}
 				return changes;
 			});
 		},
@@ -1010,6 +1033,7 @@ type ModificationRow = {
 	description: string | null;
 	removed_overridden: number;
 	disabled: number;
+	forced: number;
 	priority: number;
 	created_at: number;
 	updated_at: number;
