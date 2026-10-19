@@ -1,6 +1,7 @@
 import GtfsRealtime from "gtfs-realtime-bindings";
 
 const CANCELED = GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.CANCELED;
+const SCHEDULED = GtfsRealtime.transit_realtime.TripUpdate.StopTimeUpdate.ScheduleRelationship.SCHEDULED;
 
 export function createFeed(
 	/** La dernière modification du contenu, en secondes epoch (cf. `useChangeTracker`). */
@@ -32,7 +33,7 @@ export function createFeed(
 						// Une course sans arrêt n'a rien à dire — sauf annulée : le descripteur dit tout.
 						.flatMap(([id, tripUpdate]) =>
 							tripUpdate.stopTimeUpdate?.length || tripUpdate.trip?.scheduleRelationship === CANCELED
-								? [{ id, tripUpdate }]
+								? [{ id, tripUpdate: withScheduleRelationships(tripUpdate) }]
 								: [],
 						)
 						.toArray()
@@ -47,4 +48,26 @@ export function createFeed(
 			...(alertEntities ?? []),
 		],
 	});
+}
+
+/**
+ * Renseigne `SCHEDULED` sur les arrêts qui ne disent rien de leur desserte — arrêts rendus, courses
+ * relayées ou rattachées à l'ancien GTFS-RT. C'est ce que le protobuf sous-entend, mais le JSON le
+ * tait, et tous les consommateurs ne s'y fient pas. La course est copiée : celle du store reste
+ * telle que la source l'a dite.
+ */
+function withScheduleRelationships(
+	tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate,
+): GtfsRealtime.transit_realtime.ITripUpdate {
+	if (tripUpdate.stopTimeUpdate?.every(({ scheduleRelationship }) => scheduleRelationship != null) ?? true)
+		return tripUpdate;
+
+	return {
+		...tripUpdate,
+		stopTimeUpdate: tripUpdate.stopTimeUpdate?.map((stopTimeUpdate) =>
+			stopTimeUpdate.scheduleRelationship == null
+				? { ...stopTimeUpdate, scheduleRelationship: SCHEDULED }
+				: stopTimeUpdate,
+		),
+	};
 }
