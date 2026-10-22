@@ -342,22 +342,9 @@ console.log(`➔ Listening on :${PORT}`);
 // ---
 
 async function poll() {
-	let feed: GtfsRealtime.transit_realtime.FeedMessage;
-
-	try {
-		const response = await fetch(VEHICLE_POSITIONS_URL);
-		if (!response.ok || response.status === 204) {
-			console.error(`✘ Vehicle positions fetch failed (HTTP ${response.status}).`);
-			// Le registre n'est pas vidé : ses véhicules gardent leur dernier relevé et cessent d'être
-			// émis d'eux-mêmes en vieillissant.
-			return;
-		}
-
-		feed = GtfsRealtime.transit_realtime.FeedMessage.decode(Buffer.from(await response.arrayBuffer()));
-	} catch (cause) {
-		console.error("✘ Poll error:", cause);
-		return;
-	}
+	const feed =
+		(await fetchFeed(VEHICLE_POSITIONS_URL, "Vehicle positions")) ??
+		GtfsRealtime.transit_realtime.FeedMessage.create({ header: { gtfsRealtimeVersion: "2.0" }, entity: [] });
 
 	const nowSeconds = Math.floor(Date.now() / 1000);
 	const forgotten = registry.prune(nowSeconds);
