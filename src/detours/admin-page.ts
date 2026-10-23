@@ -272,10 +272,11 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 * défile — l'en-tête reste en vue. Une seule grille pour toutes, les lignes n'étant que des
 	 * groupes (« display: contents ») : les colonnes s'alignent d'une ligne à l'autre et sur l'en-tête.
 	 * Les champs rapetissent un peu pour tenir à quatre dans le panneau : la date garde son calendrier
-	 * et prend la place, l'heure perd son horloge — elle se tape au clavier.
+	 * et prend la place, l'heure perd son horloge — elle se tape au clavier. La tranche horaire
+	 * quotidienne tient sur une ligne à part, de toute la largeur, sous les dates qu'elle restreint.
 	 */
 	.periods { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto minmax(0, 2fr) minmax(0, 1fr) auto;
-		gap: 4px; align-items: center; max-height: 148px; overflow-y: auto; padding: 0 6px 6px;
+		gap: 4px; align-items: center; max-height: 212px; overflow-y: auto; padding: 0 6px 6px;
 		border: 1px solid var(--line); border-radius: 6px; }
 	.periods .head { position: sticky; top: 0; z-index: 1; background: var(--panel); padding: 6px 0 2px;
 		font-size: 12px; color: var(--muted); align-self: stretch; }
@@ -285,6 +286,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	.periods input[type="time"]::-webkit-calendar-picker-indicator { display: none; }
 	.periods .to { color: var(--muted); font-size: 12px; }
 	.periods .removePeriod { padding: 3px 7px; font-size: 12px; }
+	.periods .daily { grid-column: 1 / -1; display: flex; gap: 4px; align-items: center;
+		color: var(--muted); font-size: 12px; }
+	.periods .daily input { width: 6em; }
+	.periods .dailyHint { grid-column: 1 / -1; margin: 0 0 6px; min-height: 14px; color: var(--muted); font-size: 11px; }
 	.periodActions { margin-top: 6px; }
 	dialog .fields .field label { width: 104px; }
 	dialog .fields .field input, dialog .fields .field select { flex: 1; min-width: 0; }
@@ -1831,6 +1836,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 	 * d'info trafic à suivre, et qui passe sous silence une période laissée vide. Une heure de fin sans
 	 * date de fin ne voudrait rien dire, et son champ reste grisé tant qu'il en manque. Il y a toujours
 	 * au moins une ligne à remplir. Renvoie de quoi les relire, dans la forme que le serveur attend.
+	 *
+	 * Chaque période peut se restreindre à une tranche horaire, répétée chaque jour de ses dates. Les
+	 * bornes se saisissent alors à la journée : leurs heures se grisent dès que la tranche est entamée.
 	 */
 	function periodFields(container, periods, hint, inherited) {
 		container.innerHTML = '<div class="periods">'
@@ -1848,7 +1856,10 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				'<input type="date" class="startDate" title="Date de début"><input type="time" class="startTime" title="Heure de début">' +
 				'<span class="to">→</span>' +
 				'<input type="date" class="endDate" title="Date de fin"><input type="time" class="endTime" title="Heure de fin">' +
-				'<button type="button" class="removePeriod" title="Retirer cette période">✕</button>';
+				'<button type="button" class="removePeriod" title="Retirer cette période">✕</button>' +
+				'<div class="daily">heures concernées <input type="time" class="dailyFrom" title="Début de la tranche horaire">' +
+				' à <input type="time" class="dailyTo" title="Fin de la tranche horaire">' +
+				'</div><p class="dailyHint"></p>';
 
 			function field(name) { return row.querySelector("." + name); }
 
@@ -1856,13 +1867,27 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 			field("startTime").value = period && period.start.time ? period.start.time : "";
 			field("endDate").value = period && period.end ? period.end.date : "";
 			field("endTime").value = period && period.end && period.end.time ? period.end.time : "";
+			field("dailyFrom").value = period && period.dailyWindow ? period.dailyWindow.from : "";
+			field("dailyTo").value = period && period.dailyWindow ? period.dailyWindow.to : "";
 
-			function syncEnd() {
-				field("endTime").disabled = field("endDate").value === "";
+			// L'heure de fin attend sa date ; les deux heures de borne s'effacent devant la tranche horaire,
+			// qui dit seule à quelle heure la période vaut.
+			function syncTimes() {
+				var daily = field("dailyFrom").value !== "" || field("dailyTo").value !== "";
+				field("startTime").disabled = daily;
+				field("endTime").disabled = daily || field("endDate").value === "";
+				if (field("startTime").disabled) field("startTime").value = "";
 				if (field("endTime").disabled) field("endTime").value = "";
+
+				var from = field("dailyFrom").value, to = field("dailyTo").value;
+				field("dailyHint").textContent = !daily ? "si vide : applicable pendant tout le service"
+					: from === "" || to === "" ? "saisir le début et la fin"
+						: to <= from ? "finit le lendemain" : "";
 			}
-			field("endDate").oninput = syncEnd;
-			syncEnd();
+			field("endDate").oninput = syncTimes;
+			field("dailyFrom").oninput = syncTimes;
+			field("dailyTo").oninput = syncTimes;
+			syncTimes();
 
 			field("removePeriod").onclick = function () {
 				row.remove();
@@ -1891,7 +1916,8 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		if (inherited && !(periods && periods.length > 0)) {
 			var first = list.querySelector(".period");
 			[["startDate", inherited.start.date], ["startTime", inherited.start.time],
-				["endDate", inherited.end.date], ["endTime", inherited.end.time]].forEach(function (entry) {
+				["endDate", inherited.end.date], ["endTime", inherited.end.time],
+				["dailyFrom", inherited.daily.from], ["dailyTo", inherited.daily.to]].forEach(function (entry) {
 				var input = first.querySelector("." + entry[0]);
 				var type = input.type;
 				if (!entry[1]) return;
@@ -1912,7 +1938,9 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				function field(name) { return row.querySelector("." + name); }
 				return {
 					start: field("startDate").value === "" ? null : { date: field("startDate").value, time: field("startTime").value },
-					end: field("endDate").value === "" ? null : { date: field("endDate").value, time: field("endTime").value }
+					end: field("endDate").value === "" ? null : { date: field("endDate").value, time: field("endTime").value },
+					dailyWindow: field("dailyFrom").value === "" && field("dailyTo").value === "" ? null
+						: { from: field("dailyFrom").value, to: field("dailyTo").value }
 				};
 			});
 		};
@@ -1920,7 +1948,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 
 	/**
 	 * Les bornes que suit une période laissée vide, telles que les champs les affichent : le début de
-	 * la première période de l'info trafic, la fin de la dernière.
+	 * la première période de l'info trafic, la fin de la dernière, et la tranche horaire de la première.
 	 */
 	function inheritedBounds(periods) {
 		function split(value) {
@@ -1929,7 +1957,11 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 				: { date: match[3] + "/" + match[2] + "/" + match[1], time: match[4] || null };
 		}
 		var first = periods[0], last = periods[periods.length - 1];
-		return { start: split(first && first.start), end: split(last && last.end) };
+		var daily = first && first.dailyWindow;
+		return {
+			start: split(first && first.start), end: split(last && last.end),
+			daily: { from: daily ? daily.from : null, to: daily ? daily.to : null }
+		};
 	}
 
 	/** Ce que les périodes deviennent quand on ne les saisit pas, et quand la modification est publiée. */
@@ -1937,6 +1969,7 @@ export const ADMIN_PAGE = String.raw`<!doctype html>
 		return (attached
 			? "Laisser vide pour suivre les dates de l'info trafic. Heures facultatives."
 			: "Au moins une période, date de début obligatoire. Heures facultatives ; sans fin, la période reste ouverte.")
+			+ " Une tranche horaire limite la période à ces heures-là, chaque jour de ses dates."
 			+ " Publiée dès l'enregistrement, jusqu'à la fin de la dernière période.";
 	}
 

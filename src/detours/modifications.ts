@@ -317,11 +317,7 @@ function indexModifications(
 		// Affichée à la main, elle ne suit pas les périodes de son info trafic : elle s'éteindrait avec elles.
 		// Celles qu'on a saisies, si.
 		const periods: AlertPeriod[] =
-			record.periods.length > 0
-				? record.periods.map((period) => ({ start: period.start, end: period.end, dailyWindow: null }))
-				: record.forced
-					? []
-					: (alert?.periods ?? []);
+			record.periods.length > 0 ? [...record.periods] : record.forced ? [] : (alert?.periods ?? []);
 		const analysisStopIds = new Set(key === null ? [] : (reading.removed.get(key) ?? []));
 		const removedStopIds = record.removedStopIds !== null ? new Set(record.removedStopIds) : analysisStopIds;
 		const active = isActive(periods, now);

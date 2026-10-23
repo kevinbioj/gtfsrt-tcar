@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import type { DailyWindow } from "../ai/analyze-alert.js";
 import type { AnalyzedAlert } from "../gtfs-rt/use-service-alerts.js";
 import type { Coordinates } from "../utils/geometry.js";
 
@@ -236,6 +237,12 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 	`
 	ALTER TABLE modifications ADD COLUMN forced INTEGER NOT NULL DEFAULT 0;
 	`,
+	// Une période peut ne valoir qu'une tranche horaire, chaque jour de ses dates : « de 9 h à 17 h, à
+	// partir du 26 ». HH:MM, l'une et l'autre ou aucune ; NULL : la période court d'une borne à l'autre.
+	`
+	ALTER TABLE modification_periods ADD COLUMN daily_from TEXT;
+	ALTER TABLE modification_periods ADD COLUMN daily_to TEXT;
+	`,
 ];
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
@@ -352,9 +359,9 @@ export type Visibility = "auto" | "shown" | "hidden";
 /**
  * Une période saisie d'une modification, bornes au format « AAAA-MM-JJ » ou « AAAA-MM-JJTHH:MM » —
  * celui des périodes d'info trafic, qui se jaugent de la même façon (cf. `isActive`). Sans fin, elle
- * est ouverte.
+ * est ouverte. Avec une tranche horaire, elle ne vaut que celle-ci, chaque jour de ses dates.
  */
-export type ModificationPeriod = { start: string; end: string | null };
+export type ModificationPeriod = { start: string; end: string | null; dailyWindow: DailyWindow | null };
 
 /**
  * Une modification, telle qu'elle a été saisie. Les champs `null` d'une modification rattachée à une
@@ -542,6 +549,8 @@ export function useDetourStore(path: string) {
 			modifications.get(row.uid)?.periods.push({
 				start: joinBound(row.start_date, row.start_time),
 				end: row.end_date === null ? null : joinBound(row.end_date, row.end_time),
+				dailyWindow:
+					row.daily_from === null || row.daily_to === null ? null : { from: row.daily_from, to: row.daily_to },
 			});
 		}
 
@@ -619,8 +628,8 @@ export function useDetourStore(path: string) {
 	const writePeriods = (uid: number, periods: readonly ModificationPeriod[]) => {
 		db.prepare("DELETE FROM modification_periods WHERE uid = ?").run(uid);
 		const insert = db.prepare(
-			`INSERT INTO modification_periods (uid, position, start_date, start_time, end_date, end_time)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO modification_periods (uid, position, start_date, start_time, end_date, end_time, daily_from, daily_to)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		);
 		periods.forEach((period, position) => {
 			insert.run(uid, position, ...periodColumns(period));
@@ -1014,11 +1023,13 @@ function splitBound(bound: string): [string, string | null] {
 	return [date as string, time ?? null];
 }
 
-/** Les quatre colonnes d'une période saisie, dans l'ordre de la table. */
-function periodColumns(period: ModificationPeriod): [string, string | null, string | null, string | null] {
+/** Les six colonnes d'une période saisie, dans l'ordre de la table. */
+function periodColumns(
+	period: ModificationPeriod,
+): [string, string | null, string | null, string | null, string | null, string | null] {
 	const [startDate, startTime] = splitBound(period.start);
 	const [endDate, endTime] = period.end === null ? [null, null] : splitBound(period.end);
-	return [startDate, startTime, endDate, endTime];
+	return [startDate, startTime, endDate, endTime, period.dailyWindow?.from ?? null, period.dailyWindow?.to ?? null];
 }
 
 // ---
@@ -1046,6 +1057,8 @@ type PeriodRow = {
 	start_time: string | null;
 	end_date: string | null;
 	end_time: string | null;
+	daily_from: string | null;
+	daily_to: string | null;
 };
 
 type PatternRow = { uid: number; pattern_id: string };

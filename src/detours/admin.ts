@@ -1,7 +1,7 @@
 import { type Context, Hono } from "hono";
 import { basicAuth } from "hono/basic-auth";
 
-import type { AlertPeriod } from "../ai/analyze-alert.js";
+import type { AlertPeriod, DailyWindow } from "../ai/analyze-alert.js";
 import { LINE_CARTRIDGES, ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SMOOTHING_TOLERANCE, ROAD_SNAP_RADIUS } from "../config.js";
 import { serviceDay } from "../gtfs-rt/scheduled-trips.js";
 import { type AnalyzedAlert, hasEnded, periodsOverlap } from "../gtfs-rt/use-service-alerts.js";
@@ -877,7 +877,7 @@ function summarizeOrphan(record: Modification, deps: AdminDependencies) {
 		lineCode: lineCode(record.routeId),
 		directionId: record.directionId,
 		headsigns: headsignsOf(gtfs, record.routeId, record.directionId),
-		periods: record.periods.map((period) => ({ start: period.start, end: period.end, dailyWindow: null })),
+		periods: [...record.periods],
 		phase: "orphan" as const,
 		// Une info trafic épinglée ne laisse pas d'orpheline : seulement celle qui n'a jamais été relevée.
 		pinned: false,
@@ -983,6 +983,7 @@ function detail(modification: ResolvedModification, deps: AdminDependencies) {
 		periodInputs: record.periods.map((period) => ({
 			start: splitBound(period.start),
 			end: period.end === null ? null : splitBound(period.end),
+			dailyWindow: period.dailyWindow,
 		})),
 		alertPeriods: modification.alertPeriods,
 		// Le texte d'une info trafic est du HTML : le flux amont reprend ce que le CMS de l'exploitant a
@@ -1146,8 +1147,9 @@ function countTripsByPattern(
  * vide et les périodes manquer : elles suivent alors l'info trafic. Sans elle, la raison et au moins
  * une période sont obligatoires.
  *
- * `periods` est une liste de `{ start, end }`, chaque borne un objet `{ date, time }` : la date est
- * obligatoire, l'heure facultative. Une période laissée entièrement vide est passée sous silence —
+ * `periods` est une liste de `{ start, end, dailyWindow }`, chaque borne un objet `{ date, time }` : la
+ * date est obligatoire, l'heure facultative. `dailyWindow`, `{ from, to }` ou rien, restreint la période
+ * à une tranche horaire chaque jour de ses dates. Une période laissée entièrement vide est passée sous silence —
  * c'est une ligne du formulaire qu'on n'a pas remplie. Les périodes repartent dans l'ordre de leur
  * début ; elles peuvent se recouvrir, la modification vaut alors sur leur réunion.
  */
@@ -1196,6 +1198,9 @@ function parseDescription(raw: unknown): string | null | { message: string } {
 /**
  * Une période saisie, ou `null` si elle a été laissée vide. La fin peut manquer — la période est
  * alors ouverte — et doit sinon venir après le début.
+ *
+ * Avec une tranche horaire, les bornes se saisissent à la journée : la tranche se répète de la date de
+ * début à celle de fin, incluses (cf. `isDayInEnvelope`), et une heure de borne n'y changerait rien.
  */
 function parsePeriod(raw: unknown): { period: ModificationPeriod | null } | { message: string } {
 	if (typeof raw !== "object" || raw === null) return { message: "Période illisible." };
@@ -1205,10 +1210,17 @@ function parsePeriod(raw: unknown): { period: ModificationPeriod | null } | { me
 	if ("message" in start) return start;
 	const end = readBound(entry.end, "fin");
 	if ("message" in end) return end;
+	const daily = readDailyWindow(entry.dailyWindow);
+	if ("message" in daily) return daily;
 
 	if (start.bound === null) {
 		if (end.bound !== null) return { message: "Une fin sans début : saisir aussi la date de début." };
+		if (daily.window !== null) return { message: "Une tranche horaire sans dates : saisir aussi la date de début." };
 		return { period: null };
+	}
+
+	if (daily.window !== null && (start.time !== null || (end.bound !== null && end.time !== null))) {
+		return { message: "Avec une tranche horaire quotidienne, les dates se saisissent sans heure." };
 	}
 
 	// La fin se compare comme elle se jauge : exclusive, et à la journée entière quand elle est sans
@@ -1219,7 +1231,30 @@ function parsePeriod(raw: unknown): { period: ModificationPeriod | null } | { me
 		if (Temporal.PlainDateTime.compare(until, from) <= 0) return { message: "La fin doit venir après le début." };
 	}
 
-	return { period: { start: start.bound, end: end.bound } };
+	return { period: { start: start.bound, end: end.bound, dailyWindow: daily.window } };
+}
+
+/**
+ * La tranche horaire quotidienne d'une période, ou `null` si elle a été laissée vide. Une fin qui ne
+ * vient pas après le début passe minuit : « 21:00 → 05:00 » court jusqu'au lendemain matin.
+ */
+function readDailyWindow(raw: unknown): { window: DailyWindow | null } | { message: string } {
+	if (raw === undefined || raw === null) return { window: null };
+	if (typeof raw !== "object") return { message: "Tranche horaire illisible." };
+
+	const payload = raw as Record<string, unknown>;
+	const from = typeof payload.from === "string" ? payload.from.trim() : "";
+	const to = typeof payload.to === "string" ? payload.to.trim() : "";
+
+	if (from.length === 0 && to.length === 0) return { window: null };
+	if (from.length === 0 || to.length === 0) {
+		return { message: "Tranche horaire : saisir l'heure de début et celle de fin." };
+	}
+	if (!TIME_PATTERN.test(from) || !TIME_PATTERN.test(to)) {
+		return { message: "Tranche horaire attendue au format HH:MM." };
+	}
+	if (from === to) return { message: "Tranche horaire vide : le début et la fin sont à la même heure." };
+	return { window: { from, to } };
 }
 
 /**

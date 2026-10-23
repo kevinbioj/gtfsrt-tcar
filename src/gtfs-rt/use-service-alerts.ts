@@ -592,7 +592,7 @@ export function hasEnded(periods: AlertPeriod[], now: Temporal.Instant): boolean
 	return (
 		periods.length > 0 &&
 		periods.every((period) => {
-			const endExclusive = period.end ? periodEnd(period.end) : null;
+			const endExclusive = envelopeEnd(period);
 			return endExclusive !== null && Temporal.Instant.compare(now, endExclusive) >= 0;
 		})
 	);
@@ -605,7 +605,7 @@ export function hasEnded(periods: AlertPeriod[], now: Temporal.Instant): boolean
 export function lastPeriodEnd(periods: AlertPeriod[]): Temporal.Instant | null {
 	let last: Temporal.Instant | null = null;
 	for (const period of periods) {
-		const endExclusive = period.end ? periodEnd(period.end) : null;
+		const endExclusive = envelopeEnd(period);
 		if (endExclusive === null) return null;
 		if (last === null || Temporal.Instant.compare(endExclusive, last) > 0) last = endExclusive;
 	}
@@ -623,7 +623,7 @@ export function periodsOverlap(a: AlertPeriod[], b: AlertPeriod[]): boolean {
 			? [{ start: null, end: null }]
 			: periods.map((period) => ({
 					start: period.start ? periodStart(period.start) : null,
-					end: period.end ? periodEnd(period.end) : null,
+					end: envelopeEnd(period),
 				}));
 	const before = (from: Temporal.Instant | null, until: Temporal.Instant | null) =>
 		from === null || until === null || Temporal.Instant.compare(from, until) < 0;
@@ -782,6 +782,19 @@ function isDayInEnvelope(period: AlertPeriod, day: Temporal.PlainDate): boolean 
 /** Borne de début : minuit pour une date seule, l'instant exact pour un « AAAA-MM-JJTHH:MM ». */
 function periodStart(value: string): Temporal.Instant | null {
 	return hasTime(value) ? toInstant(value) : startOfDay(value);
+}
+
+/**
+ * La fin d'une période, exclue, tranche horaire comprise. Une tranche de nuit (« 21:00 → 05:00 ») qui
+ * s'ouvre le dernier jour d'une fin à la journée court jusqu'au lendemain matin : c'est là que la
+ * période finit, et non à minuit (cf. `isDailyWindowActive`). `null` : la période est ouverte.
+ */
+function envelopeEnd(period: AlertPeriod): Temporal.Instant | null {
+	if (!period.end) return null;
+	const window = period.dailyWindow;
+	const last = hasTime(period.end) ? null : plainDate(period.end);
+	if (window && window.to <= window.from && last !== null) return atTime(last.add({ days: 1 }), window.to);
+	return periodEnd(period.end);
 }
 
 /** Borne de fin : exclusive. Une date seule couvre toute la journée, une heure précise arrête net. */
