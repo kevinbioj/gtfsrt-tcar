@@ -98,6 +98,16 @@ export type StaticGtfs = {
 	tripPatterns: Map<string, string>;
 	/** routeId → nom commercial de la ligne (`route_short_name`) : « F7 », « Métro ». */
 	routeNames: Map<string, string>;
+	/**
+	 * routeId → couleurs de la ligne (`route_color`, `route_text_color`), en « #RRGGBB ». Une ligne qui
+	 * n'en déclare pas n'y figure pas.
+	 */
+	routeColors: Map<string, RouteColors>;
+	/**
+	 * routeId → rang de la ligne (`route_sort_order`) : l'ordre dans lequel le réseau les présente, les
+	 * trois réseaux entremêlés. Une ligne qui n'en déclare pas n'y figure pas.
+	 */
+	routeSortOrders: Map<string, number>;
 	/** tripId → horaire théorique ordonné (pour réinsérer un arrêt supprimé absent du GTFS-RT). */
 	tripStopSequences: Map<string, TripStop[]>;
 	/**
@@ -179,6 +189,9 @@ export type StaticGtfs = {
 
 /** Le quai qui remplace un arrêt éclaté, pour une ligne et un sens donnés. */
 export type SplitStop = { routeId: string; directionId: number; stopId: string };
+
+/** Les couleurs d'une ligne, en « #RRGGBB ». */
+export type RouteColors = { color: string; textColor: string };
 
 /** Une station du GTFS : un pôle qui regroupe des quais. */
 export type Station = { name: string; coordinates: Coordinates | null };
@@ -436,6 +449,8 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		routePatterns: new Map(),
 		tripPatterns: new Map(),
 		routeNames: new Map(),
+		routeColors: new Map(),
+		routeSortOrders: new Map(),
 		tripStopSequences: new Map(),
 		tripDepartures: new Map(),
 		tripArrivals: new Map(),
@@ -488,6 +503,9 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 		);
 		const { routeDirections, tripMeta, serviceTrips } = buildTrips(decoder.decode(files["trips.txt"]));
 		const routeNames = files["routes.txt"] ? buildRouteNames(decoder.decode(files["routes.txt"])) : new Map();
+		const { colors: routeColors, sortOrders: routeSortOrders } = files["routes.txt"]
+			? buildRouteDetails(decoder.decode(files["routes.txt"]))
+			: { colors: new Map(), sortOrders: new Map() };
 		const fareAreas = files["areas.txt"] ? buildFareAreas(decoder.decode(files["areas.txt"])) : new Map();
 		const mergedStops = files["merged_stops.txt"]
 			? buildMergedStops(decoder.decode(files["merged_stops.txt"]))
@@ -545,6 +563,8 @@ async function loadGtfs(url: string): Promise<{ data: StaticGtfs; signature: str
 				routePatterns,
 				tripPatterns,
 				routeNames,
+				routeColors,
+				routeSortOrders,
 				tripStopSequences,
 				tripDepartures,
 				tripArrivals,
@@ -675,6 +695,36 @@ function indexStopName(
 		stopKeyIndex.set(fuzzyKey, names);
 	}
 	names.add(key);
+}
+
+/**
+ * Les couleurs et le rang de chaque ligne. Une ligne sans `route_color` n'a pas de couleurs — son texte
+ * est noir par défaut quand elle en a —, une ligne sans `route_sort_order` pas de rang.
+ */
+function buildRouteDetails(csv: string): { colors: Map<string, RouteColors>; sortOrders: Map<string, number> } {
+	const colors = new Map<string, RouteColors>();
+	const sortOrders = new Map<string, number>();
+	const rows = parseCsv(csv);
+	const header = rows.next().value;
+	if (!header) return { colors, sortOrders };
+
+	const idCol = header.indexOf("route_id");
+	const colorCol = header.indexOf("route_color");
+	const textCol = header.indexOf("route_text_color");
+	const orderCol = header.indexOf("route_sort_order");
+	if (idCol === -1) return { colors, sortOrders };
+
+	const hex = (value: string | undefined) => (value && /^[0-9a-f]{6}$/i.test(value.trim()) ? `#${value.trim()}` : null);
+	for (const row of rows) {
+		const routeId = row[idCol];
+		if (!routeId) continue;
+		const color = colorCol === -1 ? null : hex(row[colorCol]);
+		if (color) colors.set(routeId, { color, textColor: hex(textCol === -1 ? undefined : row[textCol]) ?? "#000000" });
+		const order = orderCol === -1 ? "" : (row[orderCol]?.trim() ?? "");
+		if (/^\d+$/.test(order)) sortOrders.set(routeId, Number(order));
+	}
+
+	return { colors, sortOrders };
 }
 
 /** Le nom commercial de chaque ligne. Une ligne sans `route_short_name` n'y figure pas. */

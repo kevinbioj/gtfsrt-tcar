@@ -14,6 +14,8 @@ import {
 	LEGACY_GTFS_URL,
 	LEGACY_TAKEOVER_DELAY,
 	LEGACY_TRIP_UPDATES_URL,
+	LINE_CARTRIDGES_INTERVAL,
+	LINE_CARTRIDGES_URL,
 	NON_REALTIME_DESTINATIONS,
 	PORT,
 	PREFERRED_POSITION_STALENESS,
@@ -38,8 +40,9 @@ import {
 } from "./config.js";
 import { adminRoutes } from "./detours/admin.js";
 import { buildDetourEntities } from "./detours/build-entities.js";
+import { useLineCartridges } from "./detours/line-cartridges.js";
 import { useModificationIndex } from "./detours/modifications.js";
-import { useDetourStore } from "./detours/store.js";
+import { canonicalImpact, impactKey, informedEntities, useDetourStore } from "./detours/store.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
 import {
 	resolveNearestRun,
@@ -56,10 +59,13 @@ import { type Movement, useMovementTracker } from "./gtfs-rt/use-movement-tracke
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
 import { useRelayedNetworks } from "./gtfs-rt/use-relayed-networks.js";
 import {
+	type AlertEntity,
+	alertSourceKey,
 	applySkippedStops,
 	declareCancelled,
 	declareNoRealtime,
 	hasSkippedStops,
+	impactPeriods,
 	isCancelled,
 	useServiceAlerts,
 } from "./gtfs-rt/use-service-alerts.js";
@@ -73,7 +79,7 @@ import { useVerificationFeed, type VerifiedVehicle } from "./gtfs-rt/use-verific
 import { isDepotDestination, verifyVehicle } from "./gtfs-rt/verify-vehicle.js";
 import { useRoadGraph } from "./routing/road-graph.js";
 import { loadState, saveState } from "./state-cache.js";
-import { entityNetwork, HOME_NETWORK } from "./utils/network.js";
+import { entityNetwork, HOME_NETWORK, networkOf } from "./utils/network.js";
 import { useVehicleOccupancyStatuses } from "./utils/use-vehicle-occupancy-status.js";
 
 // Charge un fichier .env s'il existe (clé ANTHROPIC_API_KEY notamment).
@@ -103,6 +109,13 @@ const store = useRealtimeStore();
  * feed en vieillissant, sans attendre de relevé (cf. `positionsModifiedAt`).
  */
 const changes = useChangeTracker();
+
+/** Quand chaque flux a été réassemblé pour la dernière fois, en secondes epoch : ce que l'administration affiche. */
+const feedGeneratedAt = {
+	serviceAlerts: null as number | null,
+	tripModifications: null as number | null,
+	tripUpdates: null as number | null,
+};
 /**
  * Course et journée de service (cf. `tripRun`) → dernière mise à jour que le flux SAE en a publiée, en
  * secondes epoch. Elle survit aux relevés : c'est elle qui dit quand l'ancien GTFS-RT peut reprendre
@@ -129,8 +142,8 @@ const vehicleLocator = useVehicleLocator(staticGtfs, restored?.locations);
 const legacyGtfs = await useLegacyGtfs(LEGACY_GTFS_URL, GTFS_CHECK_INTERVAL);
 const detourStore = useDetourStore(DETOURS_DB_PATH);
 // Les modifications se rebâtissent à chaque relevé d'infos trafic, et après chaque saisie : c'est
-// ce qui crée celles que l'IA propose sans ambiguïté, et qui tient à jour les arrêts à sauter. Le
-// premier relevé attend le réseau, l'index est donc là avant lui — celles saisies à la main ne
+// ce qui tient à jour celles qui valent, et les arrêts à sauter — ceux que l'IA lit comme ceux des
+// déviations. Le premier relevé attend le réseau, l'index est donc là avant lui — les modifications ne
 // dépendent pas du flux, et n'ont pas à disparaître de l'interface tant qu'il n'a pas répondu.
 const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL, staticGtfs, {
 	onPublished: () => stampAlerts(),
@@ -142,6 +155,8 @@ const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL,
 const modificationIndex = useModificationIndex(detourStore, staticGtfs, () => serviceAlerts.alerts);
 // Sa présence est constatée ici, ses octets ne seront lus qu'au premier accrochage.
 const roadGraph = useRoadGraph(ROAD_GRAPH_PATH);
+// Rien qu'une affaire d'affichage : on ne l'attend pas, l'interface s'en passe le temps qu'il arrive.
+const lineCartridges = useLineCartridges(LINE_CARTRIDGES_URL, LINE_CARTRIDGES_INTERVAL);
 // TAE et TNI : relayés tels quels, sans rien de la vérification qui s'applique à TCAR.
 // La ligne et le sens d'une course se lisent dans le GTFS d'abord : la source ne donne pas toujours le sens,
 // dont dépend le quai d'un arrêt éclaté.
@@ -178,12 +193,25 @@ if (ADMIN_USERNAME && ADMIN_PASSWORD) {
 			password: ADMIN_PASSWORD,
 			store: detourStore,
 			gtfs: staticGtfs,
-			serviceAlerts,
 			modificationIndex,
 			roadGraph,
+			cartridges: lineCartridges,
+			receivedAlert: (alertNumber) =>
+				serviceAlerts.entities.find((alert) => alert.alertNumber === alertNumber)?.entity.alert ?? undefined,
+			feedStatus: () => ({
+				serviceAlerts: {
+					generatedAt: feedGeneratedAt.serviceAlerts,
+					modifiedAt: modifiedAt("service-alerts", ALL_NETWORKS),
+				},
+				tripModifications: { generatedAt: feedGeneratedAt.tripModifications, modifiedAt: null },
+				tripUpdates: { generatedAt: feedGeneratedAt.tripUpdates, modifiedAt: modifiedAt("trip-updates", ALL_NETWORKS) },
+				gtfsImportedAt: Math.floor(staticGtfs.importedAt.epochMilliseconds / 1000),
+			}),
 			rebuild: () => {
 				rebuildDetourEntities();
 				stampTripUpdates();
+				// Masquer une info trafic, ou en saisir les périodes, change aussi ce que le flux d'alertes republie.
+				stampAlerts();
 			},
 		}),
 	);
@@ -251,8 +279,61 @@ const publishedDetourEntities = (networks: ReadonlySet<string>) => [
  */
 const publishedAlerts = (networks: ReadonlySet<string>) =>
 	serviceAlerts.entities
-		.filter((alert) => [...alert.networks].some((network) => networks.has(network)))
-		.map((alert) => alert.entity);
+		.filter((alert) => [...alertNetworks(alert)].some((network) => networks.has(network)))
+		.flatMap((alert) => republished(alert));
+
+/**
+ * Les réseaux d'une info trafic : ceux de son impact réécrit s'il y en a un — on peut y avoir ajouté
+ * une ligne d'un autre réseau —, ceux que le flux lui donne sinon.
+ */
+function alertNetworks({ alertNumber, networks }: AlertEntity): ReadonlySet<string> {
+	const impact = detourStore.alertSettings(alertNumber).impact;
+	if (impact === null) return networks;
+	return new Set(
+		impact.entities.flatMap((entity) => {
+			const network = entity.agencyId ?? networkOf(entity.routeId ?? entity.stopId ?? "");
+			return network ? [network] : [];
+		}),
+	);
+}
+
+/**
+ * Une info trafic telle qu'elle se republie : masquée, elle ne l'est pas du tout ; avec des périodes
+ * saisies, ce sont elles qui font sa période d'impact, et non celles de l'analyse — ce sont aussi
+ * elles qui décident de ce qu'elle active (cf. `ResolvedAlert.periods`). Son texte, sa cause et son
+ * effet réécrits remplacent ceux du flux ; l'analyse, elle, a lu le texte reçu.
+ */
+function republished({ alertNumber, entity }: AlertEntity): GtfsRealtime.transit_realtime.IFeedEntity[] {
+	const settings = detourStore.alertSettings(alertNumber);
+	if (settings.hidden) return [];
+	if (entity.alert == null) return [entity];
+
+	const { headerText, descriptionText, cause, effect } = settings.overrides;
+	const Alert = GtfsRealtime.transit_realtime.Alert;
+	const translated = (text: string) => ({ translation: [{ text, language: "fr" }] });
+	const alert: GtfsRealtime.transit_realtime.IAlert = { ...entity.alert };
+	if (settings.periods !== null) {
+		alert.impactPeriod = impactPeriods(
+			settings.periods,
+			entity.alert.communicationPeriod ?? [],
+			Temporal.Now.instant(),
+		);
+	}
+	if (headerText !== null) alert.headerText = translated(headerText);
+	if (descriptionText !== null) alert.descriptionText = translated(descriptionText);
+	if (cause !== null && cause in Alert.Cause) alert.cause = Alert.Cause[cause as keyof typeof Alert.Cause];
+	if (effect !== null && effect in Alert.Effect) alert.effect = Alert.Effect[effect as keyof typeof Alert.Effect];
+	// Réécrit ou non, l'impact sort sous sa forme canonique : une ligne citée dans tous ses sens n'y
+	// figure qu'une fois, sans sens (cf. `canonicalImpact`).
+	const impact = settings.impact?.entities ?? receivedImpact(entity.alert);
+	alert.informedEntity = impact.map(({ agencyId, routeId, directionId, stopId }) => ({
+		...(agencyId === null ? {} : { agencyId }),
+		...(routeId === null ? {} : { routeId }),
+		...(directionId === null ? {} : { directionId }),
+		...(stopId === null ? {} : { stopId }),
+	}));
+	return [{ ...entity, alert }];
+}
 
 /** La dernière modification d'un flux, la plus récente parmi les réseaux demandés (cf. `changes`). */
 const modifiedAt = (feed: string, networks: ReadonlySet<string>) =>
@@ -1005,6 +1086,7 @@ async function pollTripUpdates() {
  * bouge que si leur contenu a changé depuis le dernier relevé (cf. `changes`).
  */
 function stampTripUpdates() {
+	feedGeneratedAt.tripUpdates = Math.floor(Date.now() / 1000);
 	for (const network of ALL_NETWORKS) {
 		const networks = new Set([network]);
 		changes.stamp(`trip-updates:${network}`, [[...publishedTripUpdates(networks)], publishedDetourEntities(networks)]);
@@ -1013,9 +1095,46 @@ function stampTripUpdates() {
 
 /** Date les infos trafic de chaque réseau, comme `stampTripUpdates` les trip updates. */
 function stampAlerts() {
+	dropStaleImpacts();
+	feedGeneratedAt.serviceAlerts = Math.floor(Date.now() / 1000);
 	for (const network of ALL_NETWORKS) {
 		changes.stamp(`service-alerts:${network}`, publishedAlerts(new Set([network])));
 	}
+}
+
+/**
+ * L'impact qu'une info trafic reçoit du flux, sous sa forme canonique : celle que l'on republie, et à
+ * laquelle se compare un impact réécrit.
+ */
+function receivedImpact(alert: GtfsRealtime.transit_realtime.IAlert | null | undefined) {
+	return canonicalImpact(informedEntities(alert?.informedEntity ?? []), (routeId) =>
+		(staticGtfs.data.routeDirections.get(routeId) ?? []).map((direction) => direction.directionId),
+	);
+}
+
+/**
+ * Abandonne les impacts réécrits des infos trafic dont le flux a changé l'impact (cf.
+ * `dropStaleImpacts`) — l'impact reçu étant celui que l'on republierait sans réécriture.
+ */
+function dropStaleImpacts() {
+	const received = new Map(
+		serviceAlerts.entities.map(({ alertNumber, entity }) => [alertNumber, impactKey(receivedImpact(entity.alert))]),
+	);
+	const dropped = detourStore.dropStaleImpacts(received);
+
+	// Une alerte traitée qui change à la source est à reprendre.
+	const unchecked = detourStore.dropStaleChecks(
+		new Map(
+			serviceAlerts.entities.flatMap(({ alertNumber, entity }) =>
+				entity.alert ? [[alertNumber, alertSourceKey(entity.alert)] as const] : [],
+			),
+		),
+	);
+	if (unchecked.length > 0) console.log(`➔ Alerts ${unchecked.join(", ")}: source changed, back to unchecked.`);
+
+	if (dropped.length === 0) return;
+	console.log(`➔ Alerts ${dropped.join(", ")}: received impact changed, rewritten impact dropped.`);
+	modificationIndex.reindex();
 }
 
 /**
@@ -1035,6 +1154,7 @@ function rebuildDetourEntities() {
 			detourStore.provisionalStops,
 			Math.floor(Date.now() / 1000),
 		);
+		feedGeneratedAt.tripModifications = Math.floor(Date.now() / 1000);
 	} catch (cause) {
 		console.error("✘ Failed to build detour entities:", cause);
 	}

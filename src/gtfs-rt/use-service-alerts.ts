@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import GtfsRealtime from "gtfs-realtime-bindings";
 import {
 	type AlertAnalysis,
@@ -52,12 +53,28 @@ export type SkipBucket = {
 export type SkipIndex = Map<string, SkipBucket[]>;
 
 /**
- * Des départs annulés par une modification : pour les courses de certains tracés seulement — ou de
- * tous (`null`) —, et les jours où leur départ tombe dans l'une de ces périodes.
+ * Des départs annulés : pour les courses de certains tracés seulement — ou de tous (`null`) —, et les
+ * jours où leur départ tombe dans l'une de ces périodes.
  */
 export type CancelEntry = { patternIds: ReadonlySet<string> | null; periods: AlertPeriod[] };
-/** Clé de course (cf. `courseKey`) → modifications qui en annulent le départ. */
-export type CancelIndex = Map<string, CancelEntry[]>;
+
+/**
+ * Une tranche horaire de départs annulés sur une ligne et dans un sens — heure locale, secondes depuis
+ * minuit, bornes comprises ; `null` l'une et l'autre : toute la journée. Une fin avant le début passe
+ * minuit.
+ */
+export type CancelWindow = CancelEntry & { from: number | null; to: number | null };
+
+/**
+ * Les courses à annuler : désignées une à une par leur clé de course (cf. `courseKey`), ou par tranche
+ * horaire de leur départ, par ligne et sens (« routeId|directionId »).
+ */
+export type CancelIndex = { courses: Map<string, CancelEntry[]>; windows: Map<string, CancelWindow[]> };
+
+/** Un index qui n'annule rien. */
+export function emptyCancelIndex(): CancelIndex {
+	return { courses: new Map(), windows: new Map() };
+}
 
 /**
  * La course, sur la journée de service qui commence à `midnight`, est-elle annulée ?
@@ -67,22 +84,35 @@ export type CancelIndex = Map<string, CancelEntry[]>;
  * quand bien même le feed de ce soir porte déjà les courses de demain.
  */
 export function isCancelled(index: CancelIndex, gtfs: StaticGtfs, tripId: string, midnight: number): boolean {
-	if (index.size === 0) return false;
+	if (index.courses.size === 0 && index.windows.size === 0) return false;
 
-	const key = gtfs.tripCourseKeys.get(tripId);
 	const departure = gtfs.tripDepartures.get(tripId);
-	if (key === undefined || departure === undefined) return false;
-
-	const entries = index.get(key);
-	if (entries === undefined) return false;
+	if (departure === undefined) return false;
 
 	const pattern = gtfs.tripPatterns.get(tripId);
 	const departsAt = Temporal.Instant.fromEpochMilliseconds((midnight + departure) * 1000);
-	return entries.some(
-		(entry) =>
-			(entry.patternIds === null || (pattern !== undefined && entry.patternIds.has(pattern))) &&
-			isActive(entry.periods, departsAt),
-	);
+	const applies = (entry: CancelEntry) =>
+		(entry.patternIds === null || (pattern !== undefined && entry.patternIds.has(pattern))) &&
+		isActive(entry.periods, departsAt);
+
+	const key = gtfs.tripCourseKeys.get(tripId);
+	if (key !== undefined && index.courses.get(key)?.some(applies)) return true;
+
+	const trip = gtfs.trips.get(tripId);
+	if (trip === undefined) return false;
+	const windows = index.windows.get(`${trip.routeId}|${trip.directionId}`);
+	if (windows === undefined) return false;
+
+	// L'heure qu'affiche l'horloge au départ : une course de 25:10 part à 01:10.
+	const clock = departure % 86_400;
+	return windows.some((window) => inWindow(window, clock) && applies(window));
+}
+
+/** Un départ, en secondes depuis minuit à l'horloge, tombe-t-il dans la tranche ? */
+export function inWindow(window: { from: number | null; to: number | null }, clock: number): boolean {
+	const from = window.from ?? 0;
+	const to = window.to ?? 86_399;
+	return from <= to ? clock >= from && clock <= to : clock >= from || clock <= to;
 }
 
 /**
@@ -111,8 +141,15 @@ export type AlertContribution = { routeId: string; directionId: number | null; s
 /** Numéro d'info trafic → routeId → quais que cette alerte ne doit PAS faire sauter. */
 type ServedStopIndex = Map<string, Map<string, Set<string>>>;
 
-/** Une info trafic prête à être republiée, et les réseaux dont elle cite des lignes. */
-export type AlertEntity = { networks: ReadonlySet<string>; entity: GtfsRealtime.transit_realtime.IFeedEntity };
+/**
+ * Une info trafic prête à être republiée, son numéro — ce qui s'en règle s'y rattache (cf.
+ * `AlertSettings`) —, et les réseaux dont elle cite des lignes.
+ */
+export type AlertEntity = {
+	alertNumber: string;
+	networks: ReadonlySet<string>;
+	entity: GtfsRealtime.transit_realtime.IFeedEntity;
+};
 
 type AlertsState = { headerTimestamp: string | null };
 
@@ -140,8 +177,8 @@ let currentInterval: NodeJS.Timeout | undefined;
 /**
  * Les infos trafic, relevées puis analysées.
  *
- * Ce module ne fait que lire et analyser : ce qu'on en tire — les modifications, les suggestions, les
- * arrêts à sauter — se rebâtit ailleurs, à chaque analyse, par `onAnalyzed` (cf. `useModificationIndex`).
+ * Ce module ne fait que lire et analyser : ce qu'on en tire — les modifications qui valent, les arrêts
+ * à sauter — se rebâtit ailleurs, à chaque analyse, par `onAnalyzed` (cf. `useModificationIndex`).
  *
  * Les infos trafic republiées sont toujours celles du dernier relevé réussi : elles sont publiées dès
  * le relevé (`onPublished`), sans attendre l'IA. L'analyse suit, en arrière-plan ; elle ajoute leur
@@ -473,8 +510,8 @@ async function fetchAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState)
 			headerTimestamp,
 		};
 		for (const entity of feed.entity) {
-			const alert = entity.alert;
-			if (!alert) continue;
+			if (!entity.alert) continue;
+			const alert = withKnownRoutes(entity.alert, gtfs);
 			// Le flux préfixe depuis peu ses identifiants d'un « alert: » (« alert:315 ») : on l'ôte dès la
 			// lecture, pour que l'alerte garde l'identifiant que citent déjà la base, le cache d'analyse et
 			// les quais desservis (cf. `SERVED_STOPS`).
@@ -492,6 +529,7 @@ async function fetchAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState)
 			republished.communicationPeriod = alert.activePeriod ?? [];
 			snapshot.republishedById.set(alertId, republished);
 			snapshot.entities.push({
+				alertNumber: alertNumber(alertId),
 				networks: new Set([...routeIds].map(networkOf)),
 				entity: { id: republishedAlertId(alertId), alert: republished },
 			});
@@ -580,7 +618,7 @@ function analyzedAlerts(
  * Une alerte peut porter plusieurs plages de dates disjointes (« du 17 au 21 et les 24 et 25 août ») :
  * elle est active dès que l'une d'elles l'est. Aucune période = aucune borne connue, donc toujours active.
  */
-export function isActive(periods: AlertPeriod[], now: Temporal.Instant): boolean {
+export function isActive(periods: readonly AlertPeriod[], now: Temporal.Instant): boolean {
 	return periods.length === 0 || periods.some((period) => isPeriodActive(period, now));
 }
 
@@ -635,7 +673,8 @@ export function periodsOverlap(a: AlertPeriod[], b: AlertPeriod[]): boolean {
 type Span = { start: number | null; end: number | null };
 
 /**
- * La période d'impact d'une alerte, tirée des périodes que l'analyse lit dans son texte.
+ * La période d'impact d'une alerte, tirée des périodes que l'analyse lit dans son texte — ou de celles
+ * qu'on y a saisies à la place (cf. `AlertSettings`).
  *
  * Une période simple donne un intervalle. Une tranche horaire donne un intervalle PAR JOUR, de la
  * veille — une tranche de nuit ouverte hier court encore — jusqu'au bout de son enveloppe, rognée
@@ -646,7 +685,7 @@ type Span = { start: number | null; end: number | null };
  * l'un des siens. Aucune période lue ne dit rien de la perturbation : la liste reste vide, et le
  * champ absent.
  */
-function impactPeriods(
+export function impactPeriods(
 	periods: AlertPeriod[],
 	communication: GtfsRealtime.transit_realtime.ITimeRange[],
 	now: Temporal.Instant,
@@ -837,6 +876,70 @@ function plainDate(value: string): Temporal.PlainDate | null {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * L'empreinte d'une alerte telle que le flux la donne : son texte, sa cause et son effet, son impact,
+ * sa période de communication, son lien et sa gravité. Pas sa période d'impact, qui vient de l'analyse
+ * et se recalcule avec l'heure. Deux relevés de même empreinte disent la même chose.
+ */
+export function alertSourceKey(alert: GtfsRealtime.transit_realtime.IAlert): string {
+	const translations = (text: GtfsRealtime.transit_realtime.ITranslatedString | null | undefined) =>
+		(text?.translation ?? []).map((translation) => [translation.language ?? null, translation.text ?? ""]);
+	return createHash("sha1")
+		.update(
+			JSON.stringify([
+				translations(alert.headerText),
+				translations(alert.descriptionText),
+				alert.cause ?? null,
+				alert.effect ?? null,
+				(alert.informedEntity ?? []).map((entity) => [
+					entity.agencyId || null,
+					entity.routeId || null,
+					entity.directionId ?? null,
+					entity.stopId || null,
+				]),
+				(alert.communicationPeriod ?? []).map((period) => [String(period.start ?? ""), String(period.end ?? "")]),
+				translations(alert.url),
+				alert.severityLevel ?? null,
+			]),
+		)
+		.digest("base64");
+}
+
+/**
+ * L'alerte, ses lignes inconnues du GTFS rapportées à celle qui porte le même numéro dans un autre
+ * réseau, quand il n'y en a qu'une — avec l'agence de ce réseau. Le flux de TCAR cite sous son propre
+ * préfixe des lignes que le GTFS range chez un autre : « TCAR:26 » est « TNI:26 », « TCAR:530 »
+ * « TNI:530 ». Sans cela, une alerte qui ne cite qu'elles ne garderait aucune ligne, et serait écartée.
+ *
+ * Une ligne qu'aucun réseau ne porte, ou que plusieurs portent, reste telle quelle.
+ */
+function withKnownRoutes(
+	alert: GtfsRealtime.transit_realtime.IAlert,
+	gtfs: StaticGtfs,
+): GtfsRealtime.transit_realtime.IAlert {
+	const unknown = (alert.informedEntity ?? []).filter(
+		(informed) => informed.routeId && !gtfs.routeDirections.has(informed.routeId),
+	);
+	if (unknown.length === 0) return alert;
+
+	const bySuffix = new Map<string, string[]>();
+	for (const routeId of gtfs.routeDirections.keys()) {
+		const suffix = routeId.slice(routeId.indexOf(":") + 1);
+		bySuffix.set(suffix, [...(bySuffix.get(suffix) ?? []), routeId]);
+	}
+
+	return {
+		...alert,
+		informedEntity: (alert.informedEntity ?? []).map((informed) => {
+			if (!informed.routeId || gtfs.routeDirections.has(informed.routeId)) return informed;
+			const candidates = bySuffix.get(informed.routeId.slice(informed.routeId.indexOf(":") + 1)) ?? [];
+			if (candidates.length !== 1) return informed;
+			const routeId = candidates[0] as string;
+			return { ...informed, routeId, ...(informed.agencyId ? { agencyId: networkOf(routeId) } : {}) };
+		}),
+	};
 }
 
 /**

@@ -413,11 +413,10 @@ function collectCandidates(
 	const window: AlertPeriod[] = [{ start: minuteOf(from), end: minuteOf(horizon), dailyWindow: null }];
 
 	for (const modification of modifications.values()) {
-		// Invisible, hors de sa période de communication — de son dernier enregistrement à la fin de sa
-		// dernière période —, ou sans période dans les jours à venir, la modification ne s'annonce pas :
-		// c'est un choix ou un calendrier, pas un problème, et le journal n'a rien à en dire. Celles dont
-		// l'info trafic a quitté le flux ne sont pas même indexées, sauf épinglée : elles ne publient rien,
-		// sauf affichées à la main (cf. `silent`).
+		// Muette — ni activée à la main, ni associée à une info trafic effective (cf. `silent`) —, hors de
+		// sa période de communication — de son dernier enregistrement à la fin de sa dernière période —,
+		// ou sans période dans les jours à venir, la modification ne s'annonce pas : c'est un choix ou un
+		// calendrier, pas un problème, et le journal n'a rien à en dire.
 		const { communication } = modification;
 		if (modification.silent) continue;
 		if (nowSeconds < communication.start || (communication.end !== null && nowSeconds >= communication.end)) continue;
@@ -488,8 +487,8 @@ function collectCandidates(
 			const candidate: Candidate = {
 				label,
 				removes,
-				// Sortie du flux, l'info trafic n'est plus republiée : la citer renverrait à une alerte absente.
-				alertId: modification.withdrawn ? null : modification.alertId,
+				// Toujours une info trafic effective, donc republiée : une autre renverrait à une alerte absente.
+				alertId: modification.alertId,
 				periods: modification.periods,
 				routeId: record.routeId,
 				directionId: record.directionId,

@@ -1,49 +1,110 @@
 import type { AlertPeriod } from "../ai/analyze-alert.js";
 import {
 	type AnalyzedAlert,
+	type CancelEntry,
 	type CancelIndex,
+	type CancelWindow,
+	emptyCancelIndex,
 	isActive,
 	lastPeriodEnd,
+	type SkipBucket,
 	type SkipIndex,
 } from "../gtfs-rt/use-service-alerts.js";
-import { courseKey, type OrderedStop, type RoutePattern, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
+import { courseKey, type RoutePattern, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
 import { rangeOn } from "./bounds.js";
-import { type DetourStore, type Modification, type ModificationOrigin, type Proposal, scopeKey } from "./store.js";
+import { type AlertOverrides, type DetourStore, type Modification, scopeKey, type TripSet } from "./store.js";
 
 /**
- * Une modification telle que tout le reste la voit : ce qui a été saisi, et, pour chaque champ laissé
- * vide d'une modification rattachée, ce qu'en dit son info trafic.
+ * Une info trafic telle que l'activation la voit : ce que le flux en dit, ce qu'on en a réglé, ce que
+ * l'IA y lit, et les modifications qui lui sont associées.
+ */
+export type ResolvedAlert = {
+	/** L'identifiant d'entité du flux amont, que porte `serviceAlertId` ; `null` faute de dernier relevé. */
+	alertId: string | null;
+	alertNumber: string;
+	headerText: string;
+	/** Le texte de l'info trafic, en HTML brut. */
+	descriptionText: string;
+	routeIds: string[];
+	/** Au flux en ce moment. Sinon, elle n'est là que parce que des modifications lui restent associées. */
+	inFeed: boolean;
+	/** Masquée : sans aucun effet, et plus republiée. */
+	hidden: boolean;
+	/** Au flux et visible : ses périodes, et elles seules, décident de ce qu'elle active. */
+	effective: boolean;
+	/** Les périodes saisies, sinon celles de l'analyse. */
+	periods: AlertPeriod[];
+	/** Celles de l'analyse, saisies ou non. */
+	analysisPeriods: AlertPeriod[];
+	periodsOverridden: boolean;
+	/** Effective, et l'une de ses périodes couvre l'instant de l'indexation. */
+	active: boolean;
+	/** Les suppressions d'arrêts que l'IA lit, ligne par ligne et sens par sens, et ce qu'on en a corrigé. */
+	aiSkips: AiSkip[];
+	/** Les modifications qui lui sont associées. */
+	modificationUids: number[];
+	/** Les ensembles de courses qu'elle annule, chaque jour où elle vaut. */
+	tripSets: readonly TripSet[];
+	/** Ce qui se réécrit de l'alerte republiée. */
+	overrides: AlertOverrides;
+	/** Première apparition : l'ordre chronologique. */
+	firstSeenAt: number;
+};
+
+/**
+ * Des quais supprimés sur une ligne et dans un sens : ceux que lit l'IA — sauf si le sens est ignoré —,
+ * corrigés arrêt par arrêt. Ils sautent tant que l'info trafic vaut, sauf remplacés par une déviation
+ * associée sur cette ligne et dans ce sens : c'est alors elle qui dit quels arrêts sont supprimés.
+ */
+export type AiSkip = {
+	routeId: string;
+	directionId: number;
+	/** Ce que lit l'analyse. */
+	aiStopIds: string[];
+	/** Les corrections : quai → supprimé (vrai) ou desservi (faux). */
+	overrides: Map<string, boolean>;
+	/** Ce qui saute, corrections faites. */
+	stopIds: string[];
+	ignored: boolean;
+	/** Les déviations associées qui portent la même ligne et le même sens. */
+	replacedBy: number[];
+};
+
+/** Une info trafic associée, telle qu'une modification la cite. */
+export type AlertLink = Pick<ResolvedAlert, "alertNumber" | "headerText" | "inFeed" | "hidden" | "active">;
+
+/**
+ * Une modification telle que tout le reste la voit : ce qui a été saisi, et ce que ses infos trafic
+ * associées — ou son activation à la main — en font.
  */
 export type ResolvedModification = {
 	uid: number;
-	origin: ModificationOrigin;
-	/** L'identifiant d'entité de l'info trafic, que porte `serviceAlertId` ; `null` sans info trafic. */
-	alertId: string | null;
-	alertNumber: string | null;
-	/** Le titre de l'info trafic, ou `null` sans info trafic. */
-	alertHeader: string | null;
-	/** Le texte de l'info trafic, en HTML brut ; vide sans info trafic. */
-	alertDescription: string;
-	/** La raison saisie, sinon le titre de l'info trafic. */
-	label: string;
+	description: string | null;
 	routeId: string;
 	directionId: number;
 	/** Les tracés visés, ou aucun pour tous. */
 	patternIds: string[];
+	/** Activée à la main : elle vaut, quoi que deviennent ses infos trafic. */
+	manual: boolean;
+	/** Ses infos trafic associées, au flux ou non. */
+	alerts: AlertLink[];
 	/**
-	 * Les périodes saisies, sinon celles de l'info trafic — aucune, donc sans fin, pour une modification
-	 * affichée à la main : rien d'automatique ne doit l'éteindre.
+	 * L'info trafic que cite son `serviceAlertId` : la première associée qui est en vigueur, à défaut
+	 * la première effective ; `null` s'il n'y en a aucune.
+	 */
+	alertId: string | null;
+	/**
+	 * Aucune, donc sans fin, pour une modification activée à la main ; sinon la réunion des périodes de
+	 * ses infos trafic effectives — sans fin dès que l'une n'en a pas.
 	 */
 	periods: AlertPeriod[];
-	/** Les périodes de l'info trafic, saisies ou non — aucune sans info trafic. */
-	alertPeriods: AlertPeriod[];
-	/** Vrai lorsque l'une des périodes couvre l'instant de l'indexation. */
+	/** Vrai lorsqu'elle vaut à l'instant de l'indexation. */
 	active: boolean;
 	/**
-	 * Vrai lorsque son info trafic, épinglée ou la modification affichée à la main, a quitté le flux :
-	 * elle se résout d'après son dernier relevé, et ne publie rien sauf affichée à la main (cf. `silent`).
+	 * Ne publie rien — ni tronçon, ni arrêt sauté, ni course annulée : ni activée à la main, ni associée à
+	 * une info trafic effective.
 	 */
-	withdrawn: boolean;
+	silent: boolean;
 	/**
 	 * La période de communication de ses trip modifications, en secondes epoch : de son dernier
 	 * enregistrement à la fin de sa dernière période, exclue — `null` si rien ne la borne. Ce n'est
@@ -51,60 +112,25 @@ export type ResolvedModification = {
 	 * des périodes (cf. `buildDetourEntities`).
 	 */
 	communication: { start: number; end: number | null };
-	disabled: boolean;
-	/** Affichée à la main : publiée quoi que devienne son info trafic (cf. `Modification.forced`). */
-	forced: boolean;
-	/**
-	 * Ne publie rien — ni tronçon, ni arrêt sauté, ni course annulée : invisible, ou son info trafic
-	 * sortie du flux sans que la modification ait été affichée à la main.
-	 */
-	silent: boolean;
 	/**
 	 * Ses tronçons écrasés à l'instant de l'indexation : rang du tronçon → tracés sur lesquels un
-	 * tronçon plus prioritaire, en vigueur et visible, en recouvre la plage (cf. `resolveOverrides`).
+	 * tronçon plus prioritaire, actif, en recouvre la plage (cf. `resolveOverrides`).
 	 */
 	overridden: Map<number, Set<string>>;
-	/** Les quais supprimés : saisis, sinon ceux que l'analyse lit pour la ligne et le sens. */
+	/** Les quais supprimés. */
 	removedStopIds: Set<string>;
-	/** Vrai lorsque les arrêts supprimés sont ceux de l'analyse, faute d'avoir été saisis. */
-	removedFromAnalysis: boolean;
-	/** Ce que l'analyse lit pour la ligne et le sens, saisi ou non — vide sans info trafic. */
-	analysisStopIds: Set<string>;
-	/** Première apparition de l'info trafic, ou création de la modification : l'ordre chronologique. */
-	firstSeenAt: number;
 	/** Ce qui a été saisi, tel quel. */
 	record: Modification;
-};
-
-/**
- * Un trio info trafic × ligne × sens où l'IA n'a rien à appliquer : la ligne est citée sans arrêt
- * supprimé lu, ou les arrêts lus ne sont pas desservis dans ce sens.
- */
-export type Suggestion = {
-	/** {@link scopeKey} du trio. */
-	key: string;
-	alertId: string | null;
-	alertNumber: string;
-	alertHeader: string;
-	routeId: string;
-	directionId: number;
-	/** Les quais que l'analyse lit supprimés, s'il y en a. */
-	removedStopIds: string[];
-	periods: AlertPeriod[];
-	active: boolean;
-	/** Vrai lorsque son info trafic, épinglée, a quitté le flux (cf. `ResolvedModification.withdrawn`). */
-	withdrawn: boolean;
-	firstSeenAt: number;
 };
 
 export type ModificationIndex = ReturnType<typeof useModificationIndex>;
 
 /**
- * Les modifications résolues, les suggestions, et les arrêts à sauter — rebâtis d'un bloc.
+ * Les modifications et les infos trafic résolues, les arrêts à sauter et les courses à annuler —
+ * rebâtis d'un bloc.
  *
  * `reindex` est purement local : il relit la dernière analyse et la base, sans toucher au réseau ni
- * rappeler l'IA. Il se rejoue donc à chaque relevé d'infos trafic comme après chaque saisie, et c'est
- * lui qui crée au passage les modifications que l'analyse permet d'appliquer.
+ * rappeler l'IA. Il se rejoue donc à chaque relevé d'infos trafic comme après chaque saisie.
  */
 export function useModificationIndex(
 	store: DetourStore,
@@ -112,45 +138,23 @@ export function useModificationIndex(
 	alerts: () => readonly AnalyzedAlert[],
 ) {
 	const resource = {
-		/** Les modifications affichées et publiables, par uid. */
+		/** Les modifications, par uid. */
 		modifications: new Map<number, ResolvedModification>(),
-		/** Les trios à accepter ou à ignorer. */
-		suggestions: [] as Suggestion[],
-		/** Les modifications saisies dont l'info trafic a quitté le flux : à rattacher, ou à supprimer. */
-		orphans: [] as Modification[],
+		/** Les infos trafic du flux, et celles qui l'ont quitté en gardant des modifications associées, par numéro. */
+		alerts: new Map<string, ResolvedAlert>(),
 		/** Les quais à sauter dans les trip updates, chacun avec ses périodes (cf. `SkipBucket`). */
 		skipIndex: new Map() as SkipIndex,
-		/** Les courses à annuler, par clé de course. */
-		cancelIndex: new Map() as CancelIndex,
+		/** Les courses à annuler, par clé de course ou par tranche horaire. */
+		cancelIndex: emptyCancelIndex(),
 		reindex() {
 			const now = Temporal.Now.instant();
-			const nowSeconds = Math.floor(now.epochMilliseconds / 1000);
 			const current = alerts();
 
-			store.recordAlerts(current, nowSeconds);
+			store.recordAlerts(current, Math.floor(now.epochMilliseconds / 1000));
 
-			// Les infos trafic épinglées sorties du flux restent, telles que relevées la dernière fois — et
-			// celles des modifications affichées à la main, qui ne doivent pas disparaître d'elles-mêmes.
-			const live = new Set(current.map((alert) => alert.alertNumber));
-			const kept = new Set(store.pinnedAlerts);
-			for (const record of store.modifications.values())
-				if (record.forced && record.alertNumber !== null) kept.add(record.alertNumber);
-			const withdrawn = [...kept].flatMap((alertNumber) => {
-				const snapshot = live.has(alertNumber) ? undefined : store.alertSnapshots.get(alertNumber);
-				return snapshot === undefined ? [] : [snapshot];
-			});
-
-			const reading = readAnalysis([...current, ...withdrawn], gtfs.data);
-			// L'IA ne crée rien sur une info trafic sortie du flux : ce qu'elle y avait à créer l'a été.
-			store.syncAi(
-				reading.proposals.filter((proposal) => live.has(proposal.alertNumber)),
-				nowSeconds,
-			);
-
-			const indexed = indexModifications(current, withdrawn, reading, store, gtfs.data, now);
+			const indexed = indexModifications(current, store, gtfs.data, now);
 			resource.modifications = indexed.modifications;
-			resource.suggestions = indexed.suggestions;
-			resource.orphans = indexed.orphans;
+			resource.alerts = indexed.alerts;
 			resource.skipIndex = indexed.skipIndex;
 			resource.cancelIndex = indexed.cancelIndex;
 		},
@@ -162,221 +166,173 @@ export function useModificationIndex(
 
 // ---
 
-/** Ce que l'analyse dit, trio par trio : les arrêts lus, et ce que l'IA crée ou suggère. */
-type Reading = {
-	/** {@link scopeKey} → quais que l'analyse lit supprimés. */
-	removed: Map<string, Set<string>>;
-	/** Les modifications que l'IA crée d'elle-même. */
-	proposals: Proposal[];
-	/** Les trios qu'elle ne sait pas trancher, par {@link scopeKey}. */
-	undecided: Map<string, { alert: AnalyzedAlert; routeId: string; directionId: number }>;
-};
-
 /**
- * Trie les trios de chaque info trafic : ceux que l'IA crée, ceux qu'elle suggère.
+ * Résout les infos trafic, puis les modifications, et en tire les arrêts à sauter et les courses à
+ * annuler.
  *
- * Elle crée dès que l'analyse lit, dans ce sens, des arrêts supprimés que la ligne y dessert : une
- * modification par LECTURE de ces arrêts — les mêmes suites supprimées, encadrées des mêmes arrêts
- * juste avant et juste après. Quand tous les tracés qui en desservent les lisent pareil, il n'y en a
- * qu'une, qui les vise tous ; sinon — la 305 qui file après l'Hôtel de Ville vers deux arrêts
- * différents, un service partiel qui commence au milieu des arrêts supprimés — une par lecture, qui ne
- * vise que ses tracés, et dont les tronçons se dessinent alors juste.
- *
- * Reste suggéré ce qui n'a rien à appliquer : une ligne citée sans aucun arrêt lu dans un sens, ou
- * des arrêts lus que la ligne n'y dessert pas. L'info trafic la concerne peut-être, sans que le texte
- * dise comment.
- */
-function readAnalysis(alerts: readonly AnalyzedAlert[], gtfs: StaticGtfs): Reading {
-	const removed = new Map<string, Set<string>>();
-	const proposals: Proposal[] = [];
-	const undecided: Reading["undecided"] = new Map();
-
-	for (const alert of alerts) {
-		for (const { routeId, directionId, stopIds } of alert.contributions) {
-			// Un bucket « les deux sens » se dédouble : la maille d'une modification est le sens.
-			for (const direction of directionId === null ? [0, 1] : [directionId]) {
-				const key = scopeKey(alert.alertNumber, routeId, direction);
-				const set = removed.get(key) ?? new Set<string>();
-				for (const stopId of stopIds) set.add(stopId);
-				removed.set(key, set);
-			}
-		}
-
-		for (const routeId of alert.routeIds) {
-			for (const { directionId } of gtfs.routeDirections.get(routeId) ?? []) {
-				const key = scopeKey(alert.alertNumber, routeId, directionId);
-				const readings = readingsOf(gtfs, routeId, directionId, removed.get(key) ?? new Set());
-				if (readings.length === 0) {
-					undecided.set(key, { alert, routeId, directionId });
-					continue;
-				}
-				for (const patternIds of readings) {
-					proposals.push({
-						alertNumber: alert.alertNumber,
-						routeId,
-						directionId,
-						patternIds: readings.length === 1 ? [] : patternIds,
-					});
-				}
-			}
-		}
-	}
-
-	return { removed, proposals, undecided };
-}
-
-/**
- * Les tracés du sens qui desservent des arrêts supprimés, groupés par façon de les lire. Aucun
- * groupe si aucun n'en dessert : l'analyse n'a rien lu, ou des arrêts que la ligne ne porte pas ici.
- */
-function readingsOf(gtfs: StaticGtfs, routeId: string, directionId: number, removed: ReadonlySet<string>): string[][] {
-	const readings = new Map<string, string[]>();
-	for (const pattern of gtfs.routePatterns.get(routeId)?.get(directionId) ?? []) {
-		if (!pattern.stops.some((stop) => removed.has(stop.stopId))) continue;
-		const reading = runsOf(pattern.stops, removed);
-		const patternIds = readings.get(reading) ?? [];
-		patternIds.push(pattern.patternId);
-		readings.set(reading, patternIds);
-	}
-	return [...readings.values()];
-}
-
-/**
- * Les suites d'arrêts supprimés d'un tracé, chacune encadrée de l'arrêt qui la précède et de celui
- * qui la suit — « ^ » et « $ » quand la suite ouvre ou ferme le tracé.
- */
-function runsOf(stops: readonly OrderedStop[], removed: ReadonlySet<string>): string {
-	const runs: string[] = [];
-	let index = 0;
-
-	while (index < stops.length) {
-		if (!removed.has((stops[index] as OrderedStop).stopId)) {
-			index += 1;
-			continue;
-		}
-
-		let end = index;
-		while (end < stops.length && removed.has((stops[end] as OrderedStop).stopId)) end += 1;
-
-		const before = stops[index - 1]?.stopId ?? "^";
-		const after = stops[end]?.stopId ?? "$";
-		const run = stops.slice(index, end).map((stop) => stop.stopId);
-		runs.push(`${before}(${run.join(",")})${after}`);
-		index = end;
-	}
-
-	return runs.join(";");
-}
-
-/**
- * Résout les modifications, et en tire les suggestions et les arrêts à sauter.
- *
- * Une modification rattachée à une info trafic qui n'est plus au flux reste en base, mais n'a plus
- * de perturbation à porter : elle n'est pas publiée — les travaux reprennent souvent, et le numéro
- * avec eux. Si elle porte une saisie, elle est mise de côté : le réseau remplace souvent une info
- * trafic par une autre, sous un autre numéro, avant la fin de la perturbation (« reprise du parcours
- * le … »), et ce qui a été saisi se rattache alors à la nouvelle plutôt que de se refaire.
- *
- * Sauf si l'info trafic est épinglée, ou la modification affichée à la main (`withdrawn`) : elle se
- * résout alors d'après son dernier relevé, comme si elle était encore au flux. Elle ne publie rien
- * pour autant, sauf affichée à la main : c'est ce qui distingue l'activation manuelle de l'automatique,
- * qui s'éteint avec son info trafic.
+ * Une info trafic sortie du flux n'active plus rien : ses associations restent en base, et elle reste
+ * listée d'après son dernier relevé tant qu'il lui en reste — le réseau remplace souvent une info
+ * trafic par une autre, sous un autre numéro, avant la fin de la perturbation, et il n'y a alors qu'à
+ * associer la nouvelle.
  *
  * La priorité départage les tronçons qui se recouvrent (cf. `resolveOverrides`) : une déviation qui
  * en recouvre une autre le temps d'un chantier l'emporte, sans que les deux se replient l'une dans
- * l'autre. Le reste de la modification écrasée — ses autres tronçons, ses arrêts supprimés ailleurs,
- * ses courses annulées — continue de s'appliquer.
+ * l'autre. Le reste de la modification écrasée — ses autres tronçons, ses arrêts supprimés ailleurs, ses
+ * courses annulées — continue de s'appliquer.
  */
 function indexModifications(
-	alerts: readonly AnalyzedAlert[],
-	withdrawnAlerts: readonly AnalyzedAlert[],
-	reading: Reading,
+	current: readonly AnalyzedAlert[],
 	store: DetourStore,
 	gtfs: StaticGtfs,
 	now: Temporal.Instant,
 ) {
-	const byNumber = new Map([...alerts, ...withdrawnAlerts].map((alert) => [alert.alertNumber, alert]));
-	const withdrawnNumbers = new Set(withdrawnAlerts.map((alert) => alert.alertNumber));
+	const nowSeconds = Math.floor(now.epochMilliseconds / 1000);
+	const records = [...store.modifications.values()];
+	const live = new Set(current.map((alert) => alert.alertNumber));
+
+	// Celles du flux, puis celles qui l'ont quitté et que des modifications citent encore.
+	const sources: { alert: AnalyzedAlert; inFeed: boolean }[] = current.map((alert) => ({ alert, inFeed: true }));
+	const withdrawn = new Set(records.flatMap((record) => record.alertNumbers).filter((number) => !live.has(number)));
+	for (const alertNumber of withdrawn) {
+		const alert = store.alertSnapshots.get(alertNumber) ?? {
+			alertId: null,
+			alertNumber,
+			headerText: store.alertHeaders.get(alertNumber) ?? "",
+			descriptionText: "",
+			periods: [],
+			routeIds: [],
+			contributions: [],
+		};
+		sources.push({ alert, inFeed: false });
+	}
+
+	const alerts = new Map<string, ResolvedAlert>();
+	for (const { alert, inFeed } of sources) {
+		const settings = store.alertSettings(alert.alertNumber);
+		const periods = settings.periods ?? alert.periods;
+		const effective = inFeed && !settings.hidden;
+		const associated = records.filter((record) => record.alertNumbers.includes(alert.alertNumber));
+
+		alerts.set(alert.alertNumber, {
+			alertId: alert.alertId,
+			alertNumber: alert.alertNumber,
+			headerText: alert.headerText,
+			descriptionText: alert.descriptionText,
+			// Un impact réécrit dit à lui seul quelles lignes l'info trafic touche.
+			routeIds:
+				settings.impact === null
+					? alert.routeIds
+					: [
+							...new Set(
+								settings.impact.entities.flatMap(({ routeId }) =>
+									routeId !== null && gtfs.routeDirections.has(routeId) ? [routeId] : [],
+								),
+							),
+						],
+			inFeed,
+			hidden: settings.hidden,
+			effective,
+			periods,
+			analysisPeriods: alert.periods,
+			periodsOverridden: settings.periods !== null,
+			active: effective && isActive(periods, now),
+			aiSkips: aiSkipsOf(alert, associated, store),
+			modificationUids: associated.map((record) => record.uid),
+			tripSets: store.alertTripSets(alert.alertNumber),
+			overrides: settings.overrides,
+			firstSeenAt: store.alertFirstSeen.get(alert.alertNumber) ?? nowSeconds,
+		});
+	}
+
 	const modifications = new Map<number, ResolvedModification>();
-	const skipIndex: SkipIndex = new Map();
-	const cancelIndex: CancelIndex = new Map();
-	/** Les trios qui portent une modification : ils ne se suggèrent plus. */
-	const covered = new Set<string>();
-	const orphans: Modification[] = [];
-
-	for (const record of store.modifications.values()) {
-		const alert = record.alertNumber === null ? undefined : byNumber.get(record.alertNumber);
-		if (record.alertNumber !== null && alert === undefined) {
-			if (hasInput(record)) orphans.push(record);
-			continue;
-		}
-
-		const key = alert === undefined ? null : scopeKey(alert.alertNumber, record.routeId, record.directionId);
-		if (key !== null) covered.add(key);
-
-		// Affichée à la main, elle ne suit pas les périodes de son info trafic : elle s'éteindrait avec elles.
-		// Celles qu'on a saisies, si.
-		const periods: AlertPeriod[] =
-			record.periods.length > 0 ? [...record.periods] : record.forced ? [] : (alert?.periods ?? []);
-		const analysisStopIds = new Set(key === null ? [] : (reading.removed.get(key) ?? []));
-		const removedStopIds = record.removedStopIds !== null ? new Set(record.removedStopIds) : analysisStopIds;
-		const active = isActive(periods, now);
+	for (const record of records) {
+		const linked = record.alertNumbers.flatMap((alertNumber) => {
+			const alert = alerts.get(alertNumber);
+			return alert === undefined ? [] : [alert];
+		});
+		const effective = linked.filter((alert) => alert.effective);
+		const silent = !record.manual && effective.length === 0;
+		// Une info trafic sans période vaut tant qu'elle est au flux : la réunion n'a alors plus de borne.
+		const periods =
+			record.manual || effective.some((alert) => alert.periods.length === 0)
+				? []
+				: effective.flatMap((alert) => alert.periods);
 		const end = lastPeriodEnd(periods);
-		const withdrawn = alert !== undefined && withdrawnNumbers.has(alert.alertNumber);
 
 		modifications.set(record.uid, {
 			uid: record.uid,
-			origin: record.origin,
-			alertId: alert?.alertId ?? null,
-			alertNumber: record.alertNumber,
-			alertHeader: alert?.headerText ?? null,
-			alertDescription: alert?.descriptionText ?? "",
-			label: record.label ?? alert?.headerText ?? "",
+			description: record.description,
 			routeId: record.routeId,
 			directionId: record.directionId,
 			patternIds: record.patternIds,
+			manual: record.manual,
+			alerts: linked.map(({ alertNumber, headerText, inFeed, hidden, active }) => ({
+				alertNumber,
+				headerText,
+				inFeed,
+				hidden,
+				active,
+			})),
+			alertId: (effective.find((alert) => alert.active) ?? effective[0])?.alertId ?? null,
 			periods,
-			alertPeriods: alert?.periods ?? [],
-			active,
-			withdrawn,
+			active: !silent && isActive(periods, now),
+			silent,
 			communication: {
 				start: record.updatedAt,
 				end: end === null ? null : Math.floor(end.epochMilliseconds / 1000),
 			},
-			disabled: record.disabled,
-			forced: record.forced,
-			silent: record.disabled || (withdrawn && !record.forced),
-			removedStopIds,
-			removedFromAnalysis: record.removedStopIds === null,
-			analysisStopIds,
 			overridden: new Map(),
-			firstSeenAt:
-				record.alertNumber === null
-					? record.createdAt
-					: (store.alertFirstSeen.get(record.alertNumber) ?? record.createdAt),
+			removedStopIds: new Set(record.removedStopIds),
 			record,
 		});
 	}
 
-	const contenders = [...modifications.values()].filter((modification) => modification.active && !modification.silent);
+	const skipIndex: SkipIndex = new Map();
+	const cancelIndex: CancelIndex = emptyCancelIndex();
+	const pushSkip = (routeId: string, bucket: SkipBucket) => {
+		const buckets = skipIndex.get(routeId) ?? [];
+		buckets.push(bucket);
+		skipIndex.set(routeId, buckets);
+	};
+
+	// Ce que l'info trafic porte elle-même — les suppressions de l'IA, ni ignorées ni remplacées, et les
+	// courses annulées —, tant qu'elle est effective. Les annulations ne se jaugent pas maintenant mais
+	// course par course, à son départ (cf. `isCancelled`).
+	for (const alert of alerts.values()) {
+		if (!alert.effective) continue;
+		for (const set of alert.tripSets) {
+			pushCancellations(cancelIndex, set.routeId, set.directionId, [set], { patternIds: null, periods: alert.periods });
+		}
+		for (const skip of alert.aiSkips) {
+			if (skip.replacedBy.length > 0 || skip.stopIds.length === 0) continue;
+			pushSkip(skip.routeId, {
+				directionId: skip.directionId,
+				patternIds: null,
+				periods: alert.periods,
+				stopIds: new Set(skip.stopIds),
+			});
+		}
+	}
+
+	const contenders = [...modifications.values()].filter((modification) => modification.active);
 	const yielded = resolveOverrides(contenders, gtfs);
 
 	for (const modification of modifications.values()) {
 		const { record, periods, removedStopIds, silent } = modification;
-		// Invisible, ou son info trafic sortie du flux sans affichage manuel, elle ne fait rien sauter ni
-		// n'annule rien.
-		// Hors période, si : ses arrêts ne sautent que sur les courses qui passent à leurs bornes pendant
-		// l'une de ses périodes, et le feed porte les vingt-quatre heures à venir.
-		if (!silent && removedStopIds.size > 0) {
-			const buckets = skipIndex.get(record.routeId) ?? [];
+		// Muette, elle ne fait rien sauter ni n'annule rien. Hors période, si : ses arrêts ne sautent que
+		// sur les courses qui passent à leurs bornes pendant l'une de ses périodes, et le feed porte les
+		// vingt-quatre heures à venir.
+		if (silent) continue;
+		const patternIds = record.patternIds.length === 0 ? null : new Set(record.patternIds);
+
+		// Ses annulations se jaugent course par course, comme celles des infos trafic, sur ses seuls tracés.
+		// Aucun tronçon ne les écrase : une priorité départage des tracés, pas des services.
+		pushCancellations(cancelIndex, record.routeId, record.directionId, record.tripSets, { patternIds, periods });
+
+		if (removedStopIds.size > 0) {
 			const ceded = yielded.get(record.uid);
 			if (ceded === undefined) {
-				buckets.push({
-					directionId: record.directionId,
-					patternIds: record.patternIds.length === 0 ? null : new Set(record.patternIds),
-					periods,
-					stopIds: removedStopIds,
-				});
+				pushSkip(record.routeId, { directionId: record.directionId, patternIds, periods, stopIds: removedStopIds });
 			} else {
 				// Là où l'un de ses tronçons est écrasé, c'est la modification prioritaire qui dit quels
 				// arrêts sont desservis : tracé par tracé, ses arrêts supprimés s'arrêtent à cette plage.
@@ -385,7 +341,7 @@ function indexModifications(
 					const stopIds =
 						zone === undefined ? removedStopIds : new Set([...removedStopIds].filter((stopId) => !zone.has(stopId)));
 					if (stopIds.size === 0) continue;
-					buckets.push({
+					pushSkip(record.routeId, {
 						directionId: record.directionId,
 						patternIds: new Set([pattern.patternId]),
 						periods,
@@ -393,47 +349,85 @@ function indexModifications(
 					});
 				}
 			}
-			if (buckets.length > 0) skipIndex.set(record.routeId, buckets);
 		}
-
-		// Les annulations, elles, ne se jaugent pas maintenant mais course par course, à son départ
-		// (cf. `isCancelled`) : seul ce qui fait taire la modification les écarte d'emblée. Aucun tronçon
-		// ne les écrase.
-		if (!silent) {
-			const entry = { patternIds: record.patternIds.length === 0 ? null : new Set(record.patternIds), periods };
-			for (const { stopId, departure } of record.cancelledDepartures) {
-				const key = courseKey(record.routeId, record.directionId, stopId, departure);
-				const entries = cancelIndex.get(key) ?? [];
-				entries.push(entry);
-				cancelIndex.set(key, entries);
-			}
-		}
-	}
-
-	const suggestions: Suggestion[] = [];
-	for (const [key, { alert, routeId, directionId }] of reading.undecided) {
-		if (covered.has(key) || store.dismissedScopes.has(key)) continue;
-
-		suggestions.push({
-			key,
-			alertId: alert.alertId,
-			alertNumber: alert.alertNumber,
-			alertHeader: alert.headerText,
-			routeId,
-			directionId,
-			removedStopIds: [...(reading.removed.get(key) ?? [])],
-			periods: alert.periods,
-			active: isActive(alert.periods, now),
-			withdrawn: withdrawnNumbers.has(alert.alertNumber),
-			firstSeenAt: store.alertFirstSeen.get(alert.alertNumber) ?? Math.floor(now.epochMilliseconds / 1000),
-		});
 	}
 
 	console.log(
-		`✓ ${modifications.size} modifications indexed (${skipIndex.size} routes with skipped stops, ${cancelIndex.size} cancelled departures, ${suggestions.length} suggestions).`,
+		`✓ ${modifications.size} modifications and ${alerts.size} alerts indexed (${skipIndex.size} routes with skipped stops, ${cancelIndex.courses.size} cancelled departures, ${cancelIndex.windows.size} routes with cancelled ranges).`,
 	);
 
-	return { modifications, suggestions, orphans, skipIndex, cancelIndex };
+	return { modifications, alerts, skipIndex, cancelIndex };
+}
+
+/** Verse dans l'index les ensembles cochés d'une ligne et d'un sens, chacun valant `entry`. */
+function pushCancellations(
+	index: CancelIndex,
+	routeId: string,
+	directionId: number,
+	sets: readonly Pick<TripSet, "enabled" | "selection">[],
+	entry: CancelEntry,
+) {
+	for (const { enabled, selection } of sets) {
+		if (!enabled) continue;
+		if (selection.kind === "range") {
+			const key = `${routeId}|${directionId}`;
+			const window: CancelWindow = { ...entry, from: selection.from, to: selection.to };
+			index.windows.set(key, [...(index.windows.get(key) ?? []), window]);
+			continue;
+		}
+		for (const { stopId, departure } of selection.departures) {
+			const key = courseKey(routeId, directionId, stopId, departure);
+			index.courses.set(key, [...(index.courses.get(key) ?? []), entry]);
+		}
+	}
+}
+
+/**
+ * Les suppressions d'arrêts d'une info trafic, par ligne et par sens : ce que lit l'analyse, et ce
+ * qu'on en a corrigé. Une contribution « les deux sens » se dédouble : la maille d'une déviation, qui
+ * peut la remplacer, est le sens. Un sens que l'analyse ne cite pas, mais où l'on a supprimé des
+ * arrêts à la main, en est un aussi.
+ */
+function aiSkipsOf(alert: AnalyzedAlert, associated: readonly Modification[], store: DetourStore): AiSkip[] {
+	const byScope = new Map<string, AiSkip>();
+	const scope = (routeId: string, directionId: number) => {
+		const key = scopeKey(alert.alertNumber, routeId, directionId);
+		const existing = byScope.get(key);
+		if (existing !== undefined) return existing;
+		const skip: AiSkip = {
+			routeId,
+			directionId,
+			aiStopIds: [],
+			overrides: new Map(),
+			stopIds: [],
+			ignored: store.ignoredScopes.has(key),
+			replacedBy: associated
+				.filter((record) => record.routeId === routeId && record.directionId === directionId)
+				.map((record) => record.uid),
+		};
+		byScope.set(key, skip);
+		return skip;
+	};
+
+	for (const { routeId, directionId, stopIds } of alert.contributions) {
+		for (const direction of directionId === null ? [0, 1] : [directionId]) {
+			const skip = scope(routeId, direction);
+			for (const stopId of stopIds) if (!skip.aiStopIds.includes(stopId)) skip.aiStopIds.push(stopId);
+		}
+	}
+	for (const { routeId, directionId, stopId, removed } of store.alertSkipStops(alert.alertNumber)) {
+		scope(routeId, directionId).overrides.set(stopId, removed);
+	}
+
+	for (const skip of byScope.values()) {
+		const removed = new Set(skip.ignored ? [] : skip.aiStopIds);
+		for (const [stopId, verdict] of skip.overrides) {
+			if (verdict) removed.add(stopId);
+			else removed.delete(stopId);
+		}
+		skip.stopIds = [...removed];
+	}
+	return [...byScope.values()];
 }
 
 /** La plage d'un tronçon sur un tracé : les rangs de ses deux bornes dans la suite de ses arrêts. */
@@ -539,19 +533,4 @@ function placementsOn(modification: ResolvedModification, pattern: RoutePattern)
 /** Deux plages ont-elles au moins un arrêt en commun ? */
 function overlaps(a: Placement, b: Placement): boolean {
 	return a.start <= b.end && b.start <= a.end;
-}
-
-/**
- * La modification porte-t-elle quelque chose que l'info trafic ne redonnerait pas ? Sans rien de
- * saisi, elle n'est que ce que l'analyse de la nouvelle info trafic recrée d'elle-même.
- */
-function hasInput(record: Modification): boolean {
-	return (
-		record.forced ||
-		record.segments.length > 0 ||
-		record.cancelledDepartures.length > 0 ||
-		record.label !== null ||
-		record.periods.length > 0 ||
-		record.removedStopIds !== null
-	);
 }

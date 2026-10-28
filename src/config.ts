@@ -134,6 +134,13 @@ export const PREFERRED_POSITION_STALENESS = Temporal.Duration.from({ minutes: 2 
 export const VEHICLES_URL = "https://999.tcrn.fr/vehicles.json";
 export const VEHICLES_INTERVAL = Temporal.Duration.from({ hours: 1 }).total("milliseconds");
 /**
+ * Les lignes du réseau Astuce telles que Bus Tracker les présente — TCAR, TAE et TNI confondus —, dont
+ * le pictogramme que l'interface de gestion affiche. Il ne change qu'aux refontes, d'où un
+ * rafraîchissement espacé.
+ */
+export const LINE_CARTRIDGES_URL = "https://bus-tracker.fr/api/networks/1?withDetails=true";
+export const LINE_CARTRIDGES_INTERVAL = Temporal.Duration.from({ hours: 12 }).total("milliseconds");
+/**
  * Lignes du TEOR. Un véhicule qui y circule est jugé sur son accessibilité aux quais TEOR
  * (`teor_accessible`) plutôt que sur son accessibilité générale, qui ne sert alors que de repli.
  */
@@ -384,26 +391,6 @@ export const RELAYED_NETWORKS: RelayedNetwork[] = [
 	},
 ];
 
-/**
- * Cartouches de ligne de l'interface d'administration dont le nom n'est pas le bout de l'identifiant
- * de la ligne. Les lignes lettrées de la TAE sont rangées sous des numéros ; ses lignes numérotées,
- * comme celles de TCAR et de TNI, sous leur propre numéro.
- *
- * G et I ne figuraient pas dans la correspondance fournie : leurs numéros ont été lus sur les
- * cartouches eux-mêmes, dont la lettre et la couleur sont celles du GTFS.
- */
-export const LINE_CARTRIDGES = new Map([
-	["TAE:A", "111"],
-	["TAE:B", "112"],
-	["TAE:C", "113"],
-	["TAE:F", "115"],
-	["TAE:D1", "116"],
-	["TAE:D2", "117"],
-	["TAE:F9", "118"],
-	["TAE:G", "119"],
-	["TAE:I", "120"],
-]);
-
 export const SERVICE_ALERTS_URL = "https://hexatransit.fr/datasets/services_rt/astuce/service_alerts.pb";
 /**
  * Le GTFS de tout Astuce — TCAR, TAE et TNI —, et non plus celui de la seule TCAR : les modifications
@@ -449,10 +436,11 @@ export const STATE_CACHE_PATH = ".state.json";
  * rangée dans `.cache`, déjà monté en volume — SQLite y pose aussi ses fichiers `-wal` et `-shm`,
  * qu'un montage fichier par fichier ne couvrirait pas.
  *
- * Un nouveau nom pour un nouveau schéma : l'ancienne `detours.db` porte un historique de migrations
- * que ce code ne rejoue plus, et une base neuve vaut mieux qu'une base lue de travers.
+ * Un nouveau nom pour un nouveau schéma : les anciennes `detours.db` et `modifications.sqlite` portent
+ * un historique de migrations que ce code ne rejoue plus, et une base neuve vaut mieux qu'une base lue
+ * de travers.
  */
-export const DETOURS_DB_PATH = ".cache/modifications.sqlite";
+export const DETOURS_DB_PATH = ".cache/detours.sqlite";
 
 /**
  * Identifiants de l'interface d'administration. Sans eux, l'interface n'est PAS montée du tout : une
@@ -531,3 +519,9 @@ export const ROAD_ROUTING_MAX_EXPANSIONS = 200_000;
  * on aurait troqué des angles francs contre un tremblement, pour une shape deux fois plus lourde.
  */
 export const ROAD_SMOOTHING_TOLERANCE = 0.0001;
+
+/**
+ * L'interface d'administration, telle que `pnpm --filter web build` la construit — relative au dossier
+ * de lancement, la racine du dépôt comme celle de l'image.
+ */
+export const ADMIN_UI_DIR = "dist/admin-ui";
