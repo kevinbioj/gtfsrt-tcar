@@ -1,3 +1,5 @@
+import { decodeHTML, decodeHTMLAttribute } from "entities";
+
 /**
  * Les éléments qu'on laisse passer, et ce qu'ils deviennent. Le reste est DÉBALLÉ — la balise saute,
  * son contenu reste : un `<div>` ou un `<span class="h3">` n'apporte rien qu'on sache rendre ici, mais
@@ -188,7 +190,7 @@ export function htmlToText(raw: string, fileUrl: string | undefined): string {
 		pendingBreaks = 0;
 		pendingBullet = false;
 	};
-	const writeText = (text: string) => write(decodeEntities(text).replace(/\s+/g, " "));
+	const writeText = (text: string) => write(decodeHTML(text).replace(/\s+/g, " "));
 
 	for (const match of raw.matchAll(TAG)) {
 		const [tag, closing, rawName, attributes] = match as unknown as [string, string, string, string];
@@ -284,7 +286,7 @@ function image(attributes: string): string {
 function attributeOf(attributes: string, name: string): string | undefined {
 	const match = new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i").exec(attributes);
 	if (match === null) return undefined;
-	return decodeEntities(match[1] ?? match[2] ?? "");
+	return decodeHTMLAttribute(match[1] ?? match[2] ?? "");
 }
 
 /**
@@ -300,28 +302,4 @@ function escapeText(text: string): string {
 
 function escapeAttribute(value: string): string {
 	return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-/** Les entités nommées que le CMS amont écrit ; les autres restent telles quelles. */
-const NAMED_ENTITIES = new Map([
-	["amp", "&"],
-	["lt", "<"],
-	["gt", ">"],
-	["quot", '"'],
-	["apos", "'"],
-	["nbsp", " "],
-]);
-
-/**
- * Les entités d'une valeur d'attribut ou d'un texte, décodées en une seule passe — qu'un `&amp;lt;`
- * redevienne `&lt;`, et non `<`. Une valeur d'attribut est relue avant d'être réécrite : sans quoi un
- * `&amp;` du flux, réencodé, deviendrait un `&` de trop dans l'URL.
- */
-function decodeEntities(value: string): string {
-	return value.replace(/&(#[xX][0-9a-fA-F]+|#[0-9]+|[a-zA-Z]+);/g, (entity, body: string) => {
-		if (!body.startsWith("#")) return NAMED_ENTITIES.get(body.toLowerCase()) ?? entity;
-
-		const code = body[1] === "x" || body[1] === "X" ? Number.parseInt(body.slice(2), 16) : Number(body.slice(1));
-		return code <= 0x10ffff ? String.fromCodePoint(code) : entity;
-	});
 }
