@@ -844,6 +844,8 @@ function alertPublicationOf(alert: ResolvedAlert): AlertPublication {
  * de ses heures, à venir, terminée. Avec la date qui va avec, s'il y en a une.
  */
 function alertPhaseOf(alert: ResolvedAlert, now: Temporal.Instant): { phase: AlertPhase; detail: string } {
+	// Aucune période, c'est « sans borne » : elle court, comme le veut `isActive`.
+	if (alert.periods.length === 0) return { phase: "current", detail: "" };
 	const period = currentPeriod(alert.periods, now);
 	if (period !== undefined) {
 		return { phase: "current", detail: period.start ? `Depuis le ${formatBound(period.start)}` : "" };

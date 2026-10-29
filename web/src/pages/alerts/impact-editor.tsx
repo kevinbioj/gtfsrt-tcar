@@ -40,6 +40,11 @@ export function ImpactEditor({
 	const update = (next: ImpactEntityDto[]) => onChange(next);
 
 	const routeById = useMemo(() => new Map((routes.data ?? []).map((route) => [route.routeId, route])), [routes.data]);
+	// Les lignes arrivent triées par `route_sort_order` : leur rang dans la liste fait l'ordre de l'impact.
+	const rankOf = useMemo(
+		() => new Map((routes.data ?? []).map((route, index) => [route.routeId, index])),
+		[routes.data],
+	);
 	const stopNames = useMemo(
 		() => new Map((allStops.data ?? []).map(([stopId, name]) => [stopId, name])),
 		[allStops.data],
@@ -51,7 +56,10 @@ export function ImpactEditor({
 
 	const agencyOnly = (agencyId: string) =>
 		entities.some((item) => item.agencyId === agencyId && item.routeId === null && item.stopId === null);
-	const lines = entities.filter((item) => item.routeId !== null);
+	const rank = (item: ImpactEntityDto) => rankOf.get(item.routeId as string) ?? Number.POSITIVE_INFINITY;
+	const lines = entities
+		.filter((item) => item.routeId !== null)
+		.sort((a, b) => rank(a) - rank(b) || (a.directionId ?? -1) - (b.directionId ?? -1));
 	const stops = entities.filter((item) => item.routeId === null && item.stopId !== null);
 	const without = (target: ImpactEntityDto) => entities.filter((item) => item !== target);
 
