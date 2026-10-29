@@ -2,8 +2,8 @@ import type { AllStopsDto, DetailPatternDto, SequenceStopDto } from "@dto";
 import { cn } from "cn";
 import L from "leaflet";
 import { Undo2Icon, XIcon } from "lucide-react";
-import { Fragment, useMemo } from "react";
-import { CircleMarker, Marker, Polyline, Tooltip } from "react-leaflet";
+import { Fragment, useMemo, useRef } from "react";
+import { CircleMarker, Marker, Polyline, Tooltip, useMap } from "react-leaflet";
 
 import { BaseMap, FitTo, MapClick, provisionalPinIcon, useDivIcon } from "@/components/map";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,15 @@ import { type LatLng, project, slice } from "@/lib/geometry";
 import { type Geometry, pathOf, type Reading, type SegmentState, type Terminus } from "./editor-state";
 
 export type MapMode = "draw" | "pick" | "place";
+
+/** Un point lâché à moins de tant de pixels du tracé nominal est posé dessus — l'épaisseur du trait, à peu près. */
+const ON_SHAPE_PIXELS = 5;
+
+/** Expose la carte Leaflet au composant qui l'englobe. */
+function MapHandle({ handle }: { handle: React.RefObject<L.Map | null> }) {
+	handle.current = useMap();
+	return null;
+}
 
 /** Les icônes des bornes, une par lettre et par couleur : le cercle de l'arrêt, sa lettre dedans. */
 const boundIcons = new Map<string, L.DivIcon>();
@@ -80,7 +89,7 @@ function legendSwatch(
  * La carte de l'éditeur : le tracé nominal des tracés cochés, la portion que la déviation évite, le
  * dessin du tronçon en cours et ceux des autres, les arrêts de la ligne — barrés quand ils sont
  * supprimés —, et les arrêts de remplacement. Chaque clic pose un point de passage ; près du tracé
- * nominal, il s'y accroche : c'est une jonction.
+ * nominal — sur le trait même en tracé libre —, il s'y accroche : c'est une jonction.
  */
 export function EditorMap({
 	patterns,
@@ -122,7 +131,7 @@ export function EditorMap({
 	roadRouting: boolean;
 	pickable: AllStopsDto | null;
 	fitToken: string;
-	onMapClick: (point: LatLng) => void;
+	onMapClick: (point: LatLng, onShape?: boolean) => void;
 	onPen: (pen: "route" | "free") => void;
 	onTerminus: (terminus: Terminus) => void;
 	onSelectSegment: (index: number) => void;
@@ -130,7 +139,7 @@ export function EditorMap({
 	onRemoveSegment: (index: number) => void;
 	onUndo: () => void;
 	onClear: () => void;
-	onMoveWaypoint: (index: number, point: LatLng) => void;
+	onMoveWaypoint: (index: number, point: LatLng, onShape: boolean) => void;
 	onRemoveWaypoint: (index: number) => void;
 	onPickStop: (stop: AllStopsDto[number]) => void;
 	hint: string | null;
@@ -178,6 +187,16 @@ export function EditorMap({
 	const provisionalIcon = useMemo(() => provisionalPinIcon(PROVISIONAL), []);
 
 	const isJunction = (point: LatLng) => primaryShape !== undefined && project(primaryShape, point).offset <= 2;
+
+	const map = useRef<L.Map | null>(null);
+	/** Le point tombe-t-il sur le trait du tracé nominal, à l'écran ? */
+	const onPrimaryShape = (point: LatLng) => {
+		if (primaryShape === undefined || map.current === null) return false;
+		const at = project(primaryShape, point).at;
+		return (
+			map.current.latLngToContainerPoint(at).distanceTo(map.current.latLngToContainerPoint(point)) <= ON_SHAPE_PIXELS
+		);
+	};
 
 	return (
 		<section
@@ -276,6 +295,7 @@ export function EditorMap({
 			<div className="relative h-[620px]">
 				<BaseMap cursor="crosshair">
 					<FitTo points={fitPoints} token={fitToken} />
+					<MapHandle handle={map} />
 					<MapClick onClick={onMapClick} />
 					{otherShapes.map((shapeId) => (
 						<Polyline
@@ -284,11 +304,14 @@ export function EditorMap({
 							pathOptions={{ color: NOMINAL, weight: 4, opacity: 0.2 }}
 						/>
 					))}
+					{/* Un clic sur le trait même s'accroche au tracé, quel que soit le mode de dessin. */}
 					{checkedShapes.map((shapeId) => (
 						<Polyline
 							key={shapeId}
 							positions={geometry.get(shapeId) ?? []}
 							pathOptions={{ color: NOMINAL, weight: 4, opacity: 0.7 }}
+							bubblingMouseEvents={false}
+							eventHandlers={{ click: (event) => onMapClick([event.latlng.lat, event.latlng.lng], true) }}
 						/>
 					))}
 					{avoided.length >= 2 ? (
@@ -441,7 +464,7 @@ export function EditorMap({
 							eventHandlers={{
 								dragend: (event) => {
 									const { lat, lng } = (event.target as L.Marker).getLatLng();
-									onMoveWaypoint(index, [lat, lng]);
+									onMoveWaypoint(index, [lat, lng], onPrimaryShape([lat, lng]));
 								},
 								contextmenu: () => onRemoveWaypoint(index),
 							}}

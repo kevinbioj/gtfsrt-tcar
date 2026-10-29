@@ -908,6 +908,75 @@ export function alertSourceKey(alert: GtfsRealtime.transit_realtime.IAlert): str
 }
 
 /**
+ * Les mentions du CMS (cf. {@link NOISE}) dans un texte réduit à ses lettres et chiffres, en
+ * minuscules : sans espaces, plus de lisière où s'arrêter, mais il ne s'agit plus que de comparer.
+ */
+const SQUASHED_NOISE = /infos?astuce|(?:2|deux)(?:i?[eèé]me|[eè]|nde?)infos?/gu;
+
+/** Le titre et la description d'une info trafic. */
+export type AlertText = { headerText: string; descriptionText: string };
+
+/**
+ * Le texte d'une info trafic tel qu'il se lit : titre et description ramenés au texte (cf.
+ * `htmlToText`), sans leurs liens, espaces compactés. Les liens sont des documents, que l'alerte
+ * republie à part (`url`) : une réécriture ne les remplace pas. C'est sur lui qu'une réécriture se
+ * fait, et à lui qu'elle se compare ensuite (cf. {@link sameAlertText}).
+ */
+export function readableAlertText(alert: AlertText): AlertText {
+	const readable = (raw: string) =>
+		htmlToText(raw.replace(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi, ""), undefined)
+			.replace(/\s+/g, " ")
+			.trim();
+	return { headerText: readable(alert.headerText), descriptionText: readable(alert.descriptionText) };
+}
+
+/**
+ * Deux textes lisibles (cf. {@link readableAlertText}) disent-ils la même chose ? Ils se comparent
+ * réduits à leurs seules lettres et chiffres, en minuscules, sans les mentions du CMS.
+ *
+ * Le flux amont rend parfois la même info sous un autre balisage — puces en texte ou en `<ul>`,
+ * « 2ème info » devant ou derrière le numéro de ligne, plan en lien ou non —, et sert même, le temps
+ * d'un relevé, ses descriptions dépouillées de leurs balises, éléments collés les uns aux autres
+ * (« à nouvel avisTravaux rue… »). Ce n'est pas un nouveau texte, et une réécriture n'a pas à sauter
+ * pour si peu (cf. `recordAlerts`).
+ */
+export function sameAlertText(a: AlertText, b: AlertText): boolean {
+	const squash = (text: string) =>
+		text
+			.toLowerCase()
+			.replace(/[^\p{L}\p{N}]/gu, "")
+			.replace(SQUASHED_NOISE, "");
+	return squash(a.headerText) === squash(b.headerText) && squash(a.descriptionText) === squash(b.descriptionText);
+}
+
+/**
+ * Ce qui a changé d'un texte lisible à l'autre, pour les journaux : le passage remplacé, entre ce qui
+ * le précède et ce qui le suit en commun, champ par champ — « titre : …« avant » → « après »… ».
+ */
+export function alertTextChange(before: AlertText, after: AlertText): string {
+	const CONTEXT = 30;
+	const MAX = 300;
+	const clip = (text: string) => (text.length > MAX ? `${text.slice(0, MAX)}…` : text);
+	const change = (a: string, b: string) => {
+		let start = 0;
+		while (start < a.length && start < b.length && a[start] === b[start]) start += 1;
+		let end = 0;
+		while (end < a.length - start && end < b.length - start && a[a.length - 1 - end] === b[b.length - 1 - end]) {
+			end += 1;
+		}
+		const head = start > CONTEXT ? `…${a.slice(start - CONTEXT, start)}` : a.slice(0, start);
+		const tail = end > CONTEXT ? `${a.slice(a.length - end, a.length - end + CONTEXT)}…` : a.slice(a.length - end);
+		return `${head}« ${clip(a.slice(start, a.length - end))} » → « ${clip(b.slice(start, b.length - end))} »${tail}`;
+	};
+	const changes: string[] = [];
+	if (before.headerText !== after.headerText) changes.push(`titre : ${change(before.headerText, after.headerText)}`);
+	if (before.descriptionText !== after.descriptionText) {
+		changes.push(`description : ${change(before.descriptionText, after.descriptionText)}`);
+	}
+	return changes.join(" ; ");
+}
+
+/**
  * L'alerte, ses lignes inconnues du GTFS rapportées à celle qui porte le même numéro dans un autre
  * réseau, quand il n'y en a qu'une — avec l'agence de ce réseau. Le flux de TCAR cite sous son propre
  * préfixe des lignes que le GTFS range chez un autre : « TCAR:26 » est « TNI:26 », « TCAR:530 »

@@ -3,7 +3,13 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type { DailyWindow } from "../ai/analyze-alert.js";
-import type { AnalyzedAlert } from "../gtfs-rt/use-service-alerts.js";
+import {
+	type AlertText,
+	type AnalyzedAlert,
+	alertTextChange,
+	readableAlertText,
+	sameAlertText,
+} from "../gtfs-rt/use-service-alerts.js";
 import type { Coordinates } from "../utils/geometry.js";
 
 /**
@@ -243,6 +249,24 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 		PRIMARY KEY (set_id, stop_id, departure)
 	) STRICT;
 	`,
+	(db) => {
+		// Le texte reçu au moment où titre ou description ont été réécrits, tel qu'il se lit — JSON d'un
+		// AlertText (cf. readableAlertText) : qu'il s'en écarte, et la réécriture saute (cf. recordAlerts).
+		// NULL : aucune réécriture, ou une réécriture dont on ne connaît pas encore le texte reçu.
+		db.exec("ALTER TABLE alert_first_seen ADD COLUMN text_basis TEXT");
+
+		// Les réécritures déjà faites prennent pour base le dernier texte relevé.
+		const rows = db
+			.prepare(
+				`SELECT alert_number, snapshot FROM alert_first_seen
+				 WHERE snapshot IS NOT NULL AND (header_override IS NOT NULL OR description_override IS NOT NULL)`,
+			)
+			.all() as { alert_number: string; snapshot: string }[];
+		const update = db.prepare("UPDATE alert_first_seen SET text_basis = ? WHERE alert_number = ?");
+		for (const row of rows) {
+			update.run(JSON.stringify(readableAlertText(decodeAlert(row.snapshot))), row.alert_number);
+		}
+	},
 ];
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
@@ -573,6 +597,11 @@ export type AlertSettings = {
 	hidden: boolean;
 	periods: SavedPeriod[] | null;
 	overrides: AlertOverrides;
+	/**
+	 * Le texte reçu sur lequel titre et description ont été réécrits, tel qu'il se lit (cf.
+	 * `readableAlertText`) ; `null` : aucune réécriture, ou une base encore inconnue.
+	 */
+	textBasis: AlertText | null;
 	/** L'impact réécrit ; `null` : celui du flux. */
 	impact: ImpactOverride | null;
 	/** Marquée traitée : quand, et l'empreinte de l'alerte reçue alors ; `null` : à traiter. */
@@ -609,6 +638,7 @@ const DEFAULT_SETTINGS: AlertSettings = {
 	hidden: false,
 	periods: null,
 	overrides: { headerText: null, descriptionText: null, cause: null, effect: null },
+	textBasis: null,
 	impact: null,
 	checked: null,
 };
@@ -699,6 +729,7 @@ export function useDetourStore(path: string) {
 					cause: row.cause_override,
 					effect: row.effect_override,
 				},
+				textBasis: row.text_basis === null ? null : (JSON.parse(row.text_basis) as AlertText),
 				impact:
 					row.impact_override === null
 						? null
@@ -979,10 +1010,14 @@ export function useDetourStore(path: string) {
 		 * déjà vue garde sa date : c'est l'ordre dans lequel elles sont arrivées, pas celui de leur
 		 * dernier passage.
 		 *
-		 * Quand le texte reçu d'une info trafic change, sa réécriture — titre et description — saute :
-		 * elle disait autre chose que ce qu'annonce désormais le réseau, et republier l'ancienne version
-		 * serait pire que republier la nouvelle telle quelle. On la refait au besoin. La cause et l'effet
-		 * réécrits, eux, restent.
+		 * Quand le texte reçu d'une info trafic s'écarte de celui sur lequel elle a été réécrite, sa
+		 * réécriture — titre et description — saute, tout de suite : elle disait autre chose que ce
+		 * qu'annonce désormais le réseau, et republier l'ancienne version serait pire que republier la
+		 * nouvelle telle quelle. On la refait au besoin. La cause et l'effet réécrits, eux, restent.
+		 *
+		 * Le texte se compare tel qu'il se lit (cf. `sameAlertText`) : un autre balisage de la même info
+		 * n'est pas un nouveau texte. Le journal dit ce qui a changé, pour qu'une réécriture qui saute
+		 * sans raison apparente se comprenne après coup.
 		 */
 		recordAlerts(alerts: Iterable<AnalyzedAlert>, nowSeconds: number) {
 			const upsert = db.prepare(
@@ -990,25 +1025,33 @@ export function useDetourStore(path: string) {
 				 ON CONFLICT (alert_number) DO UPDATE SET header_text = excluded.header_text, snapshot = excluded.snapshot`,
 			);
 			const dropRewrite = db.prepare(
-				"UPDATE alert_first_seen SET header_override = NULL, description_override = NULL WHERE alert_number = ?",
+				`UPDATE alert_first_seen SET header_override = NULL, description_override = NULL, text_basis = NULL
+				 WHERE alert_number = ?`,
 			);
+			const setBasis = db.prepare("UPDATE alert_first_seen SET text_basis = ? WHERE alert_number = ?");
 			for (const alert of alerts) {
 				const { alertNumber, headerText } = alert;
 				const snapshot = encodeAlert(alert);
 				if (firstSeen.has(alertNumber) && encoded.get(alertNumber) === snapshot) continue;
 
 				const previous = snapshots.get(alertNumber);
-				const overrides = settings.get(alertNumber)?.overrides;
-				const rewritten =
-					overrides !== undefined && (overrides.headerText !== null || overrides.descriptionText !== null);
-				const textChanged =
-					previous !== undefined &&
-					(previous.headerText !== alert.headerText || previous.descriptionText !== alert.descriptionText);
-				if (rewritten && textChanged) {
-					dropRewrite.run(alertNumber);
-					overrides.headerText = null;
-					overrides.descriptionText = null;
-					console.log(`➔ Alert ${alertNumber}: source text changed, rewritten text dropped.`);
+				const entry = settings.get(alertNumber);
+				if (entry !== undefined && (entry.overrides.headerText !== null || entry.overrides.descriptionText !== null)) {
+					const received = readableAlertText(alert);
+					// Sans base retenue, c'est le dernier texte relevé qui en tient lieu.
+					const basis = entry.textBasis ?? readableAlertText(previous ?? alert);
+					if (!sameAlertText(basis, received)) {
+						dropRewrite.run(alertNumber);
+						entry.overrides.headerText = null;
+						entry.overrides.descriptionText = null;
+						entry.textBasis = null;
+						console.log(
+							`➔ Alert ${alertNumber}: source text changed, rewritten text dropped — ${alertTextChange(basis, received)}`,
+						);
+					} else if (entry.textBasis === null) {
+						setBasis.run(JSON.stringify(basis), alertNumber);
+						entry.textBasis = basis;
+					}
 				}
 
 				const seenAt = firstSeen.get(alertNumber) ?? nowSeconds;
@@ -1217,18 +1260,26 @@ export function useDetourStore(path: string) {
 			const added = [...wanted].filter((uid) => !current.has(uid));
 			const removed = [...current].filter((uid) => !wanted.has(uid));
 
+			// Le texte réécrit l'est sur le dernier texte relevé : c'est de lui qu'il ne doit pas s'écarter.
+			const { headerText, descriptionText, cause, effect } = input.overrides;
+			const source = snapshots.get(alertNumber);
+			const textBasis =
+				(headerText !== null || descriptionText !== null) && source !== undefined
+					? JSON.stringify(readableAlertText(source))
+					: null;
+
 			transaction(() => {
-				const { headerText, descriptionText, cause, effect } = input.overrides;
 				db.prepare(
 					`UPDATE alert_first_seen
 					 SET header_override = ?, description_override = ?, cause_override = ?, effect_override = ?,
-						 periods_overridden = ?, impact_override = ?, impact_basis = ?
+						 text_basis = ?, periods_overridden = ?, impact_override = ?, impact_basis = ?
 					 WHERE alert_number = ?`,
 				).run(
 					headerText,
 					descriptionText,
 					cause,
 					effect,
+					textBasis,
 					input.periods === null ? 0 : 1,
 					input.impact === null ? null : JSON.stringify(input.impact.entities),
 					input.impact?.basis ?? null,
@@ -1494,6 +1545,7 @@ type FirstSeenRow = {
 	effect_override: string | null;
 	impact_override: string | null;
 	impact_basis: string | null;
+	text_basis: string | null;
 	checked_at: number | null;
 	checked_basis: string | null;
 };

@@ -2,7 +2,7 @@ import type { AlertDto } from "@dto";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { cn } from "cn";
 import { CircleCheckIcon, SearchIcon, TriangleAlertIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 
 import { LineBadge, LineOption } from "@/components/line-badge";
 import { FilterBar, PageHeader } from "@/components/page-header";
@@ -17,14 +17,15 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { describePeriods, searchable } from "@/lib/format";
 import { causeColor, causeLabel } from "@/lib/labels";
 import { useAlerts, useModifications, useRoutes } from "@/lib/queries";
+import { useSearchText } from "@/lib/search-text";
 import { alertsRoute } from "@/router";
 
 import { AlertDetail } from "./alert-detail";
 
 /** Où en est une alerte, pour la liste : en cours, à venir, ou terminée. */
-type Status = "current" | "planned" | "ended";
+export type AlertStatus = "current" | "planned" | "ended";
 
-const STATUSES: Record<Status, { label: string; color: string }> = {
+export const STATUSES: Record<AlertStatus, { label: string; color: string }> = {
 	current: { label: "En cours", color: "#1D56C8" },
 	planned: { label: "À venir", color: "#B54708" },
 	ended: { label: "Terminées / supprimées", color: "#5B626A" },
@@ -34,7 +35,7 @@ const STATUSES: Record<Status, { label: string; color: string }> = {
  * En cours : dans ses dates, fût-ce hors de ses heures. Terminée : échue, ou retirée du flux — elle n'y
  * reviendra pas, quelles que soient ses dates.
  */
-function statusOf(alert: AlertDto): Status {
+function statusOf(alert: AlertDto): AlertStatus {
 	if (alert.publication === "withdrawn" || alert.phase === "expired") return "ended";
 	return alert.phase === "planned" ? "planned" : "current";
 }
@@ -44,15 +45,15 @@ function statusOf(alert: AlertDto): Status {
  * gauche, filtrée par état, par cause et par ligne ; le détail de celle qu'on a choisie à droite.
  */
 export function AlertsPage() {
-	const { alert: selectedNumber, todo } = alertsRoute.useSearch();
+	const search = alertsRoute.useSearch();
+	const { alert: selectedNumber, todo, status = "ALL", cause = "ALL", line = "all" } = search;
 	const navigate = useNavigate({ from: "/alerts" });
 	const alerts = useAlerts();
 	const modifications = useModifications();
 	const routes = useRoutes();
-	const [status, setStatus] = useState("ALL");
-	const [cause, setCause] = useState("ALL");
-	const [line, setLine] = useState("all");
-	const [query, setQuery] = useState("");
+	const filter = (change: Partial<typeof search>, replace = false) =>
+		navigate({ search: (current) => ({ ...current, ...change }), replace });
+	const [query, setQuery] = useSearchText(search.q ?? "", (q) => filter({ q: q || undefined }, true));
 
 	const list = alerts.data ?? [];
 	const causes = useMemo(() => {
@@ -63,7 +64,7 @@ export function AlertsPage() {
 		}
 		return [...counts].sort((a, b) => b[1] - a[1]);
 	}, [list]);
-	const statuses = (Object.keys(STATUSES) as Status[]).map(
+	const statuses = (Object.keys(STATUSES) as AlertStatus[]).map(
 		(key) => [key, list.filter((alert) => statusOf(alert) === key).length] as const,
 	);
 	// Les lignes que cite au moins une alerte, dans l'ordre du réseau.
@@ -107,11 +108,8 @@ export function AlertsPage() {
 
 			<FilterBar>
 				<label className="flex items-center gap-2 text-[13px] font-medium text-strong">
-					<Switch
-						checked={todo === true}
-						onCheckedChange={(on) => navigate({ search: (current) => ({ ...current, todo: on ? true : undefined }) })}
-					/>
-					À traiter seulement
+					<Switch checked={todo === true} onCheckedChange={(on) => filter({ todo: on ? true : undefined })} />
+					<span>À traiter seulement</span>
 					<span className="font-mono text-xs text-subtle">
 						{list.filter((alert) => alert.checkedAt === null).length}
 					</span>
@@ -120,7 +118,7 @@ export function AlertsPage() {
 				<ChipFilter
 					label="État"
 					value={status}
-					onChange={setStatus}
+					onChange={(next) => filter({ status: next === "ALL" ? undefined : (next as AlertStatus) })}
 					total={list.length}
 					options={statuses.map(([key, count]) => ({
 						key,
@@ -133,14 +131,14 @@ export function AlertsPage() {
 				<ChipFilter
 					label="Cause"
 					value={cause}
-					onChange={setCause}
+					onChange={(next) => filter({ cause: next === "ALL" ? undefined : next })}
 					total={list.length}
 					options={causes.map(([key, count]) => ({ key, label: causeLabel(key), color: causeColor(key), count }))}
 				/>
 				<Separator orientation="vertical" className="h-6!" />
 				<label className="flex items-center gap-2 text-[13px] font-medium text-strong">
 					Ligne
-					<Select value={line} onValueChange={setLine}>
+					<Select value={line} onValueChange={(next) => filter({ line: next === "all" ? undefined : next })}>
 						<SelectTrigger className="min-w-40">
 							<SelectValue />
 						</SelectTrigger>
@@ -204,7 +202,7 @@ function AlertCard({ alert, selected }: { alert: AlertDto; selected: boolean }) 
 	return (
 		<Link
 			from="/alerts"
-			search={(current) => ({ ...current, alert: alert.alertNumber })}
+			search={(current) => ({ ...current, alert: alert.alertNumber, all: undefined })}
 			aria-current={selected ? "true" : undefined}
 			className={cn(
 				"flex w-full flex-col gap-2 rounded-lg border bg-card px-4 py-3.5 text-left text-foreground! no-underline",

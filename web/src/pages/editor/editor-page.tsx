@@ -1,6 +1,6 @@
 import type { AllStopsDto, ModificationDetailDto } from "@dto";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useBlocker, useNavigate } from "@tanstack/react-router";
+import { Link, useBlocker, useNavigate, useSearch } from "@tanstack/react-router";
 import { cn } from "cn";
 import {
 	ArrowDownIcon,
@@ -113,9 +113,22 @@ export function ModificationEditorPage({ uid, alert }: { uid: number | null; ale
  */
 function Editor({ detail, alert }: { detail: ModificationDetailDto; alert: string | null }) {
 	const navigate = useNavigate();
+	const search = useSearch({ from: "/modifications/$uid" });
 	const geometry = useMemo(() => geometryOf(detail), [detail]);
-	const editor = useEditor(detail, geometry);
+	const editor = useEditor(detail, geometry, (search.segment ?? 1) - 1);
 	const { state, patterns, active } = editor;
+
+	// Le tronçon actif se lit dans l'URL, sans ajouter d'étape à l'historique.
+	const segment = state.active + 1;
+	useEffect(() => {
+		if ((search.segment ?? 1) !== segment)
+			navigate({
+				to: "/modifications/$uid",
+				params: { uid: String(detail.uid) },
+				search: (current) => ({ ...current, segment: segment > 1 ? segment : undefined }),
+				replace: true,
+			});
+	}, [segment, search.segment, detail.uid, navigate]);
 	const status = useStatus();
 	const roadRouting = status.data?.roadRouting ?? false;
 	const [pen, setPen] = useState<"route" | "free">("free");
@@ -143,8 +156,11 @@ function Editor({ detail, alert }: { detail: ModificationDetailDto; alert: strin
 	const input = inputOf(state, patterns, total);
 	const dirty = JSON.stringify(input) !== baseline;
 	useBlocker({
-		shouldBlockFn: () =>
-			dirty && !window.confirm("Des changements de cette modification ne sont pas enregistrés. Les abandonner ?"),
+		// Rester sur la modification — changer de tronçon — ne perd rien.
+		shouldBlockFn: ({ current, next }) =>
+			dirty &&
+			next.pathname !== current.pathname &&
+			!window.confirm("Des changements de cette modification ne sont pas enregistrés. Les abandonner ?"),
 		enableBeforeUnload: () => dirty,
 	});
 
@@ -190,9 +206,9 @@ function Editor({ detail, alert }: { detail: ModificationDetailDto; alert: strin
 		});
 	};
 
-	const onMapClick = (point: LatLng) => {
+	const onMapClick = (point: LatLng, onShape = false) => {
 		if (mode === "place") setPlacing(point);
-		else if (mode === "draw") editor.addWaypoint(point, pen);
+		else if (mode === "draw") editor.addWaypoint(point, pen, onShape);
 	};
 
 	const pickStop = ([stopId, name, latitude, longitude, provisional]: AllStopsDto[number]) => {
@@ -578,7 +594,7 @@ function Editor({ detail, alert }: { detail: ModificationDetailDto; alert: strin
 					onRemoveSegment={editor.removeSegment}
 					onUndo={editor.undo}
 					onClear={editor.clear}
-					onMoveWaypoint={editor.moveWaypoint}
+					onMoveWaypoint={(index, point, onShape) => editor.moveWaypoint(index, point, pen, onShape)}
 					onRemoveWaypoint={editor.removeWaypoint}
 					onPickStop={pickStop}
 					hint={hint}

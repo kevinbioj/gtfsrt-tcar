@@ -1,5 +1,5 @@
 import type { AlertDto, ModificationSummaryDto, StopGroupDto } from "@dto";
-import { Link, useBlocker, useNavigate } from "@tanstack/react-router";
+import { Link, useBlocker, useNavigate, useSearch } from "@tanstack/react-router";
 import { cn } from "cn";
 import {
 	CircleCheckIcon,
@@ -78,7 +78,8 @@ type Creation = { routeId: string; directionId: number } | "blank";
  */
 export function AlertDetail({ alert, modifications }: { alert: AlertDto; modifications: ModificationSummaryDto[] }) {
 	const [form, setForm] = useState<AlertForm>(() => formOf(alert));
-	const [showAll, setShowAll] = useState(false);
+	const search = useSearch({ from: "/alerts" });
+	const showAll = search.all === true;
 	const save = useSaveAlert(alert.alertNumber);
 	const setHidden = useSetAlertHidden(alert.alertNumber);
 	const setChecked = useSetAlertChecked(alert.alertNumber);
@@ -101,9 +102,17 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 		if (current === previous.current) setForm(formOf(alert));
 		previous.current = baseline;
 	}, [baseline, current, alert]);
+	// Une alerte qu'on modifie devient celle de l'URL : changer de filtre ne la quitte plus. Seul ce
+	// qui en ouvre une autre, ou quitte la page, demande alors confirmation.
+	useEffect(() => {
+		if (dirty && search.alert !== alert.alertNumber)
+			navigate({ to: "/alerts", search: (current) => ({ ...current, alert: alert.alertNumber }), replace: true });
+	}, [dirty, search.alert, alert.alertNumber, navigate]);
 	useBlocker({
-		shouldBlockFn: () =>
-			dirty && !window.confirm("Des changements de cette alerte ne sont pas enregistrés. Les abandonner ?"),
+		shouldBlockFn: ({ next }) =>
+			dirty &&
+			!(next.routeId === "/alerts" && next.search.alert === alert.alertNumber) &&
+			!window.confirm("Des changements de cette alerte ne sont pas enregistrés. Les abandonner ?"),
 		enableBeforeUnload: () => dirty,
 	});
 
@@ -414,7 +423,17 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 				) : null}
 				{hiddenCount > 0 ? (
 					<div className="border-t border-divider pt-3">
-						<Button variant="link" className="px-0" onClick={() => setShowAll(!showAll)}>
+						<Button
+							variant="link"
+							className="px-0"
+							onClick={() =>
+								navigate({
+									to: "/alerts",
+									search: (current) => ({ ...current, all: showAll ? undefined : true }),
+									replace: true,
+								})
+							}
+						>
 							{showAll ? "Masquer les sens sans suppression" : "Afficher les lignes sans suppression"}
 						</Button>
 					</div>

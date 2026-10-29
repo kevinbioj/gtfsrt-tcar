@@ -29,8 +29,11 @@ const SNAP_TOLERANCE = 25;
  * revenir après qu'on a redéplacé le point, et chaque jambe porte donc un jeton — une réponse dont le
  * jeton n'est plus le bon décrit un tracé qui n'existe plus.
  */
-export function useEditor(detail: ModificationDetailDto, geometry: Geometry) {
-	const [state, setState] = useState<EditorState>(() => stateOf(detail, geometry));
+export function useEditor(detail: ModificationDetailDto, geometry: Geometry, initialActive = 0) {
+	const [state, setState] = useState<EditorState>(() => {
+		const initial = stateOf(detail, geometry);
+		return { ...initial, active: Math.min(initialActive, initial.segments.length - 1) };
+	});
 	const ref = useRef(state);
 	ref.current = state;
 
@@ -122,8 +125,12 @@ export function useEditor(detail: ModificationDetailDto, geometry: Geometry) {
 		commit(replaceSegment(current, rank, { ...segment, legs, waypoints }));
 	};
 
-	/** Le point cliqué, accroché au tracé nominal s'il en est assez près. */
-	const snapped = (point: LatLng): LatLng => {
+	/**
+	 * Le point cliqué, accroché au tracé nominal s'il en est assez près. En tracé libre, seul un clic
+	 * posé sur le tracé lui-même s'y accroche : on doit pouvoir dessiner tout contre sans s'y coller.
+	 */
+	const snapped = (point: LatLng, pen: "route" | "free", onShape: boolean): LatLng => {
+		if (pen === "free" && !onShape) return point;
 		const primary = patternsOf(ref.current)[0];
 		const shape = primary === undefined ? undefined : geometry.get(primary.shapeId);
 		if (shape === undefined) return point;
@@ -191,7 +198,7 @@ export function useEditor(detail: ModificationDetailDto, geometry: Geometry) {
 			});
 		},
 
-		addWaypoint(point: LatLng, pen: "route" | "free") {
+		addWaypoint(point: LatLng, pen: "route" | "free", onShape = false) {
 			const current = ref.current;
 			const segment = current.segments[current.active];
 			if (segment === undefined) return;
@@ -199,17 +206,17 @@ export function useEditor(detail: ModificationDetailDto, geometry: Geometry) {
 			const waypoints = segment.waypoints.map((waypoint, index, list) =>
 				index === list.length - 1 ? { ...waypoint, mode: pen } : waypoint,
 			);
-			waypoints.push({ point: snapped(point), mode: pen });
+			waypoints.push({ point: snapped(point, pen, onShape), mode: pen });
 			const legs = waypoints.length >= 2 ? [...segment.legs, newLeg()] : [];
 			commit(replaceSegment(current, current.active, { ...segment, waypoints, legs }));
 			if (waypoints.length >= 2) resolveLegs([waypoints.length - 2]);
 		},
 
-		moveWaypoint(index: number, point: LatLng) {
+		moveWaypoint(index: number, point: LatLng, pen: "route" | "free", onShape = false) {
 			updateActive((segment) => ({
 				...segment,
 				waypoints: segment.waypoints.map((waypoint, rank) =>
-					rank === index ? { ...waypoint, point: snapped(point) } : waypoint,
+					rank === index ? { ...waypoint, point: snapped(point, pen, onShape) } : waypoint,
 				),
 			}));
 			resolveLegs([index - 1, index].filter((leg) => leg >= 0));

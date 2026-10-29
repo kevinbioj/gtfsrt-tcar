@@ -1,5 +1,5 @@
 import type { ModificationState, ModificationSummaryDto } from "@dto";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { cn } from "cn";
 import { PencilIcon, PlusIcon, SearchIcon } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -31,12 +31,13 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { modificationId, searchable } from "@/lib/format";
 import { useBulk, useModifications, useRoutes, useSetManual } from "@/lib/queries";
+import { useSearchText } from "@/lib/search-text";
 
 import { AlertChips } from "./alert-chips";
 
-type Tab = "all" | "published" | "planned" | "off";
+export type ModificationTab = "all" | "published" | "planned" | "off";
 
-const TABS: { value: Tab; label: string; states: ModificationState[] }[] = [
+export const TABS: { value: ModificationTab; label: string; states: ModificationState[] }[] = [
 	{ value: "all", label: "Toutes", states: ["manual", "live", "planned", "off"] },
 	{ value: "published", label: "Publiées", states: ["manual", "live"] },
 	{ value: "planned", label: "Planifiées", states: ["planned"] },
@@ -70,9 +71,12 @@ export function ModificationsPage() {
 	const routes = useRoutes();
 	const setManual = useSetManual();
 	const bulk = useBulk();
-	const [tab, setTab] = useState<Tab>("all");
-	const [line, setLine] = useState("all");
-	const [query, setQuery] = useState("");
+	const search = useSearch({ from: "/modifications" });
+	const { tab = "all", line = "all" } = search;
+	const navigate = useNavigate({ from: "/modifications" });
+	const filter = (change: Partial<typeof search>, replace = false) =>
+		navigate({ search: (current) => ({ ...current, ...change }), replace });
+	const [query, setQuery] = useSearchText(search.q ?? "", (q) => filter({ q: q || undefined }, true));
 	const [selected, setSelected] = useState<Set<number>>(new Set());
 
 	const rows = data ?? [];
@@ -86,7 +90,7 @@ export function ModificationsPage() {
 			(line === "all" || row.routeId === line) && (query.length === 0 || haystack(row).includes(searchable(query))),
 	);
 	const visible = filtered.filter((row) => TABS.find((entry) => entry.value === tab)?.states.includes(row.state));
-	const count = (value: Tab) =>
+	const count = (value: ModificationTab) =>
 		filtered.filter((row) => TABS.find((entry) => entry.value === value)?.states.includes(row.state)).length;
 	const chosen = visible.filter((row) => selected.has(row.uid)).map((row) => row.uid);
 
@@ -132,7 +136,10 @@ export function ModificationsPage() {
 			</PageHeader>
 
 			<FilterBar>
-				<Tabs value={tab} onValueChange={(value) => setTab(value as Tab)}>
+				<Tabs
+					value={tab}
+					onValueChange={(value) => filter({ tab: value === "all" ? undefined : (value as ModificationTab) })}
+				>
 					<TabsList aria-label="Filtrer par publication">
 						{TABS.map((entry) => (
 							<TabsTrigger key={entry.value} value={entry.value} className="gap-2">
@@ -144,7 +151,7 @@ export function ModificationsPage() {
 				</Tabs>
 				<label className="flex items-center gap-2 text-[13px] font-medium text-strong">
 					Ligne
-					<Select value={line} onValueChange={setLine}>
+					<Select value={line} onValueChange={(next) => filter({ line: next === "all" ? undefined : next })}>
 						<SelectTrigger className="min-w-40">
 							<SelectValue />
 						</SelectTrigger>

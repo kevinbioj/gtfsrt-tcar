@@ -1,4 +1,4 @@
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { cn } from "cn";
 import { useState } from "react";
 
@@ -19,14 +19,17 @@ import { useAlerts, useCreateModification, useRoutes } from "@/lib/queries";
  */
 export function NewModification({ alert }: { alert: string | null }) {
 	const navigate = useNavigate();
+	const search = useSearch({ from: "/modifications/new" });
 	const routes = useRoutes();
 	const alerts = useAlerts();
 	const create = useCreateModification();
 	// Depuis une info trafic, la première ligne qu'elle cite est proposée d'emblée.
 	const cited = alerts.data?.find((entry) => entry.alertNumber === alert)?.lines[0]?.routeId ?? null;
-	const [chosenRouteId, setRouteId] = useState<string | null>(null);
-	const routeId = chosenRouteId ?? cited;
-	const [directionId, setDirectionId] = useState<number | null>(null);
+	const routeId = search.line ?? cited;
+	const directionId = search.direction ?? null;
+	// Ligne et sens se lisent dans l'URL ; les choisir n'ajoute pas d'étape à l'historique.
+	const choose = (change: { line?: string; direction?: number }) =>
+		navigate({ to: "/modifications/new", search: (current) => ({ ...current, ...change }), replace: true });
 	const [description, setDescription] = useState("");
 
 	const route = routes.data?.find((entry) => entry.routeId === routeId);
@@ -96,10 +99,7 @@ export function NewModification({ alert }: { alert: string | null }) {
 							<FieldLabel htmlFor="new-line">Ligne</FieldLabel>
 							<Select
 								value={routeId ?? undefined}
-								onValueChange={(value) => {
-									setRouteId(value);
-									setDirectionId(null);
-								}}
+								onValueChange={(value) => choose({ line: value, direction: undefined })}
 							>
 								<SelectTrigger id="new-line" className="h-10 w-full">
 									<SelectValue placeholder="Choisir une ligne" />
@@ -126,7 +126,7 @@ export function NewModification({ alert }: { alert: string | null }) {
 										key={entry.directionId}
 										type="button"
 										aria-pressed={on}
-										onClick={() => setDirectionId(entry.directionId)}
+										onClick={() => choose({ line: route.routeId, direction: entry.directionId })}
 										className={cn(
 											"flex min-h-11 w-full items-center gap-2.5 rounded-md border px-3 py-2 text-left",
 											on ? "border-[#B9CDF3] bg-[#F7F9FE]" : "bg-card",
