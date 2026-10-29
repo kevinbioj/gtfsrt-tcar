@@ -21,7 +21,7 @@ import {
 	type Waypoint,
 } from "./editor-state";
 
-/** Un clic à moins de cette distance du tracé nominal s'y accroche : c'est une jonction. */
+/** Garde-fou : un clic sur un autre tracé coché que le premier ne s'accroche pas au premier s'il en est loin. */
 const SNAP_TOLERANCE = 25;
 
 /**
@@ -126,11 +126,11 @@ export function useEditor(detail: ModificationDetailDto, geometry: Geometry, ini
 	};
 
 	/**
-	 * Le point cliqué, accroché au tracé nominal s'il en est assez près. En tracé libre, seul un clic
-	 * posé sur le tracé lui-même s'y accroche : on doit pouvoir dessiner tout contre sans s'y coller.
+	 * Le point cliqué, accroché au tracé nominal quand il est posé sur le trait même, quel que soit le
+	 * mode de dessin : on doit pouvoir cliquer tout contre sans s'y coller.
 	 */
-	const snapped = (point: LatLng, pen: "route" | "free", onShape: boolean): LatLng => {
-		if (pen === "free" && !onShape) return point;
+	const snapped = (point: LatLng, onShape: boolean): LatLng => {
+		if (!onShape) return point;
 		const primary = patternsOf(ref.current)[0];
 		const shape = primary === undefined ? undefined : geometry.get(primary.shapeId);
 		if (shape === undefined) return point;
@@ -206,17 +206,17 @@ export function useEditor(detail: ModificationDetailDto, geometry: Geometry, ini
 			const waypoints = segment.waypoints.map((waypoint, index, list) =>
 				index === list.length - 1 ? { ...waypoint, mode: pen } : waypoint,
 			);
-			waypoints.push({ point: snapped(point, pen, onShape), mode: pen });
+			waypoints.push({ point: snapped(point, onShape), mode: pen });
 			const legs = waypoints.length >= 2 ? [...segment.legs, newLeg()] : [];
 			commit(replaceSegment(current, current.active, { ...segment, waypoints, legs }));
 			if (waypoints.length >= 2) resolveLegs([waypoints.length - 2]);
 		},
 
-		moveWaypoint(index: number, point: LatLng, pen: "route" | "free", onShape = false) {
+		moveWaypoint(index: number, point: LatLng, onShape = false) {
 			updateActive((segment) => ({
 				...segment,
 				waypoints: segment.waypoints.map((waypoint, rank) =>
-					rank === index ? { ...waypoint, point: snapped(point, pen, onShape) } : waypoint,
+					rank === index ? { ...waypoint, point: snapped(point, onShape) } : waypoint,
 				),
 			}));
 			resolveLegs([index - 1, index].filter((leg) => leg >= 0));

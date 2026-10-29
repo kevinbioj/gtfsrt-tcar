@@ -594,7 +594,7 @@ function Editor({ detail, alert }: { detail: ModificationDetailDto; alert: strin
 					onRemoveSegment={editor.removeSegment}
 					onUndo={editor.undo}
 					onClear={editor.clear}
-					onMoveWaypoint={(index, point, onShape) => editor.moveWaypoint(index, point, pen, onShape)}
+					onMoveWaypoint={(index, point, onShape) => editor.moveWaypoint(index, point, onShape)}
 					onRemoveWaypoint={editor.removeWaypoint}
 					onPickStop={pickStop}
 					hint={hint}

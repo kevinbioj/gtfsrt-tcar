@@ -88,8 +88,8 @@ function legendSwatch(
 /**
  * La carte de l'éditeur : le tracé nominal des tracés cochés, la portion que la déviation évite, le
  * dessin du tronçon en cours et ceux des autres, les arrêts de la ligne — barrés quand ils sont
- * supprimés —, et les arrêts de remplacement. Chaque clic pose un point de passage ; près du tracé
- * nominal — sur le trait même en tracé libre —, il s'y accroche : c'est une jonction.
+ * supprimés —, et les arrêts de remplacement. Chaque clic pose un point de passage ; sur le trait
+ * même du tracé nominal, il s'y accroche : c'est une jonction.
  */
 export function EditorMap({
 	patterns,
