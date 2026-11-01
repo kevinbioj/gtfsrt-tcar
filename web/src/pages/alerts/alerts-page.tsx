@@ -109,7 +109,7 @@ export function AlertsPage() {
 			<FilterBar>
 				<label className="flex items-center gap-2 text-[13px] font-medium text-strong">
 					<Switch checked={todo === true} onCheckedChange={(on) => filter({ todo: on ? true : undefined })} />
-					<span>À traiter seulement</span>
+					<span>À traiter</span>
 					<span className="font-mono text-xs text-subtle">
 						{list.filter((alert) => alert.checkedAt === null).length}
 					</span>
@@ -136,10 +136,10 @@ export function AlertsPage() {
 					options={causes.map(([key, count]) => ({ key, label: causeLabel(key), color: causeColor(key), count }))}
 				/>
 				<Separator orientation="vertical" className="h-6!" />
-				<label className="flex items-center gap-2 text-[13px] font-medium text-strong">
+				<label className="flex min-w-0 items-center gap-2 text-[13px] font-medium text-strong">
 					Ligne
 					<Select value={line} onValueChange={(next) => filter({ line: next === "all" ? undefined : next })}>
-						<SelectTrigger className="min-w-40">
+						<SelectTrigger className="w-47 max-w-full">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>

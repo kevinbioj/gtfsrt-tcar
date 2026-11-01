@@ -180,10 +180,10 @@ export function ModificationsPage() {
 						))}
 					</TabsList>
 				</Tabs>
-				<label className="flex items-center gap-2 text-[13px] font-medium text-strong">
+				<label className="flex min-w-0 items-center gap-2 text-[13px] font-medium text-strong">
 					Ligne
 					<Select value={line} onValueChange={(next) => filter({ line: next === "all" ? undefined : next })}>
-						<SelectTrigger className="min-w-40">
+						<SelectTrigger className="w-64 max-w-full">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
