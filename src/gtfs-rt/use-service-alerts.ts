@@ -143,12 +143,15 @@ type ServedStopIndex = Map<string, Map<string, Set<string>>>;
 
 /**
  * Une info trafic prête à être republiée, son numéro — ce qui s'en règle s'y rattache (cf.
- * `AlertSettings`) —, et les réseaux dont elle cite des lignes.
+ * `AlertSettings`) —, et les réseaux dont elle cite des lignes. Son alerte garde la période de
+ * communication du flux amont ; celle qui se republie, et la période d'impact, se déduisent des
+ * périodes que l'analyse a lues (cf. `publishedPeriods`) — `null` tant qu'elle n'est pas analysée.
  */
 export type AlertEntity = {
 	alertNumber: string;
 	networks: ReadonlySet<string>;
 	entity: GtfsRealtime.transit_realtime.IFeedEntity;
+	periods: AlertPeriod[] | null;
 };
 
 type AlertsState = { headerTimestamp: string | null };
@@ -158,8 +161,8 @@ type AlertsSnapshot = {
 	entities: AlertEntity[];
 	inputs: AlertInput[];
 	routesById: Map<string, Set<string>>;
-	/** Les alertes telles que republiées : l'analyse leur ajoute leur période d'impact. */
-	republishedById: Map<string, GtfsRealtime.transit_realtime.IAlert>;
+	/** Les infos trafic à republier, par identifiant : l'analyse leur ajoute ses périodes. */
+	entitiesById: Map<string, AlertEntity>;
 	feedAlertIds: Set<string>;
 	headerTimestamp: string | null;
 };
@@ -214,9 +217,9 @@ export function useServiceAlerts(
 			const snapshot = await fetchAlerts(url, gtfs.data, state);
 			if (snapshot === null) return; // erreur, ou GTFS indisponible → on garde le relevé courant
 
-			// Les périodes d'impact que le cache connaît sont posées avant publication : une alerte déjà
-			// analysée ne perd pas la sienne le temps que l'analyse repasse.
-			applyImpactPeriods(snapshot, cachedAnalyses(snapshot.inputs), Temporal.Now.instant());
+			// Les périodes que le cache connaît sont posées avant publication : une alerte déjà analysée
+			// ne perd pas les siennes le temps que l'analyse repasse.
+			applyAnalyzedPeriods(snapshot, cachedAnalyses(snapshot.inputs));
 			resource.entities = snapshot.entities;
 			resource.importedAt = Temporal.Now.instant();
 			state.headerTimestamp = snapshot.headerTimestamp;
@@ -244,7 +247,7 @@ export function useServiceAlerts(
 					// Un relevé plus récent a été publié entre-temps : c'est lui qu'il reste à analyser.
 					if (resource.entities !== snapshot.entities) continue;
 
-					applyImpactPeriods(snapshot, analyses, Temporal.Now.instant());
+					applyAnalyzedPeriods(snapshot, analyses);
 					resource.alerts = analyzedAlerts(snapshot, analyses, gtfs.data);
 					// Persiste le cache IA (alertes disparues purgées) pour éviter tout réappel au redémarrage.
 					pruneCache(snapshot.feedAlertIds);
@@ -505,7 +508,7 @@ async function fetchAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState)
 			entities: [],
 			inputs: [],
 			routesById: new Map(),
-			republishedById: new Map(),
+			entitiesById: new Map(),
 			feedAlertIds: new Set(),
 			headerTimestamp,
 		};
@@ -523,16 +526,19 @@ async function fetchAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState)
 
 			snapshot.routesById.set(alertId, routeIds);
 			// La période active du flux amont est sa fenêtre de publication — des mois, souvent jusqu'à la
-			// fin de l'année —, et non celle de la perturbation : c'est la période de communication. La
-			// période d'impact vient de l'analyse (cf. `applyImpactPeriods`).
+			// fin de l'année —, et non celle de la perturbation : c'est la période de communication reçue.
+			// Celle qui se republie, et la période d'impact, se déduisent de l'analyse (cf.
+			// `publishedPeriods`).
 			const republished = withAccessibilityStops(withCanonicalStops(plainAlert(alert), gtfs), routeIds, gtfs);
 			republished.communicationPeriod = alert.activePeriod ?? [];
-			snapshot.republishedById.set(alertId, republished);
-			snapshot.entities.push({
+			const entry: AlertEntity = {
 				alertNumber: alertNumber(alertId),
 				networks: new Set([...routeIds].map(networkOf)),
 				entity: { id: republishedAlertId(alertId), alert: republished },
-			});
+				periods: null,
+			};
+			snapshot.entitiesById.set(alertId, entry);
+			snapshot.entities.push(entry);
 			snapshot.inputs.push({
 				id: alertId,
 				headerText: joinTranslations(alert.headerText),
@@ -549,12 +555,11 @@ async function fetchAlerts(url: string, gtfs: StaticGtfs, previous: AlertsState)
 	}
 }
 
-/** Pose sur les alertes republiées la période d'impact que donne leur analyse, quand elle est connue. */
-function applyImpactPeriods(snapshot: AlertsSnapshot, analyses: Map<string, AlertAnalysis>, now: Temporal.Instant) {
-	for (const [alertId, republished] of snapshot.republishedById) {
+/** Pose sur les infos trafic à republier les périodes que lit leur analyse, quand elle est connue. */
+function applyAnalyzedPeriods(snapshot: AlertsSnapshot, analyses: Map<string, AlertAnalysis>) {
+	for (const [alertId, entry] of snapshot.entitiesById) {
 		const analysis = analyses.get(alertId);
-		if (analysis === undefined) continue;
-		republished.impactPeriod = impactPeriods(analysis.periods, republished.communicationPeriod ?? [], now);
+		if (analysis !== undefined) entry.periods = analysis.periods;
 	}
 }
 
@@ -673,17 +678,75 @@ export function periodsOverlap(a: AlertPeriod[], b: AlertPeriod[]): boolean {
 type Span = { start: number | null; end: number | null };
 
 /**
- * La période d'impact d'une alerte, tirée des périodes que l'analyse lit dans son texte — ou de celles
- * qu'on y a saisies à la place (cf. `AlertSettings`).
+ * Les périodes de communication et d'impact d'une alerte telles qu'elles se republient, tirées des
+ * périodes que l'analyse lit dans son texte — ou de celles qu'on y a saisies à la place (cf.
+ * `AlertSettings`) — et de la période de communication que donne le flux amont.
+ *
+ * Faute de période d'impact — alerte pas encore analysée (`null`), aucune période lue, ou aucune qui
+ * tienne dans la communication —, l'impact est la communication reçue : la perturbation dure, à ce
+ * qu'on en sait, tant que le flux amont la publie.
+ *
+ * La période active, dépréciée et gardée pour la rétrocompatibilité, suit la communication : la spec
+ * les définit toutes deux comme le moment où l'alerte s'affiche, et c'est bien ainsi que le flux amont
+ * remplit la sienne. Un lecteur qui ignore la communication montre donc l'alerte aux mêmes dates.
+ */
+export function publishedPeriods(
+	periods: AlertPeriod[] | null,
+	received: GtfsRealtime.transit_realtime.ITimeRange[],
+	now: Temporal.Instant,
+): {
+	activePeriod: GtfsRealtime.transit_realtime.ITimeRange[];
+	communicationPeriod: GtfsRealtime.transit_realtime.ITimeRange[];
+	impactPeriod: GtfsRealtime.transit_realtime.ITimeRange[];
+} {
+	if (periods === null) return { activePeriod: received, communicationPeriod: received, impactPeriod: received };
+	const communicationPeriod = communicationPeriods(periods, received);
+	const impactPeriod = impactPeriods(periods, communicationPeriod, now);
+	return {
+		activePeriod: communicationPeriod,
+		communicationPeriod,
+		impactPeriod: impactPeriod.length > 0 ? impactPeriod : received,
+	};
+}
+
+/**
+ * La période de communication d'une alerte telle qu'elle se republie. Celle du flux amont est une
+ * fenêtre de publication — souvent jusqu'à la fin de l'année —, et non la durée de la perturbation :
+ * quand les périodes lues disent quand celle-ci finit, la communication s'arrête là ; quand elles la
+ * disent ouverte (« à partir du 31/10 »), la communication l'est aussi. Son début reste celui du flux :
+ * une alerte s'annonce avant la perturbation.
+ *
+ * Aucune période lue ne dit rien de la fin : la communication reçue reste. Une fin lue qui précède le
+ * début de la communication est une lecture douteuse : la communication reçue reste aussi.
+ */
+export function communicationPeriods(
+	periods: AlertPeriod[],
+	received: GtfsRealtime.transit_realtime.ITimeRange[],
+): GtfsRealtime.transit_realtime.ITimeRange[] {
+	if (periods.length === 0) return received;
+
+	const lastEnd = lastPeriodEnd(periods);
+	const end = lastEnd === null ? null : secondsOf(lastEnd);
+	const starts = received.map((range) => (range.start ? Number(range.start) : null));
+	const start = starts.length === 0 || starts.includes(null) ? null : Math.min(...starts.map((s) => s ?? 0));
+
+	if (start !== null && end !== null && end <= start) return received;
+	if (start === null && end === null) return [];
+	return [{ ...(start !== null && { start }), ...(end !== null && { end }) }];
+}
+
+/**
+ * La période d'impact d'une alerte, tirée des périodes lues ou saisies (cf. `publishedPeriods`).
  *
  * Une période simple donne un intervalle. Une tranche horaire donne un intervalle PAR JOUR, de la
  * veille — une tranche de nuit ouverte hier court encore — jusqu'au bout de son enveloppe, rognée
- * d'abord sur la communication : c'est ce qui la borne en pratique. Sans fin connue d'aucun côté, les
- * jours ne s'énumèrent pas, et c'est l'enveloppe entière qui sort.
+ * d'abord sur la communication. Sans fin connue d'aucun côté, les jours ne s'énumèrent pas, et c'est
+ * l'enveloppe entière qui sort.
  *
- * Tout est ensuite rogné sur la communication : la spec veut chaque intervalle d'impact contenu dans
- * l'un des siens. Aucune période lue ne dit rien de la perturbation : la liste reste vide, et le
- * champ absent.
+ * Tout est ensuite rogné sur la communication, pour que chaque intervalle d'impact tienne dans l'un
+ * des siens. Comme la communication finit là où finissent les périodes lues (cf.
+ * `communicationPeriods`), c'est surtout le début qui se rogne. Aucune période lue ne dit rien de la
+ * perturbation : la liste reste vide, et le champ absent.
  */
 export function impactPeriods(
 	periods: AlertPeriod[],

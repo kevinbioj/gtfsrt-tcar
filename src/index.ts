@@ -65,8 +65,8 @@ import {
 	declareCancelled,
 	declareNoRealtime,
 	hasSkippedStops,
-	impactPeriods,
 	isCancelled,
+	publishedPeriods,
 	useServiceAlerts,
 } from "./gtfs-rt/use-service-alerts.js";
 import { canonicalStopId, normalizeStopName, useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
@@ -299,12 +299,13 @@ function alertNetworks({ alertNumber, networks }: AlertEntity): ReadonlySet<stri
 }
 
 /**
- * Une info trafic telle qu'elle se republie : masquée, elle ne l'est pas du tout ; avec des périodes
- * saisies, ce sont elles qui font sa période d'impact, et non celles de l'analyse — ce sont aussi
- * elles qui décident de ce qu'elle active (cf. `ResolvedAlert.periods`). Son texte, sa cause et son
- * effet réécrits remplacent ceux du flux ; l'analyse, elle, a lu le texte reçu.
+ * Une info trafic telle qu'elle se republie : masquée, elle ne l'est pas du tout ; ses périodes
+ * active, de communication et d'impact se déduisent de celles de l'analyse (cf. `publishedPeriods`), ou de
+ * celles saisies s'il y en a — ce sont aussi elles qui décident de ce qu'elle active (cf.
+ * `ResolvedAlert.periods`). Son texte, sa cause et son effet réécrits remplacent ceux du flux ;
+ * l'analyse, elle, a lu le texte reçu.
  */
-function republished({ alertNumber, entity }: AlertEntity): GtfsRealtime.transit_realtime.IFeedEntity[] {
+function republished({ alertNumber, entity, periods }: AlertEntity): GtfsRealtime.transit_realtime.IFeedEntity[] {
 	const settings = detourStore.alertSettings(alertNumber);
 	if (settings.hidden) return [];
 	if (entity.alert == null) return [entity];
@@ -313,13 +314,10 @@ function republished({ alertNumber, entity }: AlertEntity): GtfsRealtime.transit
 	const Alert = GtfsRealtime.transit_realtime.Alert;
 	const translated = (text: string) => ({ translation: [{ text, language: "fr" }] });
 	const alert: GtfsRealtime.transit_realtime.IAlert = { ...entity.alert };
-	if (settings.periods !== null) {
-		alert.impactPeriod = impactPeriods(
-			settings.periods,
-			entity.alert.communicationPeriod ?? [],
-			Temporal.Now.instant(),
-		);
-	}
+	Object.assign(
+		alert,
+		publishedPeriods(settings.periods ?? periods, entity.alert.communicationPeriod ?? [], Temporal.Now.instant()),
+	);
 	if (headerText !== null) alert.headerText = translated(headerText);
 	if (descriptionText !== null) alert.descriptionText = translated(descriptionText);
 	if (cause !== null && cause in Alert.Cause) alert.cause = Alert.Cause[cause as keyof typeof Alert.Cause];
