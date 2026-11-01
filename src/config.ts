@@ -414,6 +414,14 @@ export const TRIP_MODIFICATIONS_HORIZON = Temporal.Duration.from({ hours: 7 * 24
  */
 export const FINISHED_TRIP_RETENTION = Temporal.Duration.from({ hours: 1 }).total("seconds");
 
+/**
+ * Écart toléré entre l'instant d'un relevé et l'horaire théorique d'une course déviée pour que le
+ * véhicule soit situé sur son itinéraire dévié : la position ne dit pas de quelle journée de service
+ * relève sa course, l'heure la départage (cf. `detouredRun`). Large, pour couvrir les gros retards,
+ * et bien en deçà des vingt-quatre heures qui séparent deux circulations du même `trip_id`.
+ */
+export const DETOUR_RUN_SLACK = Temporal.Duration.from({ hours: 3 }).total("seconds");
+
 export const ALERTS_POLL_INTERVAL = Temporal.Duration.from({ minutes: 1 }).total("milliseconds");
 /**
  * Intervalle de vérification de fraîcheur du GTFS statique : une simple requête HEAD compare la

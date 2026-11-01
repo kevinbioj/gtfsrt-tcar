@@ -135,8 +135,9 @@ loadCache(ALERT_CACHE_PATH);
 const vehicleMonitoring = await useVehicleMonitoring(VEHICLE_MONITORING_URL, VEHICLE_MONITORING_INTERVAL);
 const staticGtfs = await useStaticGtfs(STATIC_GTFS_URL, GTFS_CHECK_INTERVAL);
 // Le locator lit `staticGtfs.data` à chaque appel : il suit donc les rechargements du GTFS de
-// lui-même, sans avoir à s'y réabonner.
-const vehicleLocator = useVehicleLocator(staticGtfs, restored?.locations);
+// lui-même, sans avoir à s'y réabonner. Il en va de même des itinéraires déviés, que chaque
+// reconstruction des déviations remplace (cf. `rebuildDetourEntities`).
+const vehicleLocator = useVehicleLocator(staticGtfs, () => store.detourItineraries, restored?.locations);
 // Le GTFS dont le flux de vérification tire ses identifiants de course, pour les rapporter au GTFS
 // publié (cf. `matchLegacyTrip`).
 const legacyGtfs = await useLegacyGtfs(LEGACY_GTFS_URL, GTFS_CHECK_INTERVAL);
@@ -697,7 +698,11 @@ function describeLocation(location: VehicleLocation | undefined): string {
 				? "approche"
 				: "vers";
 
-	return `${status} ${staticGtfs.data.stopNames.get(location.stopId) ?? location.stopId} #${location.currentStopSequence}`;
+	const name =
+		staticGtfs.data.stopNames.get(location.stopId) ?? detourStore.provisionalStops.get(location.stopId)?.name;
+	// Un arrêt de substitution n'a pas de rang dans la course d'origine (cf. `ItineraryStop`).
+	const rank = location.currentStopSequence === undefined ? "dévié" : `#${location.currentStopSequence}`;
+	return `${status} ${name ?? location.stopId} ${rank}`;
 }
 
 /**
@@ -1142,18 +1147,21 @@ function dropStaleImpacts() {
  * tournent, les courses finissent de circuler — et juste après un enregistrement depuis l'interface,
  * pour que ce qu'on vient de saisir soit dans le feed suivant et non vingt secondes plus tard.
  *
- * Elle ne touche à rien d'autre que `store.detourEntities` : une déclaration incomplète ou une shape
- * qui ne se recoud pas se traduit par des entités en moins, jamais par un feed en échec.
+ * Elle ne touche à rien d'autre que `store.detourEntities` et `store.detourItineraries` : une
+ * déclaration incomplète ou une shape qui ne se recoud pas se traduit par des entités en moins, jamais
+ * par un feed en échec.
  */
 function rebuildDetourEntities() {
 	try {
-		store.detourEntities = buildDetourEntities(
+		const { entities, itineraries } = buildDetourEntities(
 			staticGtfs.data,
 			modificationIndex.modifications,
 			modificationIndex.cancelIndex,
 			detourStore.provisionalStops,
 			Math.floor(Date.now() / 1000),
 		);
+		store.detourEntities = entities;
+		store.detourItineraries = itineraries;
 		feedGeneratedAt.tripModifications = Math.floor(Date.now() / 1000);
 	} catch (cause) {
 		console.error("✘ Failed to build detour entities:", cause);

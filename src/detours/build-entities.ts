@@ -17,6 +17,7 @@ import { encodePolyline } from "../utils/encode-polyline.js";
 import type { Coordinates } from "../utils/geometry.js";
 import { networkOf } from "../utils/network.js";
 import { rangeOn, removesStops, type SegmentBounds } from "./bounds.js";
+import { buildItinerary, type DetouredRun, type DetourItinerary } from "./itinerary.js";
 import type { ResolvedModification } from "./modifications.js";
 import { type DrawnPath, spliceShape } from "./splice-shape.js";
 import { type DetourTerminus, type ProvisionalStop, provisionalStopUid } from "./store.js";
@@ -118,6 +119,12 @@ type Modification = {
  * Le tout est rangé par réseau, celui de la ligne modifiée : le feed ne publie les autres réseaux que
  * sur demande. Chaque réseau emporte ses tracés et les arrêts provisoires que ses modifications
  * désignent — un arrêt provisoire qu'en désignent deux figure donc sous chacun.
+ *
+ * À côté des entités, l'itinéraire que suit chaque course modifiée, jour par jour : le trajet publié
+ * et ses arrêts, modifications appliquées. C'est sur lui que le locator situe un véhicule dévié —
+ * sans quoi, sorti de l'itinéraire d'origine, il resterait accroché au dernier arrêt d'avant la
+ * déviation (cf. `useVehicleLocator`). Il reprend exactement ce qui est publié : une course que le
+ * feed ne déclare pas modifiée n'en a pas.
  */
 export function buildDetourEntities(
 	gtfs: StaticGtfs,
@@ -125,7 +132,10 @@ export function buildDetourEntities(
 	cancelIndex: CancelIndex,
 	provisional: ReadonlyMap<string, ProvisionalStop>,
 	nowSeconds: number,
-): Map<string, GtfsRealtime.transit_realtime.IFeedEntity[]> {
+): {
+	entities: Map<string, GtfsRealtime.transit_realtime.IFeedEntity[]>;
+	itineraries: Map<string, DetouredRun[]>;
+} {
 	const stops = new Map<string, GtfsRealtime.transit_realtime.IStop>();
 	const shapes = new Map<string, GtfsRealtime.transit_realtime.IShape>();
 	const entities: { network: string; entity: GtfsRealtime.transit_realtime.IFeedEntity }[] = [];
@@ -155,7 +165,7 @@ export function buildDetourEntities(
 	);
 	if (candidates.size === 0) {
 		report(modifications.size, 0, stops, shapes, entities, problems);
-		return new Map();
+		return { entities: new Map(), itineraries: new Map() };
 	}
 
 	/**
@@ -168,7 +178,10 @@ export function buildDetourEntities(
 	/** Les tronçons dont au moins une course porte les bornes, en vigueur à son départ ou non. */
 	const served = new Set<string>();
 	/** Les tracés recousus, par itinéraire d'origine et combinaison de tronçons. */
-	const splicedShapes = new Map<string, string | null>();
+	const splicedShapes = new Map<string, SplicedShape | null>();
+	/** Les itinéraires des courses modifiées, par trajet publié et suite d'arrêts théorique. */
+	const builtItineraries = new Map<string, DetourItinerary>();
+	const itineraries = new Map<string, DetouredRun[]>();
 
 	for (const day of days) {
 		/** Les courses du jour qui reçoivent exactement les mêmes modifications et le même itinéraire. */
@@ -251,7 +264,39 @@ export function buildDetourEntities(
 			// différents les replient différemment. L'empreinte de la signature tranche, et reste la même
 			// d'un relevé à l'autre tant que la déclaration ne bouge pas.
 			const fingerprint = createHash("sha1").update(signature).digest("hex").slice(0, 8);
-			const shapeId = resolveShapeId(gtfs, shapes, splicedShapes, problems, parts, fingerprint, group);
+			const spliced = resolveShape(gtfs, shapes, splicedShapes, problems, parts, fingerprint, group);
+			const shapeId = spliced?.shapeId ?? null;
+
+			const original = gtfs.shapes.get(group.shapeId);
+			if (original !== undefined) {
+				for (const tripId of group.tripIds) {
+					const schedule = gtfs.tripStopSequences.get(tripId);
+					const departure = gtfs.tripDepartures.get(tripId);
+					const arrival = gtfs.tripArrivals.get(tripId);
+					if (schedule === undefined || departure === undefined || arrival === undefined) continue;
+
+					// Les courses d'un groupe partagent leurs modifications et leur trajet, pas toujours leurs
+					// arrêts : deux branches peuvent emprunter le même itinéraire.
+					const key = `${shapeId ?? group.shapeId}|${fingerprint}|${schedule.map((stop) => stop.stopId).join(",")}`;
+					let itinerary = builtItineraries.get(key);
+					if (itinerary === undefined) {
+						itinerary = buildItinerary(
+							gtfs,
+							provisional,
+							shapeId ?? group.shapeId,
+							original,
+							spliced,
+							schedule,
+							group.modifications,
+						);
+						builtItineraries.set(key, itinerary);
+					}
+
+					const runs = itineraries.get(tripId) ?? [];
+					runs.push({ departure: day.midnight + departure, arrival: day.midnight + arrival, itinerary });
+					itineraries.set(tripId, runs);
+				}
+			}
 
 			entities.push({
 				network: group.network,
@@ -350,7 +395,7 @@ export function buildDetourEntities(
 		]);
 	}
 
-	return byNetwork;
+	return { entities: byNetwork, itineraries };
 }
 
 /**
@@ -718,30 +763,33 @@ function signatureOf(modification: Modification): string {
 	);
 }
 
+/** Un tracé recousu et publié : son identifiant, ses points, et d'où chacun vient (cf. `spliceShape`). */
+type SplicedShape = { shapeId: string; points: Coordinates[]; origins: (number | null)[] };
+
 /**
- * L'identifiant du tracé dévié correspondant à l'itinéraire d'origine de ces courses, en l'inscrivant
- * au feed au passage. `null` lorsqu'il n'y a rien à publier — aucun tracé dessiné, itinéraire inconnu,
- * ou recouture impossible : la `SelectedTrips` sort alors sans `shape_id`, le champ étant facultatif.
+ * Le tracé dévié correspondant à l'itinéraire d'origine de ces courses, en l'inscrivant au feed au
+ * passage. `null` lorsqu'il n'y a rien à publier — aucun tracé dessiné, itinéraire inconnu, ou
+ * recouture impossible : la `SelectedTrips` sort alors sans `shape_id`, le champ étant facultatif.
  *
  * Mémoïsé par itinéraire ET par combinaison de tronçons : le même itinéraire ne se recoud pas de la
  * même façon selon ce qui s'y applique, et la même combinaison revient sur toutes les journées.
  */
-function resolveShapeId(
+function resolveShape(
 	gtfs: StaticGtfs,
 	shapes: Map<string, GtfsRealtime.transit_realtime.IShape>,
-	spliced: Map<string, string | null>,
+	spliced: Map<string, SplicedShape | null>,
 	problems: Set<string>,
 	parts: string,
 	fingerprint: string,
 	group: Group,
-): string | null {
+): SplicedShape | null {
 	const memo = `${group.shapeId}|${fingerprint}`;
 	const known = spliced.get(memo);
 	if (known !== undefined) return known;
 
-	const shapeId = buildShape(gtfs, shapes, problems, parts, fingerprint, group);
-	spliced.set(memo, shapeId);
-	return shapeId;
+	const shape = buildShape(gtfs, shapes, problems, parts, fingerprint, group);
+	spliced.set(memo, shape);
+	return shape;
 }
 
 function buildShape(
@@ -751,7 +799,7 @@ function buildShape(
 	parts: string,
 	fingerprint: string,
 	group: Group,
-): string | null {
+): SplicedShape | null {
 	const paths = group.modifications.flatMap((modification) => modification.paths);
 	if (paths.length === 0) return null;
 
@@ -785,7 +833,7 @@ function buildShape(
 
 	const shapeId = `${group.network}:DEV:${parts}:${suffixOf(group.shapeId)}:${fingerprint}`;
 	shapes.set(shapeId, { shapeId, encodedPolyline: encodePolyline(outcome.points) });
-	return shapeId;
+	return { shapeId, points: outcome.points, origins: outcome.origins };
 }
 
 function report(

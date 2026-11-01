@@ -8,14 +8,16 @@ import {
 	PROJECTION_BACKTRACK,
 	STOPPED_AT_RADIUS,
 } from "../config.js";
-import { projectOnShape } from "../utils/geometry.js";
-import type { StaticGtfs, TripStop } from "./use-static-gtfs.js";
+import { type DetourItineraries, detouredRun, type ItineraryStop } from "../detours/itinerary.js";
+import { projectOnShape, type ShapePoint } from "../utils/geometry.js";
+import type { StaticGtfs } from "./use-static-gtfs.js";
 
 const { VehicleStopStatus } = GtfsRealtime.transit_realtime.VehiclePosition;
 
 /** Où en est un véhicule sur sa course, tel que le feed l'annoncera. */
 export type VehicleLocation = {
-	currentStopSequence: number;
+	/** `undefined` sur un arrêt de substitution : il n'a pas de rang dans la course d'origine. */
+	currentStopSequence: number | undefined;
 	stopId: string;
 	currentStatus: GtfsRealtime.transit_realtime.VehiclePosition.VehicleStopStatus;
 };
@@ -26,6 +28,12 @@ export type LocatedVehicle = {
 	tripId: string;
 	/** Abscisse curviligne du dernier projeté retenu, en kilomètres. */
 	distance: number;
+	/**
+	 * Le trajet sur lequel `distance` se mesure : le `shape_id` de la course, ou l'itinéraire dévié
+	 * qu'elle suivait (cf. `DetourItinerary.key`). Absent des états d'avant les déviations, où c'était
+	 * toujours la shape de la course.
+	 */
+	shapeKey?: string;
 	location: VehicleLocation;
 	/** Instant de ce relevé, en secondes epoch. */
 	at: number;
@@ -47,12 +55,18 @@ export type LocatedVehicle = {
  *
  * Rien n'y périme : c'est le registre qui décide de ce qui reste diffusé.
  *
+ * Une course que le feed déclare déviée (cf. `buildDetourEntities`) se suit sur son itinéraire
+ * dévié : le trajet recousu, et ses arrêts modifications appliquées — les arrêts supprimés n'y sont
+ * plus, les arrêts de substitution y sont. Sans quoi le véhicule, sorti de l'itinéraire d'origine,
+ * resterait accroché à l'arrêt d'avant la déviation jusqu'à le rejoindre.
+ *
  * `restored` reprend les projetés du dernier arrêt du producteur (cf. `loadState`) : sans eux, la
  * fenêtre de plausibilité repartirait grande ouverte et une shape qui repasse au même endroit
  * pourrait situer le véhicule à l'autre bout de sa course.
  */
 export function useVehicleLocator(
 	staticGtfs: { data: StaticGtfs },
+	itineraries: () => DetourItineraries,
 	restored: Iterable<readonly [string, LocatedVehicle]> = [],
 ) {
 	const located = new Map<string, LocatedVehicle>(restored);
@@ -82,14 +96,16 @@ export function useVehicleLocator(
 			const { latitude, longitude } = position;
 			if (typeof latitude !== "number" || typeof longitude !== "number") return remembered;
 
-			const gtfs = staticGtfs.data;
-			const meta = gtfs.trips.get(tripId);
-			const shape = meta === undefined ? undefined : gtfs.shapes.get(meta.shapeId);
-			const stops = gtfs.tripStopSequences.get(tripId);
+			const route = routeOf(staticGtfs.data, itineraries(), tripId, nowSeconds);
 			// Course absente du GTFS statique, ou tracé introuvable : rien sur quoi projeter.
-			if (shape === undefined || stops === undefined || stops.length === 0) return remembered;
+			if (route === undefined || route.stops.length === 0) return remembered;
+			const { shape, stops, shapeKey } = route;
 
-			const projection = projectOnShape(shape, { latitude, longitude }, plausibleWindow(previous, tripId, nowSeconds));
+			const projection = projectOnShape(
+				shape,
+				{ latitude, longitude },
+				plausibleWindow(previous, tripId, shapeKey, nowSeconds),
+			);
 
 			// Loin de son tracé : le véhicule est dévié, son relevé est aberrant, ou la course qu'on lui
 			// prête n'est pas la sienne. Le prochain arrêt qu'on en tirerait ne voudrait rien dire.
@@ -98,7 +114,7 @@ export function useVehicleLocator(
 			const location = nextStop(stops, projection.distance);
 			if (location === undefined) return remembered;
 
-			located.set(vehicleId, { tripId, distance: projection.distance, location, at: nowSeconds });
+			located.set(vehicleId, { tripId, distance: projection.distance, shapeKey, location, at: nowSeconds });
 			return location;
 		},
 	};
@@ -107,19 +123,46 @@ export function useVehicleLocator(
 // ---
 
 /**
+ * Le trajet que suit la course en ce moment, et ses arrêts : son itinéraire dévié si le feed la
+ * déclare modifiée, sinon sa shape et son horaire théoriques.
+ */
+function routeOf(
+	gtfs: StaticGtfs,
+	itineraries: DetourItineraries,
+	tripId: string,
+	nowSeconds: number,
+): { shape: ShapePoint[]; stops: readonly ItineraryStop[]; shapeKey: string } | undefined {
+	const detoured = detouredRun(itineraries, tripId, nowSeconds);
+	if (detoured !== undefined) {
+		const { shape, stops, key } = detoured.itinerary;
+		return { shape, stops, shapeKey: key };
+	}
+
+	const meta = gtfs.trips.get(tripId);
+	const shape = meta === undefined ? undefined : gtfs.shapes.get(meta.shapeId);
+	const stops = gtfs.tripStopSequences.get(tripId);
+	if (meta === undefined || shape === undefined || stops === undefined) return undefined;
+	return { shape, stops, shapeKey: meta.shapeId };
+}
+
+/**
  * La plage d'abscisses où le véhicule peut raisonnablement se trouver, compte tenu d'où on l'a laissé
  * et du temps écoulé depuis. Elle départage les projetés d'une shape qui repasse au même endroit, que
  * la seule position laisse également plausibles.
  *
- * `undefined` sans point de départ — premier relevé, ou course changée : toute la shape est alors
- * ouverte, faute de mieux.
+ * `undefined` sans point de départ — premier relevé, course changée, ou déviation qui commence ou
+ * s'achève en cours de route : la dernière abscisse se mesurait sur un autre trajet. Toute la shape
+ * est alors ouverte, faute de mieux.
  */
 function plausibleWindow(
 	previous: LocatedVehicle | undefined,
 	tripId: string,
+	shapeKey: string,
 	nowSeconds: number,
 ): { from: number; to: number } | undefined {
 	if (previous === undefined || previous.tripId !== tripId) return undefined;
+	// Un état d'avant les déviations ne disait pas son trajet : c'était celui de la course.
+	if ((previous.shapeKey ?? shapeKey) !== shapeKey) return undefined;
 
 	const elapsed = Math.max(0, nowSeconds - previous.at);
 	const reach = Math.max(MIN_PROJECTION_REACH, elapsed * MAX_VEHICLE_SPEED);
@@ -135,14 +178,17 @@ function plausibleWindow(
  * encore ouvertes. Passé le dernier arrêt, il y reste accroché — c'est son terminus, il n'ira pas
  * plus loin.
  */
-function nextStop(stops: TripStop[], distance: number): VehicleLocation | undefined {
+function nextStop(
+	stops: readonly Pick<ItineraryStop, "stopId" | "distance" | "stopSequence">[],
+	distance: number,
+): VehicleLocation | undefined {
 	const stop = stops.find(({ distance: at }) => at >= distance - STOPPED_AT_RADIUS) ?? stops.at(-1);
 	if (stop === undefined || !Number.isFinite(stop.distance)) return undefined;
 
 	const remaining = stop.distance - distance;
 
 	return {
-		currentStopSequence: stop.stopSequence,
+		currentStopSequence: stop.stopSequence ?? undefined,
 		stopId: stop.stopId,
 		currentStatus:
 			remaining <= STOPPED_AT_RADIUS

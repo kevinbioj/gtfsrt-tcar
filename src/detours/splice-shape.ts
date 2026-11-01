@@ -18,6 +18,12 @@ export type SpliceOutcome =
 			ok: true;
 			points: Coordinates[];
 			/**
+			 * Pour chaque point du trajet, son rang dans l'itinéraire d'origine s'il en vient, `null` s'il
+			 * vient d'un tracé dessiné. C'est ce qui reporte une abscisse de l'itinéraire sur le trajet
+			 * recousu (cf. `buildItinerary`).
+			 */
+			origins: (number | null)[];
+			/**
 			 * Écart à l'itinéraire du premier point de chaque tracé cousu, en kilomètres, dans l'ordre —
 			 * sauf celui qui ouvre la course, qui n'en diverge pas.
 			 */
@@ -116,6 +122,11 @@ export function spliceShape(original: ShapePoint[], drawn: readonly DrawnPath[])
 	projected.sort((a, b) => a.from - b.from);
 
 	const points: Coordinates[] = [];
+	const origins: (number | null)[] = [];
+	const keep = (point: ShapePoint, index: number) => {
+		points.push({ latitude: point.latitude, longitude: point.longitude });
+		origins.push(index);
+	};
 	const startOffsets: number[] = [];
 	let cursor = Number.NEGATIVE_INFINITY;
 	/** Faux dès qu'un tracé s'achève sans retour : tout ce qui suit est hors d'atteinte. */
@@ -131,12 +142,13 @@ export function spliceShape(original: ShapePoint[], drawn: readonly DrawnPath[])
 			continue;
 		}
 
-		for (const point of original) {
-			if (point.distance >= cursor && point.distance < path.from) {
-				points.push({ latitude: point.latitude, longitude: point.longitude });
-			}
+		for (const [index, point] of original.entries()) {
+			if (point.distance >= cursor && point.distance < path.from) keep(point, index);
 		}
-		points.push(...path.points.map((point) => ({ latitude: point.latitude, longitude: point.longitude })));
+		for (const point of path.points) {
+			points.push({ latitude: point.latitude, longitude: point.longitude });
+			origins.push(null);
+		}
 		if (path.offset !== null) startOffsets.push(path.offset);
 
 		if (path.rejoins) cursor = path.to;
@@ -144,10 +156,10 @@ export function spliceShape(original: ShapePoint[], drawn: readonly DrawnPath[])
 	}
 
 	if (open) {
-		for (const point of original) {
-			if (point.distance > cursor) points.push({ latitude: point.latitude, longitude: point.longitude });
+		for (const [index, point] of original.entries()) {
+			if (point.distance > cursor) keep(point, index);
 		}
 	}
 
-	return { ok: true, points, startOffsets, rejoined: open, unreachable };
+	return { ok: true, points, origins, startOffsets, rejoined: open, unreachable };
 }
