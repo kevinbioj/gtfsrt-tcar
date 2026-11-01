@@ -43,7 +43,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { describePeriods, formatInstant, modificationId, plural } from "@/lib/format";
+import { describePeriods, describeRanges, formatInstant, modificationId, plural } from "@/lib/format";
 import { CAUSES, EFFECTS } from "@/lib/labels";
 import {
 	useCreateModification,
@@ -397,7 +397,9 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 				{form.periods === null ? (
 					<div className="flex flex-wrap items-center gap-3 border-t border-divider pt-3.5">
 						<p className="m-0 flex-1 text-[13px] text-strong">
-							L'analyse lit : {describePeriods(alert.analysisPeriods)}.
+							{alert.analysisPeriods.length === 0
+								? "L'analyse ne lit aucune date dans le texte."
+								: `L'analyse lit : ${describePeriods(alert.analysisPeriods)}.`}
 						</p>
 						<Button variant="outline" onClick={() => patch({ periods: alert.analysisPeriods.map(periodForm) })}>
 							Corriger les périodes
@@ -406,6 +408,22 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 				) : (
 					<PeriodEditor periods={form.periods} onChange={(periods) => patch({ periods })} />
 				)}
+				{alert.feedPeriods !== null ? (
+					<dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-t border-divider pt-3.5 text-[13px]">
+						<dt className="text-muted-foreground">
+							Reçue du flux amont <SpecName>active_period</SpecName>
+						</dt>
+						<dd className="m-0 text-strong">{describeRanges(alert.feedPeriods.received)}</dd>
+						<dt className="text-muted-foreground">
+							Communication republiée <SpecName>communication_period</SpecName>
+						</dt>
+						<dd className="m-0 text-strong">{describeRanges(alert.feedPeriods.communication)}</dd>
+						<dt className="text-muted-foreground">
+							Impact republié <SpecName>impact_period</SpecName>
+						</dt>
+						<dd className="m-0 text-strong">{describeRanges(alert.feedPeriods.impact)}</dd>
+					</dl>
+				) : null}
 			</SectionCard>
 
 			<SectionCard title="Arrêts supprimés">

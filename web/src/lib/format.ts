@@ -1,4 +1,4 @@
-import type { PeriodDto } from "@dto";
+import type { PeriodDto, TimeRangeDto } from "@dto";
 
 const pad = (value: number) => String(value).padStart(2, "0");
 
@@ -89,4 +89,17 @@ export function plural(count: number, singular: string, pluralForm = `${singular
 /** Une recherche sans accents ni casse. */
 export function searchable(text: string): string {
 	return text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+}
+
+/** Des intervalles du flux en clair : « du 30/10 à 00:01 au 31/12 à 23:59 », « sans borne » s'il n'y en a pas. */
+export function describeRanges(ranges: readonly TimeRangeDto[]): string {
+	if (ranges.length === 0) return "sans borne";
+	return ranges
+		.map(({ start, end }) => {
+			if (start === null && end === null) return "sans borne";
+			if (end === null) return `à partir du ${formatInstant(start as number)}`;
+			if (start === null) return `jusqu'au ${formatInstant(end)}`;
+			return `du ${formatInstant(start)} au ${formatInstant(end)}`;
+		})
+		.join(" ; ");
 }

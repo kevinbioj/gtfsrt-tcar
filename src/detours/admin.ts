@@ -8,7 +8,14 @@ import { basicAuth } from "hono/basic-auth";
 import type { AlertPeriod, DailyWindow } from "../ai/analyze-alert.js";
 import { ADMIN_UI_DIR, ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SMOOTHING_TOLERANCE, ROAD_SNAP_RADIUS } from "../config.js";
 import { serviceDay } from "../gtfs-rt/scheduled-trips.js";
-import { alertSourceKey, hasEnded, inWindow, isActive, periodsOverlap } from "../gtfs-rt/use-service-alerts.js";
+import {
+	alertSourceKey,
+	hasEnded,
+	inWindow,
+	isActive,
+	periodsOverlap,
+	publishedPeriods,
+} from "../gtfs-rt/use-service-alerts.js";
 import { courseKey, normalizeStopName, type RoutePattern, type StaticGtfs } from "../gtfs-rt/use-static-gtfs.js";
 import type { RoadGraph, RoadGraphHandle } from "../routing/road-graph.js";
 import { routeOnRoad } from "../routing/route-on-road.js";
@@ -888,6 +895,30 @@ function lastEnd(periods: readonly AlertPeriod[]): string | undefined {
 }
 
 /** Si une info trafic se republie : masquée ou sortie du flux, elle ne l'est pas (cf. `republished`). */
+/**
+ * Les périodes que l'alerte republie, calculées comme pour le flux (cf. `publishedPeriods`) : de quoi
+ * voir d'où viennent ses bornes quand l'analyse n'en lit aucune.
+ */
+function feedPeriodsOf(
+	alert: ResolvedAlert,
+	received: GtfsRealtime.transit_realtime.IAlert | undefined,
+	now: Temporal.Instant,
+): AlertDto["feedPeriods"] {
+	if (!alert.inFeed || received === undefined) return null;
+	const ranges = (list: GtfsRealtime.transit_realtime.ITimeRange[]) =>
+		list.map((range) => ({
+			start: range.start ? Number(range.start) : null,
+			end: range.end ? Number(range.end) : null,
+		}));
+	const communication = received.communicationPeriod ?? [];
+	const published = publishedPeriods(alert.periods, communication, now);
+	return {
+		received: ranges(communication),
+		communication: ranges(published.communicationPeriod),
+		impact: ranges(published.impactPeriod),
+	};
+}
+
 function alertPublicationOf(alert: ResolvedAlert): AlertPublication {
 	if (alert.hidden) return "hidden";
 	if (!alert.inFeed) return "withdrawn";
@@ -1159,6 +1190,7 @@ function summarizeAlert(alert: ResolvedAlert, deps: AdminDependencies, now: Temp
 		periods: alert.periods,
 		analysisPeriods: alert.analysisPeriods,
 		periodsOverridden: alert.periodsOverridden,
+		feedPeriods: feedPeriodsOf(alert, received, now),
 		lines: [...new Set(alert.routeIds)]
 			.sort((a, b) => compareLines(gtfs, a, b))
 			.map((routeId) => lineOf(gtfs, routeId)),

@@ -16,6 +16,9 @@ export type DailyWindowDto = { from: string; to: string };
  */
 export type PeriodDto = { start: string | null; end: string | null; dailyWindow: DailyWindowDto | null };
 
+/** Un intervalle du flux GTFS-RT, en secondes epoch. `null` : ouvert de ce côté. */
+export type TimeRangeDto = { start: number | null; end: number | null };
+
 /** Une borne telle que le formulaire l'envoie : la date, obligatoire, et l'heure, facultative. */
 export type BoundInput = { date: string; time: string | null };
 
@@ -292,6 +295,11 @@ export type AlertDto = {
 	periods: PeriodDto[];
 	analysisPeriods: PeriodDto[];
 	periodsOverridden: boolean;
+	/**
+	 * Les périodes telles qu'elles se republient (cf. `publishedPeriods`) : la communication reçue du flux
+	 * amont, et l'impact qu'on en tire. `null` hors du flux.
+	 */
+	feedPeriods: { received: TimeRangeDto[]; communication: TimeRangeDto[]; impact: TimeRangeDto[] } | null;
 	lines: LineDto[];
 	stopGroups: StopGroupDto[];
 	tripSets: TripSetDto[];
