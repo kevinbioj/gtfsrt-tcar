@@ -81,9 +81,8 @@ const DEPARTURE_WINDOW_DAYS = 7;
 const MAX_DEPARTURE = 48 * 3600;
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-/** Assez pour un titre d'info trafic ; une description, elle, se lit sur un écran. */
+/** Assez pour un titre d'info trafic ; une description, elle, n'est pas bornée. */
 const HEADER_MAX_LENGTH = 300;
-const DESCRIPTION_TEXT_MAX_LENGTH = 5000;
 
 /** La couleur d'une ligne que le GTFS ne colore pas. */
 const NEUTRAL_LINE = { color: "#5B626A", textColor: "#FFFFFF" };
@@ -1713,12 +1712,17 @@ function isEnumName(values: object, name: string): boolean {
 	return Object.hasOwn(values, name) && Number.isNaN(Number(name));
 }
 
-/** Un texte réécrit : `null` s'il est laissé vide, une erreur s'il dépasse la longueur admise. */
-function readOverride(raw: unknown, label: string, maxLength: number): { value: string | null } | { message: string } {
+/**
+ * Un texte réécrit : `null` s'il est laissé vide, une erreur s'il dépasse la longueur admise — sans
+ * `maxLength`, il n'en a pas.
+ */
+function readOverride(raw: unknown, label: string, maxLength?: number): { value: string | null } | { message: string } {
 	if (raw === undefined || raw === null) return { value: null };
 	if (typeof raw !== "string") return { message: `${label} attendu : un texte, ou null.` };
 	const value = raw.trim();
-	if (value.length > maxLength) return { message: `${label} trop long : ${maxLength} caractères au plus.` };
+	if (maxLength !== undefined && value.length > maxLength) {
+		return { message: `${label} trop long : ${maxLength} caractères au plus.` };
+	}
 	return { value: value.length === 0 ? null : value };
 }
 
@@ -1811,7 +1815,7 @@ function parseAlertInput(
 	) as Record<string, unknown>;
 	const headerText = readOverride(rawOverrides.headerText, "Titre", HEADER_MAX_LENGTH);
 	if ("message" in headerText) return headerText;
-	const descriptionText = readOverride(rawOverrides.descriptionText, "Description", DESCRIPTION_TEXT_MAX_LENGTH);
+	const descriptionText = readOverride(rawOverrides.descriptionText, "Description");
 	if ("message" in descriptionText) return descriptionText;
 	const cause = readOverride(rawOverrides.cause, "Cause", 40);
 	if ("message" in cause) return cause;
