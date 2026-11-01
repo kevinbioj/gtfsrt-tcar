@@ -54,3 +54,34 @@ export const causeColor = (cause: string | null) =>
 	CAUSE_COLORS[cause ?? "UNKNOWN_CAUSE"] ?? CAUSE_COLORS.UNKNOWN_CAUSE;
 
 export const causeLabel = (cause: string | null) => (cause === null ? "Inconnue" : (CAUSES[cause] ?? cause));
+
+/**
+ * Le texte qui se lit le mieux sur un fond de cette couleur (« #RRGGBB ») : blanc, ou presque noir sur
+ * un fond clair — d'après la luminance relative du WCAG, au seuil où les deux contrastes s'égalent.
+ */
+export function readableOn(color: string): string {
+	const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(color);
+	if (match === null) return "#FFFFFF";
+	const [r, g, b] = match.slice(1).map((hex) => {
+		const channel = Number.parseInt(hex, 16) / 255;
+		return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+	}) as [number, number, number];
+	const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+	return luminance > 0.179 ? "#15181B" : "#FFFFFF";
+}
+
+/** Les teintes que propose la création d'une étiquette — celles des causes, qui portent un texte blanc. */
+export const LABEL_SWATCHES = [
+	"#1D56C8",
+	"#175CD3",
+	"#0E7090",
+	"#027A48",
+	"#3B7C0F",
+	"#B54708",
+	"#B42318",
+	"#C01048",
+	"#C11574",
+	"#6941C6",
+	"#2D31A6",
+	"#344054",
+];

@@ -22,6 +22,7 @@ import type {
 	DepartureDayDto,
 	DepartureDto,
 	FeedClock,
+	LabelDto,
 	LineDto,
 	ModificationDetailDto,
 	ModificationState,
@@ -83,6 +84,11 @@ const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 /** Assez pour un titre d'info trafic ; une description, elle, n'est pas bornée. */
 const HEADER_MAX_LENGTH = 300;
+
+/** Un nom d'étiquette se lit d'un coup d'œil dans une pastille. */
+const LABEL_MAX_LENGTH = 40;
+
+const COLOR_PATTERN = /^#[0-9A-Fa-f]{6}$/;
 
 /** La couleur d'une ligne que le GTFS ne colore pas. */
 const NEUTRAL_LINE = { color: "#5B626A", textColor: "#FFFFFF" };
@@ -295,6 +301,56 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 
 		refresh();
 		return c.json({ code: 200, message: `${uids.length} modification(s) traitée(s).` });
+	});
+
+	/** Les étiquettes, dans l'ordre de leurs noms. */
+	admin.get("/api/labels", (c) => c.json([...deps.store.labels.values()] satisfies LabelDto[]));
+
+	/** Crée une étiquette, et la pose d'emblée sur les modifications données — fût-ce aucune. */
+	admin.post("/api/labels", async (c) => {
+		const payload = await readObject(c);
+		if ("message" in payload) return c.json({ code: 400, message: payload.message }, 400);
+
+		const name = typeof payload.name === "string" ? payload.name.trim().replace(/\s+/g, " ") : "";
+		if (name.length === 0) return c.json({ code: 400, message: "L'étiquette doit porter un nom." }, 400);
+		if (name.length > LABEL_MAX_LENGTH) {
+			return c.json({ code: 400, message: `Un nom d'étiquette tient en ${LABEL_MAX_LENGTH} caractères.` }, 400);
+		}
+		if (typeof payload.color !== "string" || !COLOR_PATTERN.test(payload.color)) {
+			return c.json({ code: 400, message: "Couleur « #RRGGBB » attendue." }, 400);
+		}
+
+		const uids = (Array.isArray(payload.uids) ? payload.uids : []).map(Number);
+		const label = deps.store.createLabel({ name, color: payload.color.toUpperCase() }, uids, nowSeconds());
+		if (label === undefined) return c.json({ code: 409, message: `L'étiquette « ${name} » existe déjà.` }, 409);
+		refresh();
+		return c.json(label satisfies LabelDto);
+	});
+
+	/**
+	 * Pose une étiquette sur des modifications, ou la leur retire. Ce qui a disparu entre l'affichage et
+	 * le clic est passé sous silence.
+	 */
+	admin.put("/api/labels/:labelId/modifications", async (c) => {
+		const payload = await readObject(c);
+		if ("message" in payload) return c.json({ code: 400, message: payload.message }, 400);
+		if (typeof payload.assigned !== "boolean") {
+			return c.json({ code: 400, message: "Booléen « assigned » attendu." }, 400);
+		}
+
+		const labelId = Number(c.req.param("labelId"));
+		const label = deps.store.labels.get(labelId);
+		const uids = (Array.isArray(payload.uids) ? payload.uids : [])
+			.map(Number)
+			.filter((uid) => deps.modificationIndex.modifications.has(uid));
+		if (label === undefined || !deps.store.setLabel(labelId, uids, payload.assigned)) {
+			return c.json({ code: 404, message: "Étiquette inconnue." }, 404);
+		}
+		refresh();
+		return c.json({
+			code: 200,
+			message: `« ${label.name} » ${payload.assigned ? "posée sur" : "retirée de"} ${uids.length} modification(s).`,
+		});
 	});
 
 	/**
@@ -928,6 +984,7 @@ function summarize(
 			modification.removedStopIds.size === 0 &&
 			!record.tripSets.some((set) => set.enabled),
 		alerts: modification.alerts,
+		labelIds: record.labelIds,
 		active: modification.active,
 		kind: first?.terminus === "start" ? "start" : first?.terminus === "end" ? "end" : "intra",
 		fromStop: nameOf(first?.startStopId),

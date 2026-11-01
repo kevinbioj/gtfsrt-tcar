@@ -67,6 +67,15 @@ export type AlertLinkDto = {
 	active: boolean;
 };
 
+/** Une étiquette, pour classer les modifications. `color` : « #RRGGBB ». */
+export type LabelDto = { labelId: number; name: string; color: string };
+
+/** Une étiquette à créer, et les modifications sur lesquelles la poser d'emblée. */
+export type NewLabelDto = { name: string; color: string; uids: number[] };
+
+/** Poser une étiquette sur des modifications (`assigned`), ou la leur retirer. */
+export type LabelAssignmentDto = { uids: number[]; assigned: boolean };
+
 /** Le type de tracé d'une modification, d'après son premier tronçon. */
 export type DetourKind = "intra" | "start" | "end";
 
@@ -84,6 +93,8 @@ export type ModificationSummaryDto = {
 	/** Ni tronçon, ni arrêt supprimé, ni course annulée : rien à publier, l'activation à la main est verrouillée. */
 	draft: boolean;
 	alerts: AlertLinkDto[];
+	/** Ses étiquettes (cf. `LabelDto`), par identifiant, dans l'ordre de leurs noms. */
+	labelIds: number[];
 	active: boolean;
 	kind: DetourKind;
 	/** Le premier arrêt modifié du premier tronçon, et le dernier du dernier. */

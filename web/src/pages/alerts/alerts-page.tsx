@@ -4,6 +4,7 @@ import { cn } from "cn";
 import { CircleCheckIcon, SearchIcon, TriangleAlertIcon } from "lucide-react";
 import { useMemo } from "react";
 
+import { ChipFilter } from "@/components/chip-filter";
 import { LineBadge, LineOption } from "@/components/line-badge";
 import { FilterBar, PageHeader } from "@/components/page-header";
 import { ALERT_PHASES, ALERT_PUBLICATIONS, StatusPill } from "@/components/status-pill";
@@ -13,7 +14,6 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { describePeriods, searchable } from "@/lib/format";
 import { causeColor, causeLabel } from "@/lib/labels";
 import { useAlerts, useModifications, useRoutes } from "@/lib/queries";
@@ -252,56 +252,5 @@ function AlertCard({ alert, selected }: { alert: AlertDto; selected: boolean }) 
 				</span>
 			) : null}
 		</Link>
-	);
-}
-
-/**
- * Un filtre en pastilles : « Toutes », puis une par valeur, chacune à sa couleur et avec son compte. Un
- * second clic sur la pastille choisie revient à « Toutes ».
- */
-function ChipFilter({
-	label,
-	value,
-	onChange,
-	total,
-	options,
-}: {
-	label: string;
-	value: string;
-	onChange: (value: string) => void;
-	total: number;
-	options: { key: string; label: string; color: string; count: number }[];
-}) {
-	return (
-		<>
-			<span className="mr-1 text-xs font-semibold tracking-wider text-muted-foreground uppercase">{label}</span>
-			<ToggleGroup
-				type="single"
-				variant="outline"
-				spacing={2}
-				className="flex-wrap"
-				value={value}
-				onValueChange={(next) => onChange(next || "ALL")}
-				aria-label={`Filtrer par ${label.toLowerCase()}`}
-			>
-				{[{ key: "ALL", label: "Toutes", color: "#15181B", count: total }, ...options].map((option) => (
-					<ToggleGroupItem
-						key={option.key}
-						value={option.key}
-						style={{ "--chip": option.color } as React.CSSProperties}
-						className="h-8 rounded-full px-3 data-[state=on]:border-(--chip) data-[state=on]:bg-(--chip) data-[state=on]:text-white data-[state=on]:hover:bg-(--chip) data-[state=on]:hover:text-white"
-					>
-						{option.key === "ALL" ? null : (
-							<span
-								aria-hidden="true"
-								className="size-2 rounded-full bg-(--chip) group-data-[state=on]/toggle:bg-white"
-							/>
-						)}
-						{option.label}
-						<span className="font-mono text-xs opacity-85">{option.count}</span>
-					</ToggleGroupItem>
-				))}
-			</ToggleGroup>
-		</>
 	);
 }

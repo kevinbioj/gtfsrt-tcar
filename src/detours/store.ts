@@ -267,7 +267,27 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 			update.run(JSON.stringify(readableAlertText(decodeAlert(row.snapshot))), row.alert_number);
 		}
 	},
+	`
+	-- Une étiquette, pour classer les modifications dans la liste. Rien n'en est publié. Le nom ne se
+	-- répète pas, casse comprise ; la couleur est « #RRGGBB ».
+	CREATE TABLE labels (
+		label_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+		name       TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+		color      TEXT    NOT NULL,
+		created_at INTEGER NOT NULL
+	) STRICT;
+
+	-- Les étiquettes d'une modification, autant qu'on veut.
+	CREATE TABLE modification_labels (
+		uid      INTEGER NOT NULL REFERENCES modifications (uid) ON DELETE CASCADE,
+		label_id INTEGER NOT NULL REFERENCES labels (label_id) ON DELETE CASCADE,
+		PRIMARY KEY (uid, label_id)
+	) STRICT;
+	`,
 ];
+
+/** Une étiquette, pour classer les modifications dans la liste. */
+export type Label = { labelId: number; name: string; color: string };
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
 export type ProvisionalStop = {
@@ -401,6 +421,8 @@ export type Modification = {
 	manual: boolean;
 	/** Les infos trafic auxquelles elle est associée, par numéro. */
 	alertNumbers: string[];
+	/** Ses étiquettes (cf. `Label`), par identifiant. Rien n'en est publié. */
+	labelIds: number[];
 	/**
 	 * Plus elle est élevée, plus la déviation l'emporte : active, elle écrase celles de priorité
 	 * moindre qui touchent les mêmes courses. 0 par défaut.
@@ -679,9 +701,11 @@ export function useDetourStore(path: string) {
 	const settings = new Map<string, AlertSettings>();
 	const skipStops = new Map<string, SkipOverride[]>();
 	const tripSets = new Map<string, TripSet[]>();
+	const labels = new Map<number, Label>();
 
 	const reload = () => {
 		modifications.clear();
+		labels.clear();
 		provisional.clear();
 		ignored.clear();
 		firstSeen.clear();
@@ -759,6 +783,7 @@ export function useDetourStore(path: string) {
 				removedStopIds: [],
 				manual: row.manual === 1,
 				alertNumbers: [],
+				labelIds: [],
 				priority: row.priority,
 				createdAt: row.created_at,
 				updatedAt: row.updated_at,
@@ -771,6 +796,21 @@ export function useDetourStore(path: string) {
 			.prepare("SELECT * FROM modification_alerts ORDER BY uid, alert_number")
 			.all() as AssociationRow[]) {
 			modifications.get(row.uid)?.alertNumbers.push(row.alert_number);
+		}
+
+		// Dans l'ordre des noms, accents compris — ce que SQLite ne sait pas faire seul.
+		const labelRows = (db.prepare("SELECT * FROM labels").all() as LabelRow[]).sort((a, b) =>
+			a.name.localeCompare(b.name, "fr", { sensitivity: "base" }),
+		);
+		const labelRank = new Map(labelRows.map((row, rank) => [row.label_id, rank]));
+		for (const row of labelRows) {
+			labels.set(row.label_id, { labelId: row.label_id, name: row.name, color: row.color });
+		}
+		for (const row of db.prepare("SELECT * FROM modification_labels").all() as ModificationLabelRow[]) {
+			modifications.get(row.uid)?.labelIds.push(row.label_id);
+		}
+		for (const modification of modifications.values()) {
+			modification.labelIds.sort((a, b) => (labelRank.get(a) ?? 0) - (labelRank.get(b) ?? 0));
 		}
 
 		for (const row of db
@@ -977,6 +1017,46 @@ export function useDetourStore(path: string) {
 
 		/** La base des arrêts provisoires, par identifiant publié. */
 		provisionalStops: provisional as ReadonlyMap<string, ProvisionalStop>,
+
+		/** Les étiquettes, par identifiant, dans l'ordre de leurs noms. */
+		labels: labels as ReadonlyMap<number, Label>,
+
+		/**
+		 * Crée une étiquette, et la pose d'emblée sur des modifications. Renvoie `undefined` si le nom est
+		 * déjà pris, casse comprise.
+		 */
+		createLabel(fields: Omit<Label, "labelId">, uids: Iterable<number>, nowSeconds: number): Label | undefined {
+			// Comme la colonne, `COLLATE NOCASE` : « travaux » et « Travaux » sont une même étiquette.
+			const lower = fields.name.toLowerCase();
+			if ([...labels.values()].some((label) => label.name.toLowerCase() === lower)) return undefined;
+			const labelId = transaction(() => {
+				const { lastInsertRowid } = db
+					.prepare("INSERT INTO labels (name, color, created_at) VALUES (?, ?, ?)")
+					.run(fields.name, fields.color, nowSeconds);
+				const labelId = Number(lastInsertRowid);
+				const insert = db.prepare("INSERT OR IGNORE INTO modification_labels (uid, label_id) VALUES (?, ?)");
+				for (const uid of new Set(uids)) if (modifications.has(uid)) insert.run(uid, labelId);
+				return labelId;
+			});
+			return labels.get(labelId);
+		},
+
+		/**
+		 * Pose une étiquette sur des modifications, ou la leur retire. Elles ne sont pas réhorodatées :
+		 * rien de ce qui est publié ne change. Renvoie faux pour une étiquette inconnue.
+		 */
+		setLabel(labelId: number, uids: Iterable<number>, assigned: boolean): boolean {
+			if (!labels.has(labelId)) return false;
+			transaction(() => {
+				const statement = db.prepare(
+					assigned
+						? "INSERT OR IGNORE INTO modification_labels (uid, label_id) VALUES (?, ?)"
+						: "DELETE FROM modification_labels WHERE uid = ? AND label_id = ?",
+				);
+				for (const uid of new Set(uids)) if (modifications.has(uid)) statement.run(uid, labelId);
+			});
+			return true;
+		},
 
 		/** Les trios info trafic × ligne × sens dont on ignore les suppressions d'arrêts lues par l'IA, par {@link scopeKey}. */
 		ignoredScopes: ignored as ReadonlySet<string>,
@@ -1527,6 +1607,10 @@ type AlertPeriodRow = {
 };
 
 type PatternRow = { uid: number; pattern_id: string };
+
+type LabelRow = { label_id: number; name: string; color: string; created_at: number };
+
+type ModificationLabelRow = { uid: number; label_id: number };
 
 type RemovedRow = { uid: number; stop_id: string };
 

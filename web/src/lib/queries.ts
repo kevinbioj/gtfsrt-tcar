@@ -3,10 +3,13 @@ import type {
 	AlertInputDto,
 	AllStopsDto,
 	DepartureDayDto,
+	LabelAssignmentDto,
+	LabelDto,
 	MessageDto,
 	ModificationDetailDto,
 	ModificationInputDto,
 	ModificationSummaryDto,
+	NewLabelDto,
 	NewModificationDto,
 	ProvisionalStopDto,
 	ProvisionalStopInput,
@@ -30,6 +33,7 @@ export const keys = {
 		[...source.split("/").filter(Boolean), "departures", routeId, directionId] as const,
 	modifications: ["modifications"] as const,
 	modification: (uid: number) => ["modifications", uid] as const,
+	labels: ["labels"] as const,
 	provisionalStops: ["provisional-stops"] as const,
 	stopReferences: ["stop-references"] as const,
 	allStops: ["stops", "all"] as const,
@@ -89,6 +93,35 @@ export function useModifications() {
 		queryKey: keys.modifications,
 		queryFn: async () => (await api<{ modifications: ModificationSummaryDto[] }>("/modifications")).modifications,
 		refetchInterval: 60_000,
+	});
+}
+
+export function useLabels() {
+	return useQuery({ queryKey: keys.labels, queryFn: () => api<LabelDto[]>("/labels") });
+}
+
+/** Crée une étiquette, posée d'emblée sur les modifications données. */
+export function useCreateLabel() {
+	const client = useQueryClient();
+	return useMutation({
+		mutationFn: (input: NewLabelDto) => api<LabelDto>("/labels", { method: "POST", body: input }),
+		onSuccess: () =>
+			Promise.all([
+				client.invalidateQueries({ queryKey: keys.labels }),
+				client.invalidateQueries({ queryKey: keys.modifications }),
+			]),
+		onError: reportError,
+	});
+}
+
+/** Pose une étiquette sur des modifications, ou la leur retire. Rien de publié n'en dépend. */
+export function useSetLabel() {
+	const client = useQueryClient();
+	return useMutation({
+		mutationFn: ({ labelId, ...body }: LabelAssignmentDto & { labelId: number }) =>
+			api<MessageDto>(`/labels/${labelId}/modifications`, { method: "PUT", body }),
+		onSuccess: () => client.invalidateQueries({ queryKey: keys.modifications }),
+		onError: reportError,
 	});
 }
 

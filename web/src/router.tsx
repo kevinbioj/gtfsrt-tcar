@@ -66,12 +66,21 @@ export const alertsRoute = createRoute({
 export const modificationsRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/modifications",
-	validateSearch: (search: Record<string, unknown>): { tab?: ModificationTab; line?: string; q?: string } =>
+	validateSearch: (
+		search: Record<string, unknown>,
+	): {
+		tab?: ModificationTab;
+		line?: string;
+		/** L'identifiant d'une étiquette, ou « none » : celles qui n'en portent aucune. */
+		label?: string;
+		q?: string;
+	} =>
 		defined({
 			tab: TABS.some((entry) => entry.value !== "all" && entry.value === search.tab)
 				? (search.tab as ModificationTab)
 				: undefined,
 			line: text(search.line),
+			label: search.label === "none" ? "none" : integer(search.label)?.toString(),
 			q: text(search.q),
 		}),
 	component: ModificationsPage,
