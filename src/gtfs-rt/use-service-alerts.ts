@@ -656,6 +656,20 @@ export function lastPeriodEnd(periods: AlertPeriod[]): Temporal.Instant | null {
 }
 
 /**
+ * Le premier début des périodes. `null` si l'une n'en a pas : la perturbation est déjà en cours, et
+ * rien ne dit depuis quand.
+ */
+function firstPeriodStart(periods: AlertPeriod[]): Temporal.Instant | null {
+	let first: Temporal.Instant | null = null;
+	for (const period of periods) {
+		const start = period.start ? periodStart(period.start) : null;
+		if (start === null) return null;
+		if (first === null || Temporal.Instant.compare(start, first) < 0) first = start;
+	}
+	return first;
+}
+
+/**
  * Deux listes de périodes ont-elles un instant en commun ? Chaque période se prend de sa borne de
  * début à sa borne de fin, tranche horaire comprise : c'est l'enveloppe qui compte ici. Aucune
  * période du tout veut dire « sans borne », et croise donc tout.
@@ -713,8 +727,10 @@ export function publishedPeriods(
  * La période de communication d'une alerte telle qu'elle se republie. Celle du flux amont est une
  * fenêtre de publication — souvent jusqu'à la fin de l'année —, et non la durée de la perturbation :
  * quand les périodes lues disent quand celle-ci finit, la communication s'arrête là ; quand elles la
- * disent ouverte (« à partir du 31/10 »), la communication l'est aussi. Son début reste celui du flux :
- * une alerte s'annonce avant la perturbation.
+ * disent ouverte (« à partir du 31/10 »), la communication l'est aussi. Son début reste celui du flux —
+ * une alerte s'annonce avant la perturbation —, sauf si la perturbation commence plus tôt : le flux
+ * amont ouvre souvent sa fenêtre à 00:01, et la communication remonte alors au début lu, pour que
+ * l'impact, qui y tient, ne s'en trouve pas rogné d'une minute.
  *
  * Aucune période lue ne dit rien de la fin : la communication reçue reste. Une fin lue qui précède le
  * début de la communication est une lecture douteuse : la communication reçue reste aussi.
@@ -728,7 +744,10 @@ export function communicationPeriods(
 	const lastEnd = lastPeriodEnd(periods);
 	const end = lastEnd === null ? null : secondsOf(lastEnd);
 	const starts = received.map((range) => (range.start ? Number(range.start) : null));
-	const start = starts.length === 0 || starts.includes(null) ? null : Math.min(...starts.map((s) => s ?? 0));
+	const receivedStart = starts.length === 0 || starts.includes(null) ? null : Math.min(...starts.map((s) => s ?? 0));
+	const readStart = firstPeriodStart(periods);
+	const start =
+		receivedStart === null ? null : readStart === null ? receivedStart : Math.min(receivedStart, secondsOf(readStart));
 
 	if (start !== null && end !== null && end <= start) return received;
 	if (start === null && end === null) return [];
