@@ -2,11 +2,12 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import type { DailyWindow } from "../ai/analyze-alert.js";
+import type { AlertPeriod, DailyWindow } from "../ai/analyze-alert.js";
 import {
 	type AlertText,
 	type AnalyzedAlert,
 	alertTextChange,
+	lastPeriodEnd,
 	readableAlertText,
 	sameAlertText,
 } from "../gtfs-rt/use-service-alerts.js";
@@ -284,6 +285,23 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 		PRIMARY KEY (uid, label_id)
 	) STRICT;
 	`,
+	(db) => {
+		// Ce que l'analyse lisait quand les périodes ont été saisies — JSON d'un PeriodsBasis : que le
+		// texte reçu change et que l'analyse y lise d'autres périodes, et la saisie saute (cf.
+		// recordAlerts). NULL : aucune saisie, ou une saisie dont on ne connaît pas encore la base.
+		db.exec("ALTER TABLE alert_first_seen ADD COLUMN periods_basis TEXT");
+
+		// Les saisies déjà faites prennent pour base le dernier relevé.
+		const rows = db
+			.prepare(
+				"SELECT alert_number, snapshot FROM alert_first_seen WHERE snapshot IS NOT NULL AND periods_overridden = 1",
+			)
+			.all() as { alert_number: string; snapshot: string }[];
+		const update = db.prepare("UPDATE alert_first_seen SET periods_basis = ? WHERE alert_number = ?");
+		for (const row of rows) {
+			update.run(JSON.stringify(periodsBasis(decodeAlert(row.snapshot))), row.alert_number);
+		}
+	},
 ];
 
 /** Une étiquette, pour classer les modifications dans la liste. */
@@ -624,11 +642,24 @@ export type AlertSettings = {
 	 * `readableAlertText`) ; `null` : aucune réécriture, ou une base encore inconnue.
 	 */
 	textBasis: AlertText | null;
+	/**
+	 * Ce que l'analyse lisait quand les périodes ont été saisies (cf. {@link PeriodsBasis}) ; `null` :
+	 * aucune saisie, ou une base encore inconnue.
+	 */
+	periodsBasis: PeriodsBasis | null;
 	/** L'impact réécrit ; `null` : celui du flux. */
 	impact: ImpactOverride | null;
 	/** Marquée traitée : quand, et l'empreinte de l'alerte reçue alors ; `null` : à traiter. */
 	checked: { at: number; basis: string } | null;
 };
+
+/**
+ * Le texte reçu, tel qu'il se lit (cf. `readableAlertText`), et les périodes que l'analyse y lisait,
+ * quand les périodes d'une info trafic ont été saisies. La saisie affinait cette lecture-là : que le
+ * réseau change son texte pour en annoncer la fin — « reprise du parcours normal dès le … » —, et
+ * elle ne vaut plus (cf. `recordAlerts`).
+ */
+export type PeriodsBasis = { text: AlertText; periods: AlertPeriod[] };
 
 /**
  * Tout ce qui s'enregistre d'une info trafic d'un bloc, masquage excepté : il se bascule à part, et
@@ -661,6 +692,7 @@ const DEFAULT_SETTINGS: AlertSettings = {
 	periods: null,
 	overrides: { headerText: null, descriptionText: null, cause: null, effect: null },
 	textBasis: null,
+	periodsBasis: null,
 	impact: null,
 	checked: null,
 };
@@ -754,6 +786,7 @@ export function useDetourStore(path: string) {
 					effect: row.effect_override,
 				},
 				textBasis: row.text_basis === null ? null : (JSON.parse(row.text_basis) as AlertText),
+				periodsBasis: row.periods_basis === null ? null : (JSON.parse(row.periods_basis) as PeriodsBasis),
 				impact:
 					row.impact_override === null
 						? null
@@ -1095,6 +1128,11 @@ export function useDetourStore(path: string) {
 		 * qu'annonce désormais le réseau, et republier l'ancienne version serait pire que republier la
 		 * nouvelle telle quelle. On la refait au besoin. La cause et l'effet réécrits, eux, restent.
 		 *
+		 * Les périodes saisies sautent, elles, quand le texte reçu change pour annoncer une fin : l'analyse
+		 * y lit désormais une fin là où elle n'en lisait pas, ou une fin plus tôt que celle qu'elle lisait
+		 * (cf. `PeriodsBasis`, `endAnnounced`). Rien d'autre ne les touche — un début déplacé, une fin
+		 * repoussée, un texte retouché : la saisie reste, sur le nouveau texte désormais.
+		 *
 		 * Le texte se compare tel qu'il se lit (cf. `sameAlertText`) : un autre balisage de la même info
 		 * n'est pas un nouveau texte. Le journal dit ce qui a changé, pour qu'une réécriture qui saute
 		 * sans raison apparente se comprenne après coup.
@@ -1109,6 +1147,22 @@ export function useDetourStore(path: string) {
 				 WHERE alert_number = ?`,
 			);
 			const setBasis = db.prepare("UPDATE alert_first_seen SET text_basis = ? WHERE alert_number = ?");
+			const clearPeriods = db.prepare(
+				"UPDATE alert_first_seen SET periods_overridden = 0, periods_basis = NULL WHERE alert_number = ?",
+			);
+			const deletePeriods = db.prepare("DELETE FROM alert_periods WHERE alert_number = ?");
+			const dropPeriods = (alertNumber: string) => {
+				db.exec("BEGIN");
+				try {
+					clearPeriods.run(alertNumber);
+					deletePeriods.run(alertNumber);
+					db.exec("COMMIT");
+				} catch (cause) {
+					db.exec("ROLLBACK");
+					throw cause;
+				}
+			};
+			const setPeriodsBasis = db.prepare("UPDATE alert_first_seen SET periods_basis = ? WHERE alert_number = ?");
 			for (const alert of alerts) {
 				const { alertNumber, headerText } = alert;
 				const snapshot = encodeAlert(alert);
@@ -1131,6 +1185,29 @@ export function useDetourStore(path: string) {
 					} else if (entry.textBasis === null) {
 						setBasis.run(JSON.stringify(basis), alertNumber);
 						entry.textBasis = basis;
+					}
+				}
+
+				if (entry !== undefined && entry.periods !== null) {
+					// Sans base retenue, c'est le dernier relevé qui en tient lieu.
+					const basis = entry.periodsBasis ?? periodsBasis(previous ?? alert);
+					const current = periodsBasis(alert);
+					if (sameAlertText(basis.text, current.text)) {
+						if (entry.periodsBasis === null) {
+							setPeriodsBasis.run(JSON.stringify(basis), alertNumber);
+							entry.periodsBasis = basis;
+						}
+					} else if (endAnnounced(basis.periods, current.periods)) {
+						dropPeriods(alertNumber);
+						entry.periods = null;
+						entry.periodsBasis = null;
+						console.log(
+							`➔ Alert ${alertNumber}: source text changed, entered periods dropped — ${alertTextChange(basis.text, current.text)}`,
+						);
+					} else {
+						// Aucune fin annoncée : la saisie reste, et c'est à cette lecture-ci que se jaugera la suivante.
+						setPeriodsBasis.run(JSON.stringify(current), alertNumber);
+						entry.periodsBasis = current;
 					}
 				}
 
@@ -1347,12 +1424,15 @@ export function useDetourStore(path: string) {
 				(headerText !== null || descriptionText !== null) && source !== undefined
 					? JSON.stringify(readableAlertText(source))
 					: null;
+			// Les périodes saisies le sont sur la dernière analyse relevée : c'est elle qu'elles affinent.
+			const periodsBasisJson =
+				input.periods !== null && source !== undefined ? JSON.stringify(periodsBasis(source)) : null;
 
 			transaction(() => {
 				db.prepare(
 					`UPDATE alert_first_seen
 					 SET header_override = ?, description_override = ?, cause_override = ?, effect_override = ?,
-						 text_basis = ?, periods_overridden = ?, impact_override = ?, impact_basis = ?
+						 text_basis = ?, periods_overridden = ?, periods_basis = ?, impact_override = ?, impact_basis = ?
 					 WHERE alert_number = ?`,
 				).run(
 					headerText,
@@ -1361,6 +1441,7 @@ export function useDetourStore(path: string) {
 					effect,
 					textBasis,
 					input.periods === null ? 0 : 1,
+					periodsBasisJson,
 					input.impact === null ? null : JSON.stringify(input.impact.entities),
 					input.impact?.basis ?? null,
 					alertNumber,
@@ -1531,6 +1612,22 @@ function provisionalColumns(fields: ProvisionalStopFields) {
  * Le relevé d'une info trafic en JSON. Les quais supprimés de chaque contribution sont un `Set`, que
  * JSON ne sait pas écrire : ils passent en tableau, et en reviennent à la lecture.
  */
+/** Ce qu'une analyse lit d'une info trafic, base de périodes qu'on y saisirait (cf. {@link PeriodsBasis}). */
+function periodsBasis(alert: AnalyzedAlert): PeriodsBasis {
+	return { text: readableAlertText(alert), periods: alert.periods };
+}
+
+/**
+ * D'une lecture de périodes à l'autre, une fin s'annonce-t-elle ? L'analyse en lit une là où elle n'en
+ * lisait pas, ou une plus tôt. Un début déplacé, une fin repoussée n'en sont pas.
+ */
+function endAnnounced(before: AlertPeriod[], after: AlertPeriod[]): boolean {
+	const end = lastPeriodEnd(after);
+	if (end === null) return false;
+	const previous = lastPeriodEnd(before);
+	return previous === null || Temporal.Instant.compare(end, previous) < 0;
+}
+
 function encodeAlert(alert: AnalyzedAlert): string {
 	return JSON.stringify({
 		...alert,
@@ -1630,6 +1727,7 @@ type FirstSeenRow = {
 	impact_override: string | null;
 	impact_basis: string | null;
 	text_basis: string | null;
+	periods_basis: string | null;
 	checked_at: number | null;
 	checked_basis: string | null;
 };
