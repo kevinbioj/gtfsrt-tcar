@@ -49,7 +49,10 @@ export function project(points: readonly LatLng[], point: LatLng): { along: numb
 		const x = a[0] + t * dx;
 		const y = a[1] + t * dy;
 		const offset = Math.hypot(target[0] - x, target[1] - y);
-		const segment = Math.hypot(dx, dy);
+		// L'abscisse se cumule en haversine, comme `lengthOf` et `slice` : le plan, calé sur la latitude
+		// du point, allonge ou raccourcit les segments lointains, et l'écart se cumule le long du tracé —
+		// plusieurs mètres au bout d'une ligne, assez pour que le tronçon évité morde sur ce qui reste parcouru.
+		const segment = distance(from, to);
 		if (offset < best.offset) {
 			best = {
 				along: walked + t * segment,
