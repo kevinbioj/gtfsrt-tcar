@@ -323,10 +323,34 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 		FOREIGN KEY (uid, alert_number) REFERENCES modification_alerts (uid, alert_number) ON DELETE CASCADE
 	) STRICT;
 	`,
+	`
+	-- Les infos trafic créées à la main, numérotées « P<custom_id> » (cf. customAlertNumber). Ce qui s'en
+	-- saisit se range dans alert_first_seen et ses tables, comme pour celles du flux. AUTOINCREMENT : un
+	-- numéro ne se réattribue jamais, et « SA:P3 » ne désigne jamais deux alertes dans le feed.
+	CREATE TABLE custom_alerts (
+		custom_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+		created_at   INTEGER NOT NULL,
+		-- Depuis quand elle est publiée ; NULL : brouillon, ou dépubliée.
+		published_at INTEGER
+	) STRICT;
+	`,
+	`
+	-- Le lien, l'image et son texte alternatif republiés (cf. AlertOverrides). NULL : ceux du flux ;
+	-- '' : aucun, quoi que porte le flux.
+	ALTER TABLE alert_first_seen ADD COLUMN url_override TEXT;
+	ALTER TABLE alert_first_seen ADD COLUMN image_override TEXT;
+	ALTER TABLE alert_first_seen ADD COLUMN image_alt_override TEXT;
+	`,
 ];
 
 /** Une étiquette, pour classer les modifications dans la liste. */
 export type Label = { labelId: number; name: string; color: string };
+
+/**
+ * Une info trafic créée à la main : quand, et depuis quand elle est publiée (`null` : brouillon, ou
+ * dépubliée). Elle reste au feed tant qu'elle est publiée.
+ */
+export type CustomAlert = { createdAt: number; publishedAt: number | null };
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
 export type ProvisionalStop = {
@@ -542,13 +566,21 @@ export type SkipOverride = { routeId: string; directionId: number; stopId: strin
 
 /**
  * Ce qui se réécrit de l'alerte republiée : son titre, sa description, sa cause et son effet (les noms
- * des énumérations du GTFS-RT, « CONSTRUCTION », « DETOUR »…). `null` : ceux du flux.
+ * des énumérations du GTFS-RT, « CONSTRUCTION », « DETOUR »…), son lien, son image et le texte
+ * alternatif de celle-ci. `null` : ceux du flux. Pour le lien, l'image et son texte alternatif, `""` :
+ * aucun, quoi que porte le flux.
  */
 export type AlertOverrides = {
 	headerText: string | null;
 	descriptionText: string | null;
 	cause: string | null;
 	effect: string | null;
+	/** Le lien (`url`), en https:// ou http://. */
+	url: string | null;
+	/** L'adresse de l'image (`image`), en https://. */
+	imageUrl: string | null;
+	/** Ce que montre l'image (`image_alternative_text`). */
+	imageAlternativeText: string | null;
 };
 
 /**
@@ -722,7 +754,15 @@ export function scopeKey(alertNumber: string, routeId: string, directionId: numb
 const DEFAULT_SETTINGS: AlertSettings = {
 	hidden: false,
 	periods: null,
-	overrides: { headerText: null, descriptionText: null, cause: null, effect: null },
+	overrides: {
+		headerText: null,
+		descriptionText: null,
+		cause: null,
+		effect: null,
+		url: null,
+		imageUrl: null,
+		imageAlternativeText: null,
+	},
 	textBasis: null,
 	periodsBasis: null,
 	impact: null,
@@ -766,9 +806,11 @@ export function useDetourStore(path: string) {
 	const skipStops = new Map<string, SkipOverride[]>();
 	const tripSets = new Map<string, TripSet[]>();
 	const labels = new Map<number, Label>();
+	const customAlerts = new Map<string, CustomAlert>();
 
 	const reload = () => {
 		modifications.clear();
+		customAlerts.clear();
 		labels.clear();
 		provisional.clear();
 		ignored.clear();
@@ -797,6 +839,13 @@ export function useDetourStore(path: string) {
 			});
 		}
 
+		for (const row of db.prepare("SELECT * FROM custom_alerts ORDER BY custom_id").all() as CustomAlertRow[]) {
+			customAlerts.set(customAlertNumber(row.custom_id), {
+				createdAt: row.created_at,
+				publishedAt: row.published_at,
+			});
+		}
+
 		for (const row of db.prepare("SELECT * FROM dismissed_scopes").all() as DismissedRow[]) {
 			ignored.add(scopeKey(row.alert_number, row.route_id, row.direction_id));
 		}
@@ -816,6 +865,9 @@ export function useDetourStore(path: string) {
 					descriptionText: row.description_override,
 					cause: row.cause_override,
 					effect: row.effect_override,
+					url: row.url_override,
+					imageUrl: row.image_override,
+					imageAlternativeText: row.image_alt_override,
 				},
 				textBasis: row.text_basis === null ? null : (JSON.parse(row.text_basis) as AlertText),
 				periodsBasis: row.periods_basis === null ? null : (JSON.parse(row.periods_basis) as PeriodsBasis),
@@ -1077,6 +1129,142 @@ export function useDetourStore(path: string) {
 		});
 	};
 
+	/**
+	 * Écrit ce qui se règle d'une info trafic déjà rangée — à appeler dans une transaction (cf.
+	 * `saveAlert`, `createCustomAlert`).
+	 */
+	const writeAlert = (alertNumber: string, input: AlertInput, nowSeconds: number) => {
+		const wanted = new Set(input.modificationUids.filter((uid) => modifications.has(uid)));
+		const current = new Set(
+			[...modifications.values()]
+				.filter((modification) => modification.alertNumbers.includes(alertNumber))
+				.map((modification) => modification.uid),
+		);
+		const added = [...wanted].filter((uid) => !current.has(uid));
+		const removed = [...current].filter((uid) => !wanted.has(uid));
+		const ownPeriods = (uid: number) => input.modificationPeriods.get(uid) ?? null;
+		// Celles qui restent associées mais dont les périodes propres changent : elles ne valent plus
+		// aux mêmes moments.
+		const reperiodized = [...wanted].filter(
+			(uid) =>
+				current.has(uid) &&
+				JSON.stringify(modifications.get(uid)?.alertPeriods.get(alertNumber) ?? null) !==
+					JSON.stringify(ownPeriods(uid)),
+		);
+
+		// Le texte réécrit l'est sur le dernier texte relevé : c'est de lui qu'il ne doit pas s'écarter.
+		const { headerText, descriptionText, cause, effect, url, imageUrl, imageAlternativeText } = input.overrides;
+		const source = snapshots.get(alertNumber);
+		const textBasis =
+			(headerText !== null || descriptionText !== null) && source !== undefined
+				? JSON.stringify(readableAlertText(source))
+				: null;
+		// Les périodes saisies le sont sur la dernière analyse relevée : c'est elle qu'elles affinent.
+		const periodsBasisJson =
+			input.periods !== null && source !== undefined ? JSON.stringify(periodsBasis(source)) : null;
+
+		db.prepare(
+			`UPDATE alert_first_seen
+					 SET header_override = ?, description_override = ?, cause_override = ?, effect_override = ?,
+						 url_override = ?, image_override = ?, image_alt_override = ?, text_basis = ?, periods_overridden = ?, periods_basis = ?, impact_override = ?, impact_basis = ?
+					 WHERE alert_number = ?`,
+		).run(
+			headerText,
+			descriptionText,
+			cause,
+			effect,
+			url,
+			imageUrl,
+			imageAlternativeText,
+			textBasis,
+			input.periods === null ? 0 : 1,
+			periodsBasisJson,
+			input.impact === null ? null : JSON.stringify(input.impact.entities),
+			input.impact?.basis ?? null,
+			alertNumber,
+		);
+
+		db.prepare("DELETE FROM alert_periods WHERE alert_number = ?").run(alertNumber);
+		const insertPeriod = db.prepare(
+			`INSERT INTO alert_periods (alert_number, position, start_date, start_time, end_date, end_time, daily_from, daily_to)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		);
+		(input.periods ?? []).forEach((period, position) => {
+			insertPeriod.run(alertNumber, position, ...periodColumns(period));
+		});
+
+		db.prepare("DELETE FROM alert_skip_stops WHERE alert_number = ?").run(alertNumber);
+		const insertSkip = db.prepare(
+			`INSERT OR REPLACE INTO alert_skip_stops (alert_number, route_id, direction_id, stop_id, removed)
+					 VALUES (?, ?, ?, ?, ?)`,
+		);
+		for (const { routeId, directionId, stopId, removed } of input.skipStops) {
+			insertSkip.run(alertNumber, routeId, directionId, stopId, removed ? 1 : 0);
+		}
+
+		db.prepare("DELETE FROM dismissed_scopes WHERE alert_number = ?").run(alertNumber);
+		const insertIgnored = db.prepare(
+			`INSERT OR IGNORE INTO dismissed_scopes (alert_number, route_id, direction_id, dismissed_at)
+					 VALUES (?, ?, ?, ?)`,
+		);
+		for (const { routeId, directionId } of input.ignoredScopes) {
+			insertIgnored.run(alertNumber, routeId, directionId, nowSeconds);
+		}
+
+		// Les ensembles se réécrivent en entier, départs compris par cascade : rien au dehors ne les
+		// désigne.
+		db.prepare("DELETE FROM alert_trip_sets WHERE alert_number = ?").run(alertNumber);
+		const insertSet = db.prepare(
+			`INSERT INTO alert_trip_sets (alert_number, position, route_id, direction_id, enabled, kind, from_time, to_time)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		);
+		const insertDeparture = db.prepare(
+			"INSERT OR IGNORE INTO alert_set_departures (set_id, stop_id, departure) VALUES (?, ?, ?)",
+		);
+		input.tripSets.forEach((set, position) => {
+			const { selection } = set;
+			const { lastInsertRowid } = insertSet.run(
+				alertNumber,
+				position,
+				set.routeId,
+				set.directionId,
+				set.enabled ? 1 : 0,
+				selection.kind,
+				selection.kind === "range" ? selection.from : null,
+				selection.kind === "range" ? selection.to : null,
+			);
+			if (selection.kind !== "departures") return;
+			for (const { stopId, departure } of selection.departures) {
+				insertDeparture.run(Number(lastInsertRowid), stopId, departure);
+			}
+		});
+
+		const insert = db.prepare("INSERT INTO modification_alerts (uid, alert_number) VALUES (?, ?)");
+		const remove = db.prepare("DELETE FROM modification_alerts WHERE uid = ? AND alert_number = ?");
+		const touch = db.prepare("UPDATE modifications SET updated_at = ? WHERE uid = ?");
+		for (const uid of added) insert.run(uid, alertNumber);
+		// Leurs périodes propres suivent, par cascade.
+		for (const uid of removed) remove.run(uid, alertNumber);
+
+		// Les périodes propres se réécrivent en entier, comme celles de l'info trafic.
+		db.prepare("DELETE FROM modification_alert_periods WHERE alert_number = ?").run(alertNumber);
+		const flag = db.prepare("UPDATE modification_alerts SET periods_overridden = ? WHERE uid = ? AND alert_number = ?");
+		const insertOwnPeriod = db.prepare(
+			`INSERT INTO modification_alert_periods
+						(uid, alert_number, position, start_date, start_time, end_date, end_time, daily_from, daily_to)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		);
+		for (const uid of wanted) {
+			const periods = ownPeriods(uid);
+			flag.run(periods === null ? 0 : 1, uid, alertNumber);
+			(periods ?? []).forEach((period, position) => {
+				insertOwnPeriod.run(uid, alertNumber, position, ...periodColumns(period));
+			});
+		}
+
+		for (const uid of [...added, ...removed, ...reperiodized]) touch.run(nowSeconds, uid);
+	};
+
 	reload();
 	console.log(`✓ ${modifications.size} modifications restored from ${path}.`);
 
@@ -1089,6 +1277,29 @@ export function useDetourStore(path: string) {
 
 		/** Les étiquettes, par identifiant, dans l'ordre de leurs noms. */
 		labels: labels as ReadonlyMap<number, Label>,
+
+		/** Les infos trafic créées à la main, par numéro (« P1 »…). */
+		customAlerts: customAlerts as ReadonlyMap<string, CustomAlert>,
+
+		/**
+		 * Crée une info trafic à la main, en brouillon — non publiée —, avec tout ce qui s'en saisit, d'un
+		 * bloc : rien n'en existe tant qu'elle n'est pas enregistrée une première fois. Ses périodes sont
+		 * les siennes, fût-ce aucune : elle vaudra alors tant qu'elle sera publiée. Rend son numéro.
+		 */
+		createCustomAlert(input: AlertInput, nowSeconds: number): string {
+			return transaction(() => {
+				const { lastInsertRowid } = db
+					.prepare("INSERT INTO custom_alerts (created_at, published_at) VALUES (?, NULL)")
+					.run(nowSeconds);
+				const alertNumber = customAlertNumber(Number(lastInsertRowid));
+				db.prepare(
+					`INSERT INTO alert_first_seen (alert_number, first_seen_at, header_text, hidden, periods_overridden)
+					 VALUES (?, ?, ?, 1, 1)`,
+				).run(alertNumber, nowSeconds, input.overrides.headerText);
+				writeAlert(alertNumber, { ...input, periods: input.periods ?? [] }, nowSeconds);
+				return alertNumber;
+			});
+		},
 
 		/**
 		 * Crée une étiquette, et la pose d'emblée sur des modifications. Renvoie `undefined` si le nom est
@@ -1389,14 +1600,24 @@ export function useDetourStore(path: string) {
 		},
 
 		/**
-		 * Masque une info trafic, ou la rend visible. Seule une info trafic déjà relevée se règle : il lui
+		 * Dépublie une info trafic, ou la publie. Seule une info trafic déjà relevée ou créée se règle : il lui
 		 * faut une ligne où le retenir. Renvoie faux sinon.
 		 */
-		setAlertHidden(alertNumber: string, hidden: boolean): boolean {
+		setAlertHidden(alertNumber: string, hidden: boolean, nowSeconds: number): boolean {
 			return transaction(() => {
 				const { changes } = db
 					.prepare("UPDATE alert_first_seen SET hidden = ? WHERE alert_number = ?")
 					.run(hidden ? 1 : 0, alertNumber);
+				// Une info trafic créée à la main est au feed depuis sa publication : c'est le début de sa
+				// période de communication. Republiée, elle repart de là.
+				const customId = customAlertId(alertNumber);
+				if (customId !== undefined && changes > 0) {
+					db.prepare(
+						hidden
+							? "UPDATE custom_alerts SET published_at = NULL WHERE custom_id = ?"
+							: "UPDATE custom_alerts SET published_at = COALESCE(published_at, ?) WHERE custom_id = ?",
+					).run(...(hidden ? [customId] : [nowSeconds, customId]));
+				}
 				return changes > 0;
 			});
 		},
@@ -1429,6 +1650,8 @@ export function useDetourStore(path: string) {
 				]) {
 					db.prepare(`DELETE FROM ${table} WHERE alert_number = ?`).run(alertNumber);
 				}
+				const customId = customAlertId(alertNumber);
+				if (customId !== undefined) db.prepare("DELETE FROM custom_alerts WHERE custom_id = ?").run(customId);
 			});
 			return true;
 		},
@@ -1444,136 +1667,7 @@ export function useDetourStore(path: string) {
 		saveAlert(alertNumber: string, input: AlertInput, nowSeconds: number): boolean {
 			if (!firstSeen.has(alertNumber)) return false;
 
-			const wanted = new Set(input.modificationUids.filter((uid) => modifications.has(uid)));
-			const current = new Set(
-				[...modifications.values()]
-					.filter((modification) => modification.alertNumbers.includes(alertNumber))
-					.map((modification) => modification.uid),
-			);
-			const added = [...wanted].filter((uid) => !current.has(uid));
-			const removed = [...current].filter((uid) => !wanted.has(uid));
-			const ownPeriods = (uid: number) => input.modificationPeriods.get(uid) ?? null;
-			// Celles qui restent associées mais dont les périodes propres changent : elles ne valent plus
-			// aux mêmes moments.
-			const reperiodized = [...wanted].filter(
-				(uid) =>
-					current.has(uid) &&
-					JSON.stringify(modifications.get(uid)?.alertPeriods.get(alertNumber) ?? null) !==
-						JSON.stringify(ownPeriods(uid)),
-			);
-
-			// Le texte réécrit l'est sur le dernier texte relevé : c'est de lui qu'il ne doit pas s'écarter.
-			const { headerText, descriptionText, cause, effect } = input.overrides;
-			const source = snapshots.get(alertNumber);
-			const textBasis =
-				(headerText !== null || descriptionText !== null) && source !== undefined
-					? JSON.stringify(readableAlertText(source))
-					: null;
-			// Les périodes saisies le sont sur la dernière analyse relevée : c'est elle qu'elles affinent.
-			const periodsBasisJson =
-				input.periods !== null && source !== undefined ? JSON.stringify(periodsBasis(source)) : null;
-
-			transaction(() => {
-				db.prepare(
-					`UPDATE alert_first_seen
-					 SET header_override = ?, description_override = ?, cause_override = ?, effect_override = ?,
-						 text_basis = ?, periods_overridden = ?, periods_basis = ?, impact_override = ?, impact_basis = ?
-					 WHERE alert_number = ?`,
-				).run(
-					headerText,
-					descriptionText,
-					cause,
-					effect,
-					textBasis,
-					input.periods === null ? 0 : 1,
-					periodsBasisJson,
-					input.impact === null ? null : JSON.stringify(input.impact.entities),
-					input.impact?.basis ?? null,
-					alertNumber,
-				);
-
-				db.prepare("DELETE FROM alert_periods WHERE alert_number = ?").run(alertNumber);
-				const insertPeriod = db.prepare(
-					`INSERT INTO alert_periods (alert_number, position, start_date, start_time, end_date, end_time, daily_from, daily_to)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				);
-				(input.periods ?? []).forEach((period, position) => {
-					insertPeriod.run(alertNumber, position, ...periodColumns(period));
-				});
-
-				db.prepare("DELETE FROM alert_skip_stops WHERE alert_number = ?").run(alertNumber);
-				const insertSkip = db.prepare(
-					`INSERT OR REPLACE INTO alert_skip_stops (alert_number, route_id, direction_id, stop_id, removed)
-					 VALUES (?, ?, ?, ?, ?)`,
-				);
-				for (const { routeId, directionId, stopId, removed } of input.skipStops) {
-					insertSkip.run(alertNumber, routeId, directionId, stopId, removed ? 1 : 0);
-				}
-
-				db.prepare("DELETE FROM dismissed_scopes WHERE alert_number = ?").run(alertNumber);
-				const insertIgnored = db.prepare(
-					`INSERT OR IGNORE INTO dismissed_scopes (alert_number, route_id, direction_id, dismissed_at)
-					 VALUES (?, ?, ?, ?)`,
-				);
-				for (const { routeId, directionId } of input.ignoredScopes) {
-					insertIgnored.run(alertNumber, routeId, directionId, nowSeconds);
-				}
-
-				// Les ensembles se réécrivent en entier, départs compris par cascade : rien au dehors ne les
-				// désigne.
-				db.prepare("DELETE FROM alert_trip_sets WHERE alert_number = ?").run(alertNumber);
-				const insertSet = db.prepare(
-					`INSERT INTO alert_trip_sets (alert_number, position, route_id, direction_id, enabled, kind, from_time, to_time)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				);
-				const insertDeparture = db.prepare(
-					"INSERT OR IGNORE INTO alert_set_departures (set_id, stop_id, departure) VALUES (?, ?, ?)",
-				);
-				input.tripSets.forEach((set, position) => {
-					const { selection } = set;
-					const { lastInsertRowid } = insertSet.run(
-						alertNumber,
-						position,
-						set.routeId,
-						set.directionId,
-						set.enabled ? 1 : 0,
-						selection.kind,
-						selection.kind === "range" ? selection.from : null,
-						selection.kind === "range" ? selection.to : null,
-					);
-					if (selection.kind !== "departures") return;
-					for (const { stopId, departure } of selection.departures) {
-						insertDeparture.run(Number(lastInsertRowid), stopId, departure);
-					}
-				});
-
-				const insert = db.prepare("INSERT INTO modification_alerts (uid, alert_number) VALUES (?, ?)");
-				const remove = db.prepare("DELETE FROM modification_alerts WHERE uid = ? AND alert_number = ?");
-				const touch = db.prepare("UPDATE modifications SET updated_at = ? WHERE uid = ?");
-				for (const uid of added) insert.run(uid, alertNumber);
-				// Leurs périodes propres suivent, par cascade.
-				for (const uid of removed) remove.run(uid, alertNumber);
-
-				// Les périodes propres se réécrivent en entier, comme celles de l'info trafic.
-				db.prepare("DELETE FROM modification_alert_periods WHERE alert_number = ?").run(alertNumber);
-				const flag = db.prepare(
-					"UPDATE modification_alerts SET periods_overridden = ? WHERE uid = ? AND alert_number = ?",
-				);
-				const insertOwnPeriod = db.prepare(
-					`INSERT INTO modification_alert_periods
-						(uid, alert_number, position, start_date, start_time, end_date, end_time, daily_from, daily_to)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				);
-				for (const uid of wanted) {
-					const periods = ownPeriods(uid);
-					flag.run(periods === null ? 0 : 1, uid, alertNumber);
-					(periods ?? []).forEach((period, position) => {
-						insertOwnPeriod.run(uid, alertNumber, position, ...periodColumns(period));
-					});
-				}
-
-				for (const uid of [...added, ...removed, ...reperiodized]) touch.run(nowSeconds, uid);
-			});
+			transaction(() => writeAlert(alertNumber, input, nowSeconds));
 			return true;
 		},
 
@@ -1650,6 +1744,20 @@ export function useDetourStore(path: string) {
  */
 export function provisionalStopId(stopUid: number): string {
 	return `PROV:${stopUid}`;
+}
+
+/**
+ * Le numéro d'une info trafic créée à la main. Le flux amont numérote les siennes en chiffres seuls :
+ * le préfixe les tient à l'écart.
+ */
+export function customAlertNumber(customId: number): string {
+	return `P${customId}`;
+}
+
+/** L'identifiant d'une info trafic créée à la main d'après son numéro, ou `undefined` si ce n'en est pas une. */
+export function customAlertId(alertNumber: string): number | undefined {
+	const match = /^P(\d+)$/.exec(alertNumber);
+	return match === null ? undefined : Number(match[1]);
 }
 
 /** Le numéro d'un arrêt provisoire d'après son identifiant publié, ou `undefined` si ce n'en est pas un. */
@@ -1783,6 +1891,8 @@ type PatternRow = { uid: number; pattern_id: string };
 
 type LabelRow = { label_id: number; name: string; color: string; created_at: number };
 
+type CustomAlertRow = { custom_id: number; created_at: number; published_at: number | null };
+
 type ModificationLabelRow = { uid: number; label_id: number };
 
 type RemovedRow = { uid: number; stop_id: string };
@@ -1800,6 +1910,9 @@ type FirstSeenRow = {
 	description_override: string | null;
 	cause_override: string | null;
 	effect_override: string | null;
+	url_override: string | null;
+	image_override: string | null;
+	image_alt_override: string | null;
 	impact_override: string | null;
 	impact_basis: string | null;
 	text_basis: string | null;

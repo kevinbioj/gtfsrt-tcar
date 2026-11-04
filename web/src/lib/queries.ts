@@ -156,7 +156,7 @@ function reportError(error: unknown) {
 
 /**
  * Après une saisie, tout ce qui en dépend se relit : une modification associée change l'état d'une
- * alerte, une alerte masquée celui de ses modifications, et la barre latérale compte les deux.
+ * alerte, une alerte dépubliée celui de ses modifications, et la barre latérale compte les deux.
  */
 function useInvalidateAll() {
 	const client = useQueryClient();
@@ -175,6 +175,23 @@ export function useSaveAlert(alertNumber: string) {
 		mutationFn: (input: AlertInputDto) =>
 			api<AlertDto>(`/alerts/${encodeURIComponent(alertNumber)}`, { method: "PUT", body: input }),
 		onSuccess: () => invalidate(),
+		onError: reportError,
+	});
+}
+
+/**
+ * Crée une alerte à la main, en brouillon, d'après tout ce qui s'en saisit : c'est son premier
+ * enregistrement. Elle entre aussitôt dans la liste en cache, pour s'ouvrir sans attendre sa relecture.
+ */
+export function useCreateAlert() {
+	const client = useQueryClient();
+	const invalidate = useInvalidateAll();
+	return useMutation({
+		mutationFn: (input: AlertInputDto) => api<AlertDto>("/alerts", { method: "POST", body: input }),
+		onSuccess: (created) => {
+			client.setQueryData<AlertDto[]>(keys.alerts, (list) => [created, ...(list ?? [])]);
+			return invalidate();
+		},
 		onError: reportError,
 	});
 }

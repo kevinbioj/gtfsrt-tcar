@@ -26,11 +26,18 @@ export type ResolvedAlert = {
 	/** Le texte de l'info trafic, en HTML brut. */
 	descriptionText: string;
 	routeIds: string[];
-	/** Au flux en ce moment. Sinon, elle n'est là que parce que des modifications lui restent associées. */
+	/**
+	 * Au flux amont en ce moment. Sinon, elle a été créée à la main (`custom`), ou elle n'est là que parce
+	 * que des modifications lui restent associées.
+	 */
 	inFeed: boolean;
-	/** Masquée : sans aucun effet, et plus republiée. */
+	/** Créée à la main : rien du flux amont ne la concerne, tout en est saisi. */
+	custom: boolean;
+	/** Depuis quand une info trafic créée à la main est publiée ; `null` : brouillon, ou pas créée à la main. */
+	publishedAt: number | null;
+	/** Dépubliée (brouillon, pour une info trafic créée à la main) : sans aucun effet, et plus republiée. */
 	hidden: boolean;
-	/** Au flux et visible : ses périodes, et elles seules, décident de ce qu'elle active. */
+	/** Au flux ou créée à la main, et publiée : ses périodes, et elles seules, décident de ce qu'elle active. */
 	effective: boolean;
 	/** Les périodes saisies, sinon celles de l'analyse. */
 	periods: AlertPeriod[];
@@ -75,7 +82,10 @@ export type AiSkip = {
  * périodes de la modification à son titre — les siennes propres, sinon celles de l'info trafic —
  * couvre l'instant de l'indexation.
  */
-export type AlertLink = Pick<ResolvedAlert, "alertNumber" | "headerText" | "inFeed" | "hidden" | "active"> & {
+export type AlertLink = Pick<
+	ResolvedAlert,
+	"alertNumber" | "headerText" | "inFeed" | "custom" | "hidden" | "active"
+> & {
 	/** La modification a, au titre de cette info trafic, ses périodes propres. */
 	periodsOverridden: boolean;
 };
@@ -198,9 +208,35 @@ function indexModifications(
 	const records = [...store.modifications.values()];
 	const live = new Set(current.map((alert) => alert.alertNumber));
 
-	// Celles du flux, puis celles qui l'ont quitté et que des modifications citent encore.
-	const sources: { alert: AnalyzedAlert; inFeed: boolean }[] = current.map((alert) => ({ alert, inFeed: true }));
-	const withdrawn = new Set(records.flatMap((record) => record.alertNumbers).filter((number) => !live.has(number)));
+	// Celles du flux, puis celles créées à la main, puis celles qui ont quitté le flux et que des
+	// modifications citent encore.
+	const sources: { alert: AnalyzedAlert; inFeed: boolean; custom: boolean }[] = current.map((alert) => ({
+		alert,
+		inFeed: true,
+		custom: false,
+	}));
+	for (const alertNumber of store.customAlerts.keys()) {
+		const { overrides } = store.alertSettings(alertNumber);
+		sources.push({
+			// Rien n'est lu : tout ce qui vaut se saisit, et se trouve dans ses réglages.
+			alert: {
+				alertId: alertNumber,
+				alertNumber,
+				headerText: overrides.headerText ?? "",
+				descriptionText: overrides.descriptionText ?? "",
+				periods: [],
+				routeIds: [],
+				contributions: [],
+			},
+			inFeed: false,
+			custom: true,
+		});
+	}
+	const withdrawn = new Set(
+		records
+			.flatMap((record) => record.alertNumbers)
+			.filter((number) => !live.has(number) && !store.customAlerts.has(number)),
+	);
 	for (const alertNumber of withdrawn) {
 		const alert = store.alertSnapshots.get(alertNumber) ?? {
 			alertId: null,
@@ -211,14 +247,14 @@ function indexModifications(
 			routeIds: [],
 			contributions: [],
 		};
-		sources.push({ alert, inFeed: false });
+		sources.push({ alert, inFeed: false, custom: false });
 	}
 
 	const alerts = new Map<string, ResolvedAlert>();
-	for (const { alert, inFeed } of sources) {
+	for (const { alert, inFeed, custom } of sources) {
 		const settings = store.alertSettings(alert.alertNumber);
 		const periods = settings.periods ?? alert.periods;
-		const effective = inFeed && !settings.hidden;
+		const effective = (inFeed || custom) && !settings.hidden;
 		const associated = records.filter((record) => record.alertNumbers.includes(alert.alertNumber));
 
 		alerts.set(alert.alertNumber, {
@@ -238,6 +274,8 @@ function indexModifications(
 							),
 						],
 			inFeed,
+			custom,
+			publishedAt: store.customAlerts.get(alert.alertNumber)?.publishedAt ?? null,
 			hidden: settings.hidden,
 			effective,
 			periods,
@@ -281,6 +319,7 @@ function indexModifications(
 				alertNumber: alert.alertNumber,
 				headerText: alert.headerText,
 				inFeed: alert.inFeed,
+				custom: alert.custom,
 				hidden: alert.hidden,
 				active: linkActive(alert),
 				periodsOverridden: record.alertPeriods.has(alert.alertNumber),

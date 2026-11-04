@@ -10,7 +10,9 @@ import { ADMIN_UI_DIR, ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SMOOTHING_TOLERANCE, RO
 import { serviceDay } from "../gtfs-rt/scheduled-trips.js";
 import {
 	alertSourceKey,
+	customPublishedPeriods,
 	hasEnded,
+	imageMediaType,
 	inWindow,
 	isActive,
 	periodsOverlap,
@@ -92,6 +94,9 @@ const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 /** Assez pour un titre d'info trafic ; une description, elle, n'est pas bornée. */
 const HEADER_MAX_LENGTH = 300;
 
+/** La longueur maximale d'une adresse saisie : lien, ou image. */
+const LINK_MAX_LENGTH = 2000;
+
 /** Un nom d'étiquette se lit d'un coup d'œil dans une pastille. */
 const LABEL_MAX_LENGTH = 40;
 
@@ -159,8 +164,9 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 			gtfsImportedAt,
 			counts: {
 				alerts: deps.modificationIndex.alerts.size,
-				uncheckedAlerts: [...deps.modificationIndex.alerts.keys()].filter(
-					(alertNumber) => deps.store.alertSettings(alertNumber).checked === null,
+				// Une info trafic créée à la main n'a rien à vérifier : tout en est saisi.
+				uncheckedAlerts: [...deps.modificationIndex.alerts.values()].filter(
+					(alert) => !alert.custom && deps.store.alertSettings(alert.alertNumber).checked === null,
 				).length,
 				modifications: deps.modificationIndex.modifications.size,
 				provisionalStops: deps.store.provisionalStops.size,
@@ -419,6 +425,27 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		return c.json(alerts);
 	});
 
+	/**
+	 * Crée une info trafic à la main, en brouillon, d'après tout ce qui s'en saisit : c'est son premier
+	 * enregistrement. Rien n'existe avant — un formulaire abandonné ne laisse rien derrière lui.
+	 */
+	admin.post("/api/alerts", async (c) => {
+		const payload = await readObject(c);
+		if ("message" in payload) return c.json({ code: 400, message: payload.message }, 400);
+
+		// Aucun numéro encore : rien de reçu ne s'y rattache, et l'impact saisi est tout l'impact.
+		const parsed = parseAlertInput(payload, "", deps);
+		if ("message" in parsed) return c.json({ code: 400, message: parsed.message }, 400);
+		if (parsed.input.overrides.headerText === null) return c.json({ code: 400, message: "Titre attendu." }, 400);
+
+		const alertNumber = deps.store.createCustomAlert(parsed.input, nowSeconds());
+		refresh();
+
+		const created = deps.modificationIndex.alerts.get(alertNumber);
+		if (created === undefined) return c.json({ code: 500, message: "Info trafic introuvable après création." }, 500);
+		return c.json(summarizeAlert(created, deps, Temporal.Now.instant()), 201);
+	});
+
 	admin.get("/api/alerts/:alertNumber", (c) => {
 		const alert = resolveAlert(c);
 		if (alert === undefined) return c.json({ code: 404, message: "Info trafic inconnue." }, 404);
@@ -439,6 +466,18 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 
 		const parsed = parseAlertInput(payload, alert.alertNumber, deps);
 		if ("message" in parsed) return c.json({ code: 400, message: parsed.message }, 400);
+		if (alert.custom) {
+			// Elle n'a d'autres périodes que les siennes : il n'y a pas d'analyse où revenir.
+			parsed.input.periods ??= [];
+			const problem = unpublishable(parsed.input.overrides, parsed.input.impact?.entities ?? []);
+			if (problem === "title") return c.json({ code: 400, message: "Titre attendu." }, 400);
+			if (problem === "impact" && !alert.hidden) {
+				return c.json(
+					{ code: 400, message: "Publiée, l'alerte doit toucher au moins une entité : la dépublier d'abord." },
+					400,
+				);
+			}
+		}
 
 		if (!deps.store.saveAlert(alert.alertNumber, parsed.input, nowSeconds())) {
 			return c.json({ code: 404, message: `Info trafic ${alert.alertNumber} jamais relevée.` }, 404);
@@ -471,7 +510,10 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		return c.json({ code: 200, message: payload.checked ? "Alerte traitée." : "Alerte à traiter." });
 	});
 
-	/** Masque une info trafic — plus aucun effet, plus republiée —, ou la rend visible. */
+	/**
+	 * Dépublie une info trafic — plus aucun effet, plus republiée —, ou la publie. Une info trafic créée à
+	 * la main ne se publie qu'avec un titre et au moins une entité touchée, que GTFS-RT exige.
+	 */
 	admin.put("/api/alerts/:alertNumber/hidden", async (c) => {
 		const alert = resolveAlert(c);
 		if (alert === undefined) return c.json({ code: 404, message: "Info trafic inconnue." }, 404);
@@ -480,22 +522,34 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		if ("message" in payload) return c.json({ code: 400, message: payload.message }, 400);
 		if (typeof payload.hidden !== "boolean") return c.json({ code: 400, message: "Booléen « hidden » attendu." }, 400);
 
-		deps.store.setAlertHidden(alert.alertNumber, payload.hidden);
+		if (alert.custom && !payload.hidden) {
+			const settings = deps.store.alertSettings(alert.alertNumber);
+			const problem = unpublishable(settings.overrides, settings.impact?.entities ?? []);
+			if (problem !== null) {
+				const message =
+					problem === "title"
+						? "Sans titre, l'alerte ne peut pas être publiée."
+						: "Sans entité touchée dans l'impact, l'alerte ne peut pas être publiée.";
+				return c.json({ code: 409, message }, 409);
+			}
+		}
+
+		deps.store.setAlertHidden(alert.alertNumber, payload.hidden, nowSeconds());
 		refresh();
-		return c.json({ code: 200, message: payload.hidden ? "Info trafic masquée." : "Info trafic visible." });
+		return c.json({ code: 200, message: payload.hidden ? "Info trafic dépubliée." : "Info trafic publiée." });
 	});
 
 	/**
-	 * Efface une info trafic sortie du flux, et ce qui s'en était réglé ; ses modifications restent,
-	 * détachées. Une info trafic encore au flux ne s'efface pas : relevée de nouveau dans la minute, elle
-	 * reviendrait comme neuve, ses réglages perdus — elle se masque.
+	 * Efface une info trafic sortie du flux ou créée à la main, et ce qui s'en était réglé ; ses
+	 * modifications restent, détachées. Une info trafic encore au flux ne s'efface pas : relevée de
+	 * nouveau dans la minute, elle reviendrait comme neuve, ses réglages perdus — elle se dépublie.
 	 */
 	admin.delete("/api/alerts/:alertNumber", (c) => {
 		const alert = resolveAlert(c);
 		if (alert === undefined) return c.json({ code: 404, message: "Info trafic inconnue." }, 404);
 		if (alert.inFeed) {
 			return c.json(
-				{ code: 409, message: "Encore au flux, elle reviendrait au prochain relevé : la masquer plutôt." },
+				{ code: 409, message: "Encore au flux, elle reviendrait au prochain relevé : la dépublier plutôt." },
 				409,
 			);
 		}
@@ -894,22 +948,30 @@ function lastEnd(periods: readonly AlertPeriod[]): string | undefined {
 		.at(-1);
 }
 
-/** Si une info trafic se republie : masquée ou sortie du flux, elle ne l'est pas (cf. `republished`). */
 /**
  * Les périodes que l'alerte republie, calculées comme pour le flux (cf. `publishedPeriods`) : de quoi
- * voir d'où viennent ses bornes quand l'analyse n'en lit aucune.
+ * voir d'où viennent ses bornes quand l'analyse n'en lit aucune. Pour une info trafic créée à la main,
+ * rien n'est reçu, et rien ne se communique tant qu'elle n'est pas publiée (cf. `customPublishedPeriods`).
  */
 function feedPeriodsOf(
 	alert: ResolvedAlert,
 	received: GtfsRealtime.transit_realtime.IAlert | undefined,
 	now: Temporal.Instant,
 ): AlertDto["feedPeriods"] {
-	if (!alert.inFeed || received === undefined) return null;
 	const ranges = (list: GtfsRealtime.transit_realtime.ITimeRange[]) =>
 		list.map((range) => ({
 			start: range.start ? Number(range.start) : null,
 			end: range.end ? Number(range.end) : null,
 		}));
+	if (alert.custom) {
+		const published = customPublishedPeriods(alert.periods, alert.publishedAt ?? 0, now);
+		return {
+			received: [],
+			communication: alert.publishedAt === null ? [] : ranges(published.communicationPeriod),
+			impact: ranges(published.impactPeriod),
+		};
+	}
+	if (!alert.inFeed || received === undefined) return null;
 	const communication = received.communicationPeriod ?? [];
 	const published = publishedPeriods(alert.periods, communication, now);
 	return {
@@ -919,7 +981,9 @@ function feedPeriodsOf(
 	};
 }
 
+/** Si une info trafic se republie : dépubliée ou sortie du flux, elle ne l'est pas (cf. `republished`). */
 function alertPublicationOf(alert: ResolvedAlert): AlertPublication {
+	if (alert.custom) return alert.hidden ? "draft" : "published";
 	if (alert.hidden) return "hidden";
 	if (!alert.inFeed) return "withdrawn";
 	return "published";
@@ -965,8 +1029,10 @@ function publicationOf(
 			return { state: "off", detail: "brouillon · tracé à dessiner" };
 		}
 		if (modification.alerts.length === 0) return { state: "off", detail: "aucune alerte, inactive" };
-		if (modification.alerts.every((alert) => !alert.inFeed)) return { state: "off", detail: "alerte retirée du flux" };
-		return { state: "off", detail: "alerte masquée" };
+		if (modification.alerts.every((alert) => !alert.inFeed && !alert.custom)) {
+			return { state: "off", detail: "alerte retirée du flux" };
+		}
+		return { state: "off", detail: "alerte non publiée" };
 	}
 
 	if (modification.active) {
@@ -1117,18 +1183,38 @@ function htmlToText(html: string): string {
 function summarizeAlert(alert: ResolvedAlert, deps: AdminDependencies, now: Temporal.Instant): AlertDto {
 	const gtfs = deps.gtfs.data;
 	const received = deps.receivedAlert(alert.alertNumber);
-	const receivedText = {
-		headerText: alert.headerText,
-		descriptionText: htmlToText(alert.descriptionText),
-		cause: enumName(Alert.Cause, received?.cause),
-		effect: enumName(Alert.Effect, received?.effect),
-	};
+	// Créée à la main, elle n'a rien reçu : tout ce qu'elle publie est saisi, et se range en réécriture.
+	const receivedText = alert.custom
+		? {
+				headerText: "",
+				descriptionText: "",
+				cause: null,
+				effect: null,
+				url: null,
+				imageUrl: null,
+				imageAlternativeText: null,
+			}
+		: {
+				headerText: alert.headerText,
+				descriptionText: htmlToText(alert.descriptionText),
+				cause: enumName(Alert.Cause, received?.cause),
+				effect: enumName(Alert.Effect, received?.effect),
+				url: received?.url?.translation?.[0]?.text || null,
+				imageUrl: received?.image?.localizedImage?.[0]?.url || null,
+				imageAlternativeText: received?.imageAlternativeText?.translation?.[0]?.text || null,
+			};
 	const { overrides } = alert;
+	// `""` retire ce que porte le flux.
+	const removable = (override: string | null, fallback: string | null) =>
+		override === null ? fallback : override === "" ? null : override;
 	const published = {
 		headerText: overrides.headerText ?? receivedText.headerText,
 		descriptionText: overrides.descriptionText ?? receivedText.descriptionText,
 		cause: overrides.cause ?? receivedText.cause,
 		effect: overrides.effect ?? receivedText.effect,
+		url: removable(overrides.url, receivedText.url),
+		imageUrl: removable(overrides.imageUrl, receivedText.imageUrl),
+		imageAlternativeText: removable(overrides.imageAlternativeText, receivedText.imageAlternativeText),
 	};
 
 	const associated = alert.modificationUids.flatMap((uid) => {
@@ -1174,9 +1260,20 @@ function summarizeAlert(alert: ResolvedAlert, deps: AdminDependencies, now: Temp
 	);
 
 	const { phase, detail } = alertPhaseOf(alert, now);
+	const impact = (() => {
+		const received = receivedImpact(alert.alertNumber, deps);
+		const rewritten = deps.store.alertSettings(alert.alertNumber).impact;
+		return { received, published: rewritten?.entities ?? received, overridden: rewritten !== null };
+	})();
+	const warnings = alertWarnings(published, stopGroups, tripSets, associated.length);
+	if (alert.custom && impact.published.length === 0) {
+		warnings.unshift("Aucune entité touchée dans l'impact : l'alerte ne peut pas être publiée.");
+	}
 	return {
 		alertNumber: alert.alertNumber,
 		inFeed: alert.inFeed,
+		custom: alert.custom,
+		publishedAt: alert.publishedAt,
 		hidden: alert.hidden,
 		active: alert.active,
 		publication: alertPublicationOf(alert),
@@ -1184,12 +1281,13 @@ function summarizeAlert(alert: ResolvedAlert, deps: AdminDependencies, now: Temp
 		phaseDetail: detail,
 		// Nettoyé plutôt qu'échappé : le flux amont reprend ce que le CMS de l'exploitant a saisi,
 		// listes et plans de déviation compris (cf. `sanitizeHtml`).
-		received: { ...receivedText, descriptionHtml: sanitizeHtml(alert.descriptionText) },
+		received: { ...receivedText, descriptionHtml: alert.custom ? "" : sanitizeHtml(alert.descriptionText) },
 		published,
 		overrides,
 		periods: alert.periods,
 		analysisPeriods: alert.analysisPeriods,
-		periodsOverridden: alert.periodsOverridden,
+		// Créée à la main, elle n'a d'autres périodes que les siennes.
+		periodsOverridden: alert.custom || alert.periodsOverridden,
 		feedPeriods: feedPeriodsOf(alert, received, now),
 		lines: [...new Set(alert.routeIds)]
 			.sort((a, b) => compareLines(gtfs, a, b))
@@ -1203,14 +1301,10 @@ function summarizeAlert(alert: ResolvedAlert, deps: AdminDependencies, now: Temp
 				return periods === undefined ? [] : [[modification.uid, periods]];
 			}),
 		),
-		warnings: alertWarnings(published, stopGroups, tripSets, associated.length),
+		warnings,
 		firstSeenAt: alert.firstSeenAt,
 		checkedAt: deps.store.alertSettings(alert.alertNumber).checked?.at ?? null,
-		impact: (() => {
-			const received = receivedImpact(alert.alertNumber, deps);
-			const rewritten = deps.store.alertSettings(alert.alertNumber).impact;
-			return { received, published: rewritten?.entities ?? received, overridden: rewritten !== null };
-		})(),
+		impact,
 	};
 }
 
@@ -1821,6 +1915,28 @@ function readOverride(raw: unknown, label: string, maxLength?: number): { value:
 	return { value: value.length === 0 ? null : value };
 }
 
+/**
+ * Ce qui empêche une info trafic créée à la main d'être publiée : un titre manquant, ou un impact vide —
+ * GTFS-RT veut au moins une entité touchée. `null` : rien.
+ */
+function unpublishable(overrides: AlertOverrides, impact: readonly ImpactEntity[]): "title" | "impact" | null {
+	if (overrides.headerText === null) return "title";
+	if (impact.length === 0) return "impact";
+	return null;
+}
+
+/**
+ * Un champ qui se réécrit ou se retire : `null` (ou absent) garde celui du flux, `""` n'en garde aucun,
+ * un texte le remplace.
+ */
+function readRemovable(raw: unknown, label: string, maxLength: number): { value: string | null } | { message: string } {
+	if (raw === undefined || raw === null) return { value: null };
+	if (typeof raw !== "string") return { message: `${label} attendu : un texte, ou null.` };
+	const value = raw.trim();
+	if (value.length > maxLength) return { message: `${label} trop long : ${maxLength} caractères au plus.` };
+	return { value };
+}
+
 /** Une ligne et un sens du GTFS, ou une erreur. */
 function readRouteDirection(
 	entry: Record<string, unknown>,
@@ -1921,11 +2037,30 @@ function parseAlertInput(
 	if (effect.value !== null && !isEnumName(Alert.Effect, effect.value)) {
 		return { message: `Effet « ${effect.value} » inconnu.` };
 	}
+	const url = readRemovable(rawOverrides.url, "Lien", LINK_MAX_LENGTH);
+	if ("message" in url) return url;
+	if (url.value && !/^https?:\/\/[^\s]+$/i.test(url.value)) {
+		return { message: "Lien attendu : une adresse en https:// ou http://." };
+	}
+	const imageUrl = readRemovable(rawOverrides.imageUrl, "Image", LINK_MAX_LENGTH);
+	if ("message" in imageUrl) return imageUrl;
+	if (imageUrl.value) {
+		// Comme pour les images du flux (cf. `sanitizeHtml`) : https:// seulement.
+		if (!/^https:\/\/[^\s]+$/i.test(imageUrl.value)) return { message: "Image attendue : une adresse en https://." };
+		if (imageMediaType(imageUrl.value) === undefined) {
+			return { message: "Image : l'adresse doit finir par .png, .jpg, .jpeg, .gif ou .webp." };
+		}
+	}
+	const imageAlternativeText = readRemovable(rawOverrides.imageAlternativeText, "Texte alternatif", HEADER_MAX_LENGTH);
+	if ("message" in imageAlternativeText) return imageAlternativeText;
 	const overrides: AlertOverrides = {
 		headerText: headerText.value,
 		descriptionText: descriptionText.value,
 		cause: cause.value,
 		effect: effect.value,
+		url: url.value,
+		imageUrl: imageUrl.value,
+		imageAlternativeText: imageAlternativeText.value,
 	};
 
 	let periods: SavedPeriod[] | null = null;

@@ -724,6 +724,26 @@ export function publishedPeriods(
 }
 
 /**
+ * Les périodes d'une info trafic créée à la main, telles qu'elles se publient. Elle s'affiche tant
+ * qu'elle est publiée : la communication — et la période active, qui la suit (cf. `publishedPeriods`) —
+ * part de sa publication, sans fin. Ses périodes saisies ne disent que l'impact, rogné sur rien : la
+ * perturbation peut avoir commencé avant qu'on ne la publie. Sans période saisie, le champ est absent —
+ * elle a cours tout le temps qu'elle s'affiche.
+ */
+export function customPublishedPeriods(
+	periods: AlertPeriod[],
+	publishedAt: number,
+	now: Temporal.Instant,
+): {
+	activePeriod: GtfsRealtime.transit_realtime.ITimeRange[];
+	communicationPeriod: GtfsRealtime.transit_realtime.ITimeRange[];
+	impactPeriod: GtfsRealtime.transit_realtime.ITimeRange[];
+} {
+	const communicationPeriod = [{ start: publishedAt }];
+	return { activePeriod: communicationPeriod, communicationPeriod, impactPeriod: impactPeriods(periods, [], now) };
+}
+
+/**
  * La période de communication d'une alerte telle qu'elle se republie. Celle du flux amont est une
  * fenêtre de publication — souvent jusqu'à la fin de l'année —, et non la durée de la perturbation :
  * quand les périodes lues disent quand celle-ci finit, la communication s'arrête là ; quand elles la
@@ -1540,6 +1560,15 @@ const IMAGE_MEDIA_TYPES = new Map([
 ]);
 
 /**
+ * Le type de média d'une image d'après l'extension de son adresse (`media_type` de `LocalizedImage`),
+ * ou `undefined` pour une extension inconnue.
+ */
+export function imageMediaType(url: string): string | undefined {
+	const extension = url.match(/\.([a-zA-Z0-9]+)(?:[?#]|$)/)?.[1]?.toLowerCase();
+	return extension === undefined ? undefined : IMAGE_MEDIA_TYPES.get(extension);
+}
+
+/**
  * L'alerte, ses arrêts fusionnés ou éclatés remplacés par ceux que le GTFS connaît encore (cf.
  * `canonicalStopIds`). Un arrêt éclaté l'est en tous ses quais, sans égard à la ligne ni au sens :
  * l'info trafic parle de l'arrêt, pas d'un quai qu'une ligne y dessert.
@@ -1591,8 +1620,7 @@ function plainAlert(alert: GtfsRealtime.transit_realtime.IAlert): GtfsRealtime.t
 
 	const localizedImage = (alert.descriptionText?.translation ?? []).flatMap((translation) => {
 		const url = firstImage(translation.text ?? "");
-		const extension = url?.match(/\.([a-zA-Z0-9]+)(?:[?#]|$)/)?.[1]?.toLowerCase();
-		const mediaType = extension !== undefined ? IMAGE_MEDIA_TYPES.get(extension) : undefined;
+		const mediaType = url === undefined ? undefined : imageMediaType(url);
 		if (url === undefined || mediaType === undefined) return [];
 		return [{ url, mediaType, ...(translation.language ? { language: translation.language } : {}) }];
 	});

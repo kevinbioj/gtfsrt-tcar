@@ -4,11 +4,11 @@ import { cn } from "cn";
 import {
 	CircleCheckIcon,
 	ClockIcon,
-	EyeIcon,
-	EyeOffIcon,
 	PlusIcon,
+	SendIcon,
 	Trash2Icon,
 	TriangleAlertIcon,
+	UndoIcon,
 	XIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -46,6 +46,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { describePeriods, describeRanges, formatInstant, modificationId, plural } from "@/lib/format";
 import { CAUSES, EFFECTS } from "@/lib/labels";
 import {
+	useCreateAlert,
 	useCreateModification,
 	useDeleteAlert,
 	useRoutes,
@@ -60,11 +61,13 @@ import {
 	formOf,
 	inputOf,
 	isRemoved,
+	isUnsaved,
 	scopeOf,
 	suggestionsOf,
 	toggleStop,
 } from "./alert-form";
 import { ImpactEditor } from "./impact-editor";
+import { LinkEditor } from "./link-editor";
 import { ModificationPicker } from "./modification-picker";
 import { OwnPeriods } from "./own-periods";
 
@@ -74,14 +77,24 @@ type Creation = { routeId: string; directionId: number } | "blank";
 /**
  * Le détail d'une alerte : son texte, sa cause et son effet republiés, ses périodes, ce qu'elle
  * supprime — arrêts et courses — et les modifications qu'elle active. Tout se saisit dans un même
- * formulaire, enregistré d'un bloc ; le masquage, lui, vaut tout de suite. Une modification ne se
+ * formulaire, enregistré d'un bloc ; la publication, elle, vaut tout de suite. Une modification ne se
  * crée que depuis une alerte enregistrée : elle s'y associe côté serveur.
+ *
+ * Une alerte créée à la main n'a rien de reçu : ni texte, ni analyse, ni impact à reprendre. Tout en
+ * est saisi — son titre, directement en tête —, et elle se supprime à tout moment. Celle qu'ouvre
+ * « Nouvelle alerte » n'existe pas encore (cf. `blankAlert`) : son premier enregistrement la crée, et la
+ * quitter avant l'abandonne, sans rien demander.
  */
 export function AlertDetail({ alert, modifications }: { alert: AlertDto; modifications: ModificationSummaryDto[] }) {
 	const [form, setForm] = useState<AlertForm>(() => formOf(alert));
 	const search = useSearch({ from: "/alerts" });
-	const showAll = search.all === true;
-	const save = useSaveAlert(alert.alertNumber);
+	const { custom } = alert;
+	// Rien n'est analysé d'une alerte créée à la main : toutes les lignes de son impact se montrent.
+	const showAll = custom || search.all === true;
+	const unsaved = isUnsaved(alert);
+	const update = useSaveAlert(alert.alertNumber);
+	const createAlert = useCreateAlert();
+	const save = unsaved ? createAlert : update;
 	const setHidden = useSetAlertHidden(alert.alertNumber);
 	const setChecked = useSetAlertChecked(alert.alertNumber);
 	const remove = useDeleteAlert(alert.alertNumber);
@@ -105,16 +118,18 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 	}, [baseline, current, alert]);
 	// Une alerte qu'on modifie devient celle de l'URL : changer de filtre ne la quitte plus. Seul ce
 	// qui en ouvre une autre, ou quitte la page, demande alors confirmation.
+	// Celle qu'on crée n'a pas encore de numéro où se fixer, et s'abandonne sans rien demander.
 	useEffect(() => {
-		if (dirty && search.alert !== alert.alertNumber)
+		if (!unsaved && dirty && search.alert !== alert.alertNumber)
 			navigate({ to: "/alerts", search: (current) => ({ ...current, alert: alert.alertNumber }), replace: true });
-	}, [dirty, search.alert, alert.alertNumber, navigate]);
+	}, [unsaved, dirty, search.alert, alert.alertNumber, navigate]);
 	useBlocker({
 		shouldBlockFn: ({ next }) =>
+			!unsaved &&
 			dirty &&
 			!(next.routeId === "/alerts" && next.search.alert === alert.alertNumber) &&
 			!window.confirm("Des changements de cette alerte ne sont pas enregistrés. Les abandonner ?"),
-		enableBeforeUnload: () => dirty,
+		enableBeforeUnload: () => !unsaved && dirty,
 	});
 
 	const patch = (change: Partial<AlertForm>) => setForm((current) => ({ ...current, ...change }));
@@ -131,42 +146,59 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 	const byUid = new Map(modifications.map((entry) => [entry.uid, entry]));
 	const lineIds = new Set(alert.lines.map((line) => line.routeId));
 	const rewritten =
-		form.headerText.trim() !== alert.received.headerText.trim() ||
-		form.descriptionText.trim() !== alert.received.descriptionText.trim();
+		!custom &&
+		(form.headerText.trim() !== alert.received.headerText.trim() ||
+			form.descriptionText.trim() !== alert.received.descriptionText.trim());
+	const published = !alert.hidden;
 
-	const submit = (then?: () => void) =>
+	// Le premier enregistrement d'une alerte à créer la crée, et l'ouvre sous son numéro — sauf à
+	// enchaîner sur autre chose (`then`), qui part ailleurs : ouvrir l'alerte démonterait ce formulaire,
+	// et la suite avec lui.
+	const submit = (then?: (saved: AlertDto) => void) =>
 		save.mutate(inputOf(form, alert), {
 			onSuccess: (saved) => {
 				setForm(formOf(saved));
-				toast.success(`Alerte ${alert.alertNumber} enregistrée.`);
-				then?.();
+				if (unsaved) {
+					toast.success(`Alerte ${saved.alertNumber} créée, en brouillon.`);
+					if (then === undefined)
+						navigate({
+							to: "/alerts",
+							search: (current) => ({ ...current, alert: saved.alertNumber, new: undefined }),
+							replace: true,
+							ignoreBlocker: true,
+						});
+				} else toast.success(`Alerte ${saved.alertNumber} enregistrée.`);
+				then?.(saved);
 			},
 		});
+	const savable = unsaved ? form.headerText.trim().length > 0 : dirty;
 
 	// Les suggestions suivent l'impact tel qu'il est saisi, enregistré ou non.
 	const suggestions = suggestionsOf(form.impact ?? alert.impact.received, routes.data ?? []);
 
 	// Crée la modification d'un sens, tous tracés cochés, ou ouvre la page blanche. Juste après
 	// l'enregistrement, l'alerte ne s'est pas encore relue : le garde-fou croirait la saisie perdue.
-	const startCreation = (creation: Creation) => {
+	const startCreation = (creation: Creation, alertNumber = alert.alertNumber) => {
 		if (creation === "blank") {
-			navigate({ to: "/modifications/new", search: { alert: alert.alertNumber }, ignoreBlocker: true });
+			navigate({ to: "/modifications/new", search: { alert: alertNumber }, ignoreBlocker: true });
 			return;
 		}
 		create.mutate(
-			{ ...creation, description: null, patternIds: [], alertNumbers: [alert.alertNumber] },
+			{ ...creation, description: null, patternIds: [], alertNumbers: [alertNumber] },
 			{
 				onSuccess: ({ uid }) =>
 					navigate({
 						to: "/modifications/$uid",
 						params: { uid: String(uid) },
-						search: { alert: alert.alertNumber },
+						search: { alert: alertNumber },
 						ignoreBlocker: true,
 					}),
 			},
 		);
 	};
-	const requestCreation = (creation: Creation) => (dirty ? setConfirming(creation) : startCreation(creation));
+	// Une alerte à créer s'enregistre d'abord : une modification s'associe à une alerte qui existe.
+	const mustSaveFirst = unsaved || dirty;
+	const requestCreation = (creation: Creation) => (mustSaveFirst ? setConfirming(creation) : startCreation(creation));
 
 	// Les sens qui disent quelque chose d'abord ; les autres se déplient à la demande.
 	const relevant = (group: StopGroupDto) =>
@@ -182,36 +214,51 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 			<div className="flex flex-col gap-4 rounded-lg border bg-card px-5 py-4">
 				<div className="flex flex-wrap items-center gap-2.5">
 					<span className="font-mono text-xs text-muted-foreground">
-						N° {alert.alertNumber} · reçue le {formatInstant(alert.firstSeenAt)}
+						{unsaved
+							? "Nouvelle alerte · non enregistrée"
+							: `N° ${alert.alertNumber} · ${custom ? "créée" : "reçue"} le ${formatInstant(alert.firstSeenAt)}${
+									custom && alert.publishedAt !== null ? ` · publiée le ${formatInstant(alert.publishedAt)}` : ""
+								}`}
 					</span>
-					<StatusPill tone={phase.tone}>{phase.label}</StatusPill>
+					{unsaved ? null : <StatusPill tone={phase.tone}>{phase.label}</StatusPill>}
 					<StatusPill tone={publication.tone}>{publication.label}</StatusPill>
-					{dirty ? <Badge variant="outline">Modifications non enregistrées</Badge> : null}
+					{custom ? <StatusPill tone="neutral">Personnalisée</StatusPill> : null}
+					{dirty && !unsaved ? <Badge variant="outline">Modifications non enregistrées</Badge> : null}
 					<span className="flex-1" />
-					<Button
-						variant="outline"
-						size="lg"
-						aria-pressed={alert.checkedAt !== null}
-						className={cn(alert.checkedAt !== null && "border-success text-success hover:text-success")}
-						disabled={setChecked.isPending}
-						onClick={() => setChecked.mutate(alert.checkedAt === null)}
-					>
-						<CircleCheckIcon data-icon="inline-start" />
-						{alert.checkedAt === null ? "Marquer traitée" : `Traitée le ${formatInstant(alert.checkedAt)}`}
-					</Button>
-					<Button
-						variant="outline"
-						size="lg"
-						aria-pressed={alert.hidden}
-						className={cn(
-							alert.hidden && "border-inverse bg-inverse text-inverse-foreground hover:bg-strong hover:text-white",
-						)}
-						disabled={setHidden.isPending || !alert.inFeed}
-						onClick={() => setHidden.mutate(!alert.hidden)}
-					>
-						{alert.hidden ? <EyeIcon data-icon="inline-start" /> : <EyeOffIcon data-icon="inline-start" />}
-						{alert.hidden ? "Afficher" : "Masquer"}
-					</Button>
+					{custom ? null : (
+						<Button
+							variant="outline"
+							size="lg"
+							aria-pressed={alert.checkedAt !== null}
+							className={cn(alert.checkedAt !== null && "border-success text-success hover:text-success")}
+							disabled={setChecked.isPending}
+							onClick={() => setChecked.mutate(alert.checkedAt === null)}
+						>
+							<CircleCheckIcon data-icon="inline-start" />
+							{alert.checkedAt === null ? "Marquer traitée" : `Traitée le ${formatInstant(alert.checkedAt)}`}
+						</Button>
+					)}
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<span className="inline-flex">
+								<Button
+									variant="outline"
+									size="lg"
+									aria-pressed={published}
+									disabled={setHidden.isPending || unsaved || (!alert.inFeed && !custom) || (!published && dirty)}
+									onClick={() => setHidden.mutate(published)}
+								>
+									{published ? <UndoIcon data-icon="inline-start" /> : <SendIcon data-icon="inline-start" />}
+									{published ? "Dépublier" : "Publier"}
+								</Button>
+							</span>
+						</TooltipTrigger>
+						{unsaved ? (
+							<TooltipContent>Enregistrer d'abord l'alerte.</TooltipContent>
+						) : !published && dirty ? (
+							<TooltipContent>Enregistrer d'abord les modifications.</TooltipContent>
+						) : null}
+					</Tooltip>
 					{alert.inFeed ? (
 						// Un bouton désactivé ne reçoit pas le survol : c'est son enveloppe qui porte l'infobulle.
 						<Tooltip>
@@ -222,9 +269,11 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 									</Button>
 								</span>
 							</TooltipTrigger>
-							<TooltipContent>Encore au flux, elle reviendrait au prochain relevé : la masquer plutôt.</TooltipContent>
+							<TooltipContent>
+								Encore au flux, elle reviendrait au prochain relevé : la dépublier plutôt.
+							</TooltipContent>
 						</Tooltip>
-					) : (
+					) : unsaved ? null : (
 						<Button
 							variant="outline"
 							size="lg"
@@ -236,14 +285,45 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 							<Trash2Icon />
 						</Button>
 					)}
-					<Button variant="outline" size="lg" disabled={!dirty} onClick={() => setForm(formOf(alert))}>
-						Annuler
-					</Button>
-					<Button size="lg" disabled={!dirty || save.isPending} onClick={() => submit()}>
-						Enregistrer
+					{unsaved ? (
+						<Button
+							variant="outline"
+							size="lg"
+							onClick={() => navigate({ to: "/alerts", search: (current) => ({ ...current, new: undefined }) })}
+						>
+							Abandonner
+						</Button>
+					) : (
+						<Button variant="outline" size="lg" disabled={!dirty} onClick={() => setForm(formOf(alert))}>
+							Annuler
+						</Button>
+					)}
+					<Button size="lg" disabled={!savable || save.isPending} onClick={() => submit()}>
+						{unsaved ? "Créer" : "Enregistrer"}
 					</Button>
 				</div>
-				<h2 className="m-0 text-[22px] font-semibold tracking-tight">{form.headerText || alert.received.headerText}</h2>
+				{custom ? (
+					// Créée à la main, son titre se saisit en tête : c'est lui qui la nomme.
+					<Field className="gap-1">
+						<FieldLabel htmlFor="alert-header" className="text-xs text-muted-foreground">
+							Titre <SpecName>header_text</SpecName>
+						</FieldLabel>
+						<Input
+							id="alert-header"
+							autoFocus={unsaved}
+							maxLength={300}
+							placeholder="Titre de l'alerte"
+							aria-invalid={form.headerText.trim().length === 0 || undefined}
+							className="h-12 text-[22px]! font-semibold tracking-tight"
+							value={form.headerText}
+							onChange={(event) => patch({ headerText: event.target.value })}
+						/>
+					</Field>
+				) : (
+					<h2 className="m-0 text-[22px] font-semibold tracking-tight">
+						{form.headerText || alert.received.headerText || "Sans titre"}
+					</h2>
+				)}
 				<div className="grid grid-cols-[repeat(auto-fit,minmax(min(240px,100%),1fr))] gap-x-4 gap-y-3">
 					<Field className="gap-1.5">
 						<FieldLabel htmlFor="alert-cause">
@@ -316,57 +396,63 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 			<SectionCard
 				title="Texte de l'alerte"
 				actions={
-					<>
-						<span
-							className={cn(
-								"rounded-sm px-2 py-0.5 text-xs font-medium",
-								rewritten ? "bg-warning text-warning-foreground" : "bg-neutral text-neutral-foreground",
-							)}
-						>
-							{rewritten ? "Réécrit" : "Texte reçu"}
-						</span>
-						<Button
-							variant="outline"
-							disabled={!rewritten}
-							onClick={() =>
-								patch({ headerText: alert.received.headerText, descriptionText: alert.received.descriptionText })
-							}
-						>
-							Reprendre le texte reçu
-						</Button>
-					</>
+					custom ? undefined : (
+						<>
+							<span
+								className={cn(
+									"rounded-sm px-2 py-0.5 text-xs font-medium",
+									rewritten ? "bg-warning text-warning-foreground" : "bg-neutral text-neutral-foreground",
+								)}
+							>
+								{rewritten ? "Réécrit" : "Texte reçu"}
+							</span>
+							<Button
+								variant="outline"
+								disabled={!rewritten}
+								onClick={() =>
+									patch({ headerText: alert.received.headerText, descriptionText: alert.received.descriptionText })
+								}
+							>
+								Reprendre le texte reçu
+							</Button>
+						</>
+					)
 				}
 			>
 				<div className="grid grid-cols-[repeat(auto-fit,minmax(min(300px,100%),1fr))] gap-4">
-					<div className="flex flex-col gap-2.5">
-						<div className="flex flex-col gap-1.5">
-							<span className="text-[13px] font-medium text-strong">Titre reçu</span>
-							<p className="m-0 flex min-h-10 items-center rounded-md border border-[#E2E5E1] bg-muted px-3.5 py-2 text-[13px] text-strong">
-								{alert.received.headerText}
-							</p>
+					{custom ? null : (
+						<div className="flex flex-col gap-2.5">
+							<div className="flex flex-col gap-1.5">
+								<span className="text-[13px] font-medium text-strong">Titre reçu</span>
+								<p className="m-0 flex min-h-10 items-center rounded-md border border-[#E2E5E1] bg-muted px-3.5 py-2 text-[13px] text-strong">
+									{alert.received.headerText}
+								</p>
+							</div>
+							<div className="flex flex-1 flex-col gap-1.5">
+								<span className="text-[13px] font-medium text-strong">Description reçue</span>
+								<div
+									className="flex-1 rounded-md border border-[#E2E5E1] bg-muted px-3.5 py-3 text-[13px] leading-relaxed text-strong [&_a]:underline [&_img]:max-w-full [&_li]:ml-4 [&_li]:list-disc [&_p]:my-1"
+									// Nettoyé côté serveur (cf. `sanitizeHtml`) : listes, liens et plans, rien qui s'exécute.
+									// biome-ignore lint/security/noDangerouslySetInnerHtml: le HTML est nettoyé par le serveur.
+									dangerouslySetInnerHTML={{ __html: alert.received.descriptionHtml }}
+								/>
+							</div>
 						</div>
-						<div className="flex flex-1 flex-col gap-1.5">
-							<span className="text-[13px] font-medium text-strong">Description reçue</span>
-							<div
-								className="flex-1 rounded-md border border-[#E2E5E1] bg-muted px-3.5 py-3 text-[13px] leading-relaxed text-strong [&_a]:underline [&_img]:max-w-full [&_li]:ml-4 [&_li]:list-disc [&_p]:my-1"
-								// Nettoyé côté serveur (cf. `sanitizeHtml`) : listes, liens et plans, rien qui s'exécute.
-								// biome-ignore lint/security/noDangerouslySetInnerHtml: le HTML est nettoyé par le serveur.
-								dangerouslySetInnerHTML={{ __html: alert.received.descriptionHtml }}
-							/>
-						</div>
-					</div>
+					)}
 					<div className="flex flex-col gap-2.5">
-						<Field className="gap-1.5">
-							<FieldLabel htmlFor="alert-header">
-								Titre publié <SpecName>header_text</SpecName>
-							</FieldLabel>
-							<Input
-								id="alert-header"
-								className="h-10"
-								value={form.headerText}
-								onChange={(event) => patch({ headerText: event.target.value })}
-							/>
-						</Field>
+						{custom ? null : (
+							<Field className="gap-1.5">
+								<FieldLabel htmlFor="alert-header">
+									Titre publié <SpecName>header_text</SpecName>
+								</FieldLabel>
+								<Input
+									id="alert-header"
+									className="h-10"
+									value={form.headerText}
+									onChange={(event) => patch({ headerText: event.target.value })}
+								/>
+							</Field>
+						)}
 						<Field className="gap-1.5">
 							<FieldLabel htmlFor="alert-description">
 								Description publiée <SpecName>description_text</SpecName>
@@ -382,25 +468,29 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 				</div>
 			</SectionCard>
 
+			<LinkEditor value={form} received={alert.received} custom={custom} onChange={patch} />
+
 			<SectionCard
 				title="Périodes d'application"
 				hint={<SpecName>active_period</SpecName>}
 				actions={
-					<>
-						<span
-							className={cn(
-								"rounded-sm px-2 py-0.5 text-xs font-medium",
-								form.periods === null ? "bg-neutral text-neutral-foreground" : "bg-warning text-warning-foreground",
-							)}
-						>
-							{form.periods === null ? "D'après l'analyse" : "Saisies"}
-						</span>
-						{form.periods !== null ? (
-							<Button variant="outline" onClick={() => patch({ periods: null })}>
-								Revenir à l'analyse
-							</Button>
-						) : null}
-					</>
+					custom ? undefined : (
+						<>
+							<span
+								className={cn(
+									"rounded-sm px-2 py-0.5 text-xs font-medium",
+									form.periods === null ? "bg-neutral text-neutral-foreground" : "bg-warning text-warning-foreground",
+								)}
+							>
+								{form.periods === null ? "D'après l'analyse" : "Saisies"}
+							</span>
+							{form.periods !== null ? (
+								<Button variant="outline" onClick={() => patch({ periods: null })}>
+									Revenir à l'analyse
+								</Button>
+							) : null}
+						</>
+					)
 				}
 			>
 				{form.periods === null ? (
@@ -415,20 +505,35 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 						</Button>
 					</div>
 				) : (
-					<PeriodEditor periods={form.periods} onChange={(periods) => patch({ periods })} />
+					<>
+						{custom && form.periods.length === 0 ? (
+							<p className="m-0 border-t border-divider pt-3.5 text-[13px] text-muted-foreground">
+								Aucune période : elle vaut tant qu'elle est publiée.
+							</p>
+						) : null}
+						<PeriodEditor periods={form.periods} onChange={(periods) => patch({ periods })} />
+					</>
 				)}
 				{alert.feedPeriods !== null ? (
 					<dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-t border-divider pt-3.5 text-[13px]">
+						{custom ? null : (
+							<>
+								<dt className="text-muted-foreground">
+									Reçue du flux amont <SpecName>active_period</SpecName>
+								</dt>
+								<dd className="m-0 text-strong">{describeRanges(alert.feedPeriods.received)}</dd>
+							</>
+						)}
 						<dt className="text-muted-foreground">
-							Reçue du flux amont <SpecName>active_period</SpecName>
+							Communication {custom ? "publiée" : "republiée"} <SpecName>communication_period</SpecName>
 						</dt>
-						<dd className="m-0 text-strong">{describeRanges(alert.feedPeriods.received)}</dd>
+						<dd className="m-0 text-strong">
+							{custom && alert.publishedAt === null
+								? "Dès sa publication, tant qu'elle reste publiée"
+								: describeRanges(alert.feedPeriods.communication)}
+						</dd>
 						<dt className="text-muted-foreground">
-							Communication republiée <SpecName>communication_period</SpecName>
-						</dt>
-						<dd className="m-0 text-strong">{describeRanges(alert.feedPeriods.communication)}</dd>
-						<dt className="text-muted-foreground">
-							Impact republié <SpecName>impact_period</SpecName>
+							Impact {custom ? "publié" : "republié"} <SpecName>impact_period</SpecName>
 						</dt>
 						<dd className="m-0 text-strong">{describeRanges(alert.feedPeriods.impact)}</dd>
 					</dl>
@@ -441,14 +546,17 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 						key={scopeOf(group)}
 						group={group}
 						form={form}
+						custom={custom}
 						onToggle={(stopId) => setForm((current) => toggleStop(current, group, stopId))}
 						onClear={(ignore) => setForm((current) => clearGroup(current, group, ignore))}
 					/>
 				))}
 				{alert.stopGroups.length === 0 ? (
-					<p className="m-0 border-t border-divider pt-3.5 text-[13px] text-muted-foreground">Aucune ligne citée.</p>
+					<p className="m-0 border-t border-divider pt-3.5 text-[13px] text-muted-foreground">
+						{custom ? "Aucune ligne dans l'impact enregistré." : "Aucune ligne citée."}
+					</p>
 				) : null}
-				{hiddenCount > 0 ? (
+				{hiddenCount > 0 && !custom ? (
 					<div className="border-t border-divider pt-3">
 						<Button
 							variant="link"
@@ -492,7 +600,7 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 								className="text-foreground! no-underline"
 								// Une saisie en cours se propose d'abord à l'enregistrement (cf. `requestCreation`).
 								onClick={(event) => {
-									if (!dirty) return;
+									if (!mustSaveFirst) return;
 									event.preventDefault();
 									setConfirming("blank");
 								}}
@@ -628,18 +736,19 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 					<AlertDialogHeader>
 						<AlertDialogTitle>Enregistrer l'alerte d'abord ?</AlertDialogTitle>
 						<AlertDialogDescription>
-							Des changements de l'alerte {alert.alertNumber} ne sont pas enregistrés. Ils le seront avant de créer la
-							modification, qui s'y associera.
+							{unsaved
+								? "L'alerte n'existe pas encore. Elle sera créée avant la modification, qui s'y associera."
+								: `Des changements de l'alerte ${alert.alertNumber} ne sont pas enregistrés. Ils le seront avant de créer la modification, qui s'y associera.`}
 						</AlertDialogDescription>
 					</AlertDialogHeader>
 					<AlertDialogFooter>
 						<AlertDialogCancel>Annuler</AlertDialogCancel>
 						<AlertDialogAction
-							disabled={save.isPending}
+							disabled={save.isPending || !savable}
 							onClick={() => {
 								const creation = confirming;
 								setConfirming(null);
-								if (creation !== null) submit(() => startCreation(creation));
+								if (creation !== null) submit((saved) => startCreation(creation, saved.alertNumber));
 							}}
 						>
 							Enregistrer et créer
@@ -655,11 +764,13 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 function StopGroup({
 	group,
 	form,
+	custom,
 	onToggle,
 	onClear,
 }: {
 	group: StopGroupDto;
 	form: AlertForm;
+	custom: boolean;
 	onToggle: (stopId: string) => void;
 	onClear: (ignore: boolean) => void;
 }) {
@@ -702,7 +813,7 @@ function StopGroup({
 				) : null}
 				{ignored || corrected ? (
 					<Button variant="ghost" size="sm" onClick={() => onClear(false)}>
-						Rétablir l'analyse
+						{custom ? "Tout rétablir" : "Rétablir l'analyse"}
 					</Button>
 				) : null}
 			</div>

@@ -37,8 +37,9 @@ export function StatusPill({
 
 export const ALERT_PUBLICATIONS: Record<AlertPublication, { tone: Tone; label: string }> = {
 	published: { tone: "solid", label: "Publiée" },
-	hidden: { tone: "inverse", label: "Masquée" },
+	hidden: { tone: "inverse", label: "Dépubliée" },
 	withdrawn: { tone: "neutral", label: "Retirée du flux" },
+	draft: { tone: "inverse", label: "Brouillon" },
 };
 
 export const ALERT_PHASES: Record<AlertPhase, { tone: Tone; label: string }> = {

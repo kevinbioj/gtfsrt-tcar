@@ -66,6 +66,8 @@ export type AlertLinkDto = {
 	alertNumber: string;
 	headerText: string;
 	inFeed: boolean;
+	/** Créée à la main : hors du flux amont, elle n'en est pas retirée pour autant. */
+	custom: boolean;
 	hidden: boolean;
 	/** Effective, et la modification vaut en ce moment à son titre. */
 	active: boolean;
@@ -209,8 +211,11 @@ export type NewModificationDto = Partial<ModificationInputDto> & {
 
 // --- infos trafic ---
 
-/** Si une info trafic se republie : oui, non car masquée, ou non car sortie du flux. */
-export type AlertPublication = "published" | "hidden" | "withdrawn";
+/**
+ * Si une info trafic se republie : oui ; non car dépubliée ; non car sortie du flux ; ou non car
+ * brouillon — créée à la main, pas encore publiée.
+ */
+export type AlertPublication = "published" | "hidden" | "withdrawn" | "draft";
 
 /**
  * Où en est une info trafic d'après ses périodes, publiée ou non : en cours, dans ses dates mais hors
@@ -223,13 +228,26 @@ export type AlertTextDto = {
 	descriptionText: string;
 	cause: string | null;
 	effect: string | null;
+	/** Le lien (`url`) ; `null` : aucun. */
+	url: string | null;
+	/** L'adresse de l'image (`image`) ; `null` : aucune. */
+	imageUrl: string | null;
+	/** Ce que montre l'image (`image_alternative_text`) ; `null` : rien. */
+	imageAlternativeText: string | null;
 };
 
+/**
+ * Ce qui se réécrit de l'alerte : `null` garde ce qu'en dit le flux. Pour le lien, l'image et son texte
+ * alternatif, `""` n'en garde aucun.
+ */
 export type AlertOverridesDto = {
 	headerText: string | null;
 	descriptionText: string | null;
 	cause: string | null;
 	effect: string | null;
+	url: string | null;
+	imageUrl: string | null;
+	imageAlternativeText: string | null;
 };
 
 export type StripStopDto = {
@@ -286,6 +304,10 @@ export type ImpactEntityDto = {
 export type AlertDto = {
 	alertNumber: string;
 	inFeed: boolean;
+	/** Créée à la main : rien n'en est reçu, tout en est saisi. */
+	custom: boolean;
+	/** Depuis quand une alerte créée à la main est publiée ; `null` : brouillon, ou reçue du flux. */
+	publishedAt: number | null;
 	hidden: boolean;
 	active: boolean;
 	publication: AlertPublication;
@@ -300,7 +322,8 @@ export type AlertDto = {
 	periodsOverridden: boolean;
 	/**
 	 * Les périodes telles qu'elles se republient (cf. `publishedPeriods`) : la communication reçue du flux
-	 * amont, et l'impact qu'on en tire. `null` hors du flux.
+	 * amont, et l'impact qu'on en tire. `null` hors du flux. Pour une alerte créée à la main, rien de reçu
+	 * (cf. `customPublishedPeriods`).
 	 */
 	feedPeriods: { received: TimeRangeDto[]; communication: TimeRangeDto[]; impact: TimeRangeDto[] } | null;
 	lines: LineDto[];

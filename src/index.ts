@@ -42,7 +42,14 @@ import { adminRoutes } from "./detours/admin.js";
 import { buildDetourEntities } from "./detours/build-entities.js";
 import { useLineCartridges } from "./detours/line-cartridges.js";
 import { useModificationIndex } from "./detours/modifications.js";
-import { canonicalImpact, impactKey, informedEntities, useDetourStore } from "./detours/store.js";
+import {
+	type AlertSettings,
+	canonicalImpact,
+	type ImpactEntity,
+	impactKey,
+	informedEntities,
+	useDetourStore,
+} from "./detours/store.js";
 import { handleRequest } from "./gtfs-rt/handle-request.js";
 import {
 	resolveNearestRun,
@@ -62,11 +69,14 @@ import {
 	type AlertEntity,
 	alertSourceKey,
 	applySkippedStops,
+	customPublishedPeriods,
 	declareCancelled,
 	declareNoRealtime,
 	hasSkippedStops,
+	imageMediaType,
 	isCancelled,
 	publishedPeriods,
+	republishedAlertId,
 	useServiceAlerts,
 } from "./gtfs-rt/use-service-alerts.js";
 import { canonicalStopId, normalizeStopName, useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
@@ -211,7 +221,7 @@ if (ADMIN_USERNAME && ADMIN_PASSWORD) {
 			rebuild: () => {
 				rebuildDetourEntities();
 				stampTripUpdates();
-				// Masquer une info trafic, ou en saisir les périodes, change aussi ce que le flux d'alertes republie.
+				// Publier ou dépublier une info trafic, ou en saisir les périodes, change aussi ce que le flux d'alertes republie.
 				stampAlerts();
 			},
 		}),
@@ -273,21 +283,25 @@ const publishedDetourEntities = (networks: ReadonlySet<string>) => [
 ];
 
 /**
- * Les infos trafic à émettre : celles qui citent une ligne des réseaux demandés. Elles ont leur propre
- * endpoint, et la racine les reprend avec tout le reste ; `/trip-updates` ne les porte pas — le
- * `serviceAlertId` de ses modifications y cite alors une info trafic absente, le champ ne valant que
- * renvoi.
+ * Les infos trafic à émettre : celles qui citent une ligne des réseaux demandés — celles du flux, puis
+ * celles créées à la main. Elles ont leur propre endpoint, et la racine les reprend avec tout le reste ;
+ * `/trip-updates` ne les porte pas — le `serviceAlertId` de ses modifications y cite alors une info
+ * trafic absente, le champ ne valant que renvoi.
  */
-const publishedAlerts = (networks: ReadonlySet<string>) =>
-	serviceAlerts.entities
-		.filter((alert) => [...alertNetworks(alert)].some((network) => networks.has(network)))
-		.flatMap((alert) => republished(alert));
+const publishedAlerts = (networks: ReadonlySet<string>) => [
+	...serviceAlerts.entities
+		.filter((alert) => [...alertNetworks(alert.alertNumber, alert.networks)].some((network) => networks.has(network)))
+		.flatMap((alert) => republished(alert)),
+	...customAlertEntities()
+		.filter(({ alertNumber }) => [...alertNetworks(alertNumber, new Set())].some((network) => networks.has(network)))
+		.map(({ entity }) => entity),
+];
 
 /**
  * Les réseaux d'une info trafic : ceux de son impact réécrit s'il y en a un — on peut y avoir ajouté
- * une ligne d'un autre réseau —, ceux que le flux lui donne sinon.
+ * une ligne d'un autre réseau —, `networks` sinon : ceux que le flux lui donne.
  */
-function alertNetworks({ alertNumber, networks }: AlertEntity): ReadonlySet<string> {
+function alertNetworks(alertNumber: string, networks: ReadonlySet<string>): ReadonlySet<string> {
 	const impact = detourStore.alertSettings(alertNumber).impact;
 	if (impact === null) return networks;
 	return new Set(
@@ -299,7 +313,7 @@ function alertNetworks({ alertNumber, networks }: AlertEntity): ReadonlySet<stri
 }
 
 /**
- * Une info trafic telle qu'elle se republie : masquée, elle ne l'est pas du tout ; ses périodes
+ * Une info trafic telle qu'elle se republie : dépubliée, elle ne l'est pas du tout ; ses périodes
  * active, de communication et d'impact se déduisent de celles de l'analyse (cf. `publishedPeriods`), ou de
  * celles saisies s'il y en a — ce sont aussi elles qui décident de ce qu'elle active (cf.
  * `ResolvedAlert.periods`). Son texte, sa cause et son effet réécrits remplacent ceux du flux ;
@@ -310,28 +324,71 @@ function republished({ alertNumber, entity, periods }: AlertEntity): GtfsRealtim
 	if (settings.hidden) return [];
 	if (entity.alert == null) return [entity];
 
-	const { headerText, descriptionText, cause, effect } = settings.overrides;
-	const Alert = GtfsRealtime.transit_realtime.Alert;
-	const translated = (text: string) => ({ translation: [{ text, language: "fr" }] });
 	const alert: GtfsRealtime.transit_realtime.IAlert = { ...entity.alert };
 	Object.assign(
 		alert,
 		publishedPeriods(settings.periods ?? periods, entity.alert.communicationPeriod ?? [], Temporal.Now.instant()),
 	);
+	applySettings(alert, settings, receivedImpact(entity.alert));
+	return [{ ...entity, alert }];
+}
+
+/**
+ * Les infos trafic créées à la main et publiées, telles qu'elles sortent : tout ce qu'elles disent a
+ * été saisi, et elles restent au feed tant qu'elles sont publiées (cf. `customPublishedPeriods`). Une
+ * sans impact ne sort pas : GTFS-RT veut au moins une entité touchée — la publication l'exige déjà.
+ */
+function customAlertEntities(): { alertNumber: string; entity: GtfsRealtime.transit_realtime.IFeedEntity }[] {
+	const now = Temporal.Now.instant();
+	return [...modificationIndex.alerts.values()].flatMap((resolved) => {
+		if (!resolved.custom || resolved.hidden || resolved.publishedAt === null) return [];
+		const settings = detourStore.alertSettings(resolved.alertNumber);
+		if (settings.impact === null || settings.impact.entities.length === 0) return [];
+
+		const alert: GtfsRealtime.transit_realtime.IAlert = customPublishedPeriods(
+			resolved.periods,
+			resolved.publishedAt,
+			now,
+		);
+		applySettings(alert, settings, []);
+		return [{ alertNumber: resolved.alertNumber, entity: { id: republishedAlertId(resolved.alertNumber), alert } }];
+	});
+}
+
+/**
+ * Pose sur une alerte ce qui s'en réécrit : son texte, sa cause, son effet, son lien, son image et son
+ * impact. Un lien, une image ou un texte alternatif réécrits à vide retirent ceux du flux. Réécrit ou
+ * non, l'impact sort sous sa forme canonique : une ligne citée dans tous ses sens n'y figure qu'une
+ * fois, sans sens (cf. `canonicalImpact`).
+ */
+function applySettings(
+	alert: GtfsRealtime.transit_realtime.IAlert,
+	settings: AlertSettings,
+	received: readonly ImpactEntity[],
+) {
+	const { headerText, descriptionText, cause, effect, url, imageUrl, imageAlternativeText } = settings.overrides;
+	const Alert = GtfsRealtime.transit_realtime.Alert;
+	const translated = (text: string) => ({ translation: [{ text, language: "fr" }] });
 	if (headerText !== null) alert.headerText = translated(headerText);
 	if (descriptionText !== null) alert.descriptionText = translated(descriptionText);
 	if (cause !== null && cause in Alert.Cause) alert.cause = Alert.Cause[cause as keyof typeof Alert.Cause];
 	if (effect !== null && effect in Alert.Effect) alert.effect = Alert.Effect[effect as keyof typeof Alert.Effect];
-	// Réécrit ou non, l'impact sort sous sa forme canonique : une ligne citée dans tous ses sens n'y
-	// figure qu'une fois, sans sens (cf. `canonicalImpact`).
-	const impact = settings.impact?.entities ?? receivedImpact(entity.alert);
+	if (url !== null) alert.url = url === "" ? null : translated(url);
+	if (imageUrl !== null) {
+		// La saisie l'a contrôlé : une image sans type connu n'a pas pu s'enregistrer.
+		const mediaType = imageUrl === "" ? undefined : imageMediaType(imageUrl);
+		alert.image = mediaType === undefined ? null : { localizedImage: [{ url: imageUrl, mediaType, language: "fr" }] };
+	}
+	if (imageAlternativeText !== null) {
+		alert.imageAlternativeText = imageAlternativeText === "" ? null : translated(imageAlternativeText);
+	}
+	const impact = settings.impact?.entities ?? received;
 	alert.informedEntity = impact.map(({ agencyId, routeId, directionId, stopId }) => ({
 		...(agencyId === null ? {} : { agencyId }),
 		...(routeId === null ? {} : { routeId }),
 		...(directionId === null ? {} : { directionId }),
 		...(stopId === null ? {} : { stopId }),
 	}));
-	return [{ ...entity, alert }];
 }
 
 /** La dernière modification d'un flux, la plus récente parmi les réseaux demandés (cf. `changes`). */

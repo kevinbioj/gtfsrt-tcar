@@ -1,13 +1,14 @@
 import type { AlertDto } from "@dto";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { cn } from "cn";
-import { CircleCheckIcon, SearchIcon, TriangleAlertIcon } from "lucide-react";
-import { useMemo } from "react";
+import { CircleCheckIcon, PlusIcon, SearchIcon, TriangleAlertIcon } from "lucide-react";
+import { useMemo, useState } from "react";
 
 import { ChipFilter } from "@/components/chip-filter";
 import { LineBadge, LineOption } from "@/components/line-badge";
 import { FilterBar, PageHeader } from "@/components/page-header";
 import { ALERT_PHASES, ALERT_PUBLICATIONS, StatusPill } from "@/components/status-pill";
+import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -21,6 +22,7 @@ import { useSearchText } from "@/lib/search-text";
 import { alertsRoute } from "@/router";
 
 import { AlertDetail } from "./alert-detail";
+import { blankAlert } from "./alert-form";
 
 /** Où en est une alerte, pour la liste : en cours, à venir, ou terminée. */
 export type AlertStatus = "current" | "planned" | "ended";
@@ -40,13 +42,19 @@ function statusOf(alert: AlertDto): AlertStatus {
 	return alert.phase === "planned" ? "planned" : "current";
 }
 
+/** Une alerte reste-t-elle à traiter ? Créée à la main, elle n'a rien à vérifier : tout en est saisi. */
+function isTodo(alert: AlertDto): boolean {
+	return !alert.custom && alert.checkedAt === null;
+}
+
 /**
- * Les alertes de service : reçues du flux TCAR, analysées, corrigées puis republiées. La liste à
- * gauche, filtrée par état, par cause et par ligne ; le détail de celle qu'on a choisie à droite.
+ * Les alertes de service : reçues du flux TCAR, analysées, corrigées puis republiées — ou créées à la
+ * main. La liste à gauche, filtrée par état, par cause et par ligne ; le détail de celle qu'on a
+ * choisie à droite.
  */
 export function AlertsPage() {
 	const search = alertsRoute.useSearch();
-	const { alert: selectedNumber, todo, status = "ALL", cause = "ALL", line = "all" } = search;
+	const { alert: selectedNumber, new: creating, todo, status = "ALL", cause = "ALL", line = "all" } = search;
 	const navigate = useNavigate({ from: "/alerts" });
 	const alerts = useAlerts();
 	const modifications = useModifications();
@@ -73,10 +81,10 @@ export function AlertsPage() {
 		return (routes.data ?? []).filter((route) => cited.has(route.routeId));
 	}, [list, routes.data]);
 
-	// Les alertes à traiter d'abord, les traitées ensuite — chacune dans l'ordre du flux.
+	// Les alertes à traiter d'abord, les autres ensuite — chacune dans l'ordre du flux.
 	const visible = list
-		.filter((alert) => !todo || alert.checkedAt === null)
-		.sort((a, b) => Number(a.checkedAt !== null) - Number(b.checkedAt !== null))
+		.filter((alert) => !todo || isTodo(alert))
+		.sort((a, b) => Number(!isTodo(a)) - Number(!isTodo(b)))
 		.filter(
 			(alert) =>
 				(status === "ALL" || statusOf(alert) === status) &&
@@ -87,7 +95,9 @@ export function AlertsPage() {
 						[alert.alertNumber, alert.published.headerText, ...alert.lines.map((line) => line.line)].join(" "),
 					).includes(searchable(query))),
 		);
-	const selected = list.find((alert) => alert.alertNumber === selectedNumber) ?? visible[0];
+	// Une alerte à créer n'existe qu'ici, le temps de sa saisie : la quitter l'abandonne.
+	const [blank] = useState(blankAlert);
+	const selected = creating ? blank : (list.find((alert) => alert.alertNumber === selectedNumber) ?? visible[0]);
 
 	return (
 		<>
@@ -104,15 +114,14 @@ export function AlertsPage() {
 						onChange={(event) => setQuery(event.target.value)}
 					/>
 				</InputGroup>
+				<NewAlertButton />
 			</PageHeader>
 
 			<FilterBar>
 				<label className="flex items-center gap-2 text-[13px] font-medium text-strong">
 					<Switch checked={todo === true} onCheckedChange={(on) => filter({ todo: on ? true : undefined })} />
 					<span>À traiter</span>
-					<span className="font-mono text-xs text-subtle">
-						{list.filter((alert) => alert.checkedAt === null).length}
-					</span>
+					<span className="font-mono text-xs text-subtle">{list.filter(isTodo).length}</span>
 				</label>
 				<Separator orientation="vertical" className="h-6!" />
 				<ChipFilter
@@ -161,6 +170,7 @@ export function AlertsPage() {
 					aria-label="Liste des alertes"
 					className="flex min-w-0 flex-[1_1_320px] flex-col gap-2 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:max-w-[420px] lg:overflow-y-auto lg:pr-1"
 				>
+					{creating ? <UnsavedCard /> : null}
 					{alerts.isPending
 						? [0, 1, 2, 3].map((index) => <Skeleton key={index} className="h-28 rounded-lg" />)
 						: visible.map((alert) => (
@@ -186,7 +196,9 @@ export function AlertsPage() {
 						<Empty className="rounded-lg border bg-card">
 							<EmptyHeader>
 								<EmptyTitle>Aucune alerte</EmptyTitle>
-								<EmptyDescription>Le flux TCAR n'en porte aucune pour l'instant.</EmptyDescription>
+								<EmptyDescription>
+									Le flux TCAR n'en porte aucune pour l'instant. « Nouvelle alerte » en crée une à la main.
+								</EmptyDescription>
 							</EmptyHeader>
 						</Empty>
 					)}
@@ -196,18 +208,49 @@ export function AlertsPage() {
 	);
 }
 
+/**
+ * Ouvre une alerte à créer à la main : rien n'est créé avant son premier enregistrement, et la quitter
+ * l'abandonne.
+ */
+function NewAlertButton() {
+	const navigate = useNavigate({ from: "/alerts" });
+	return (
+		<Button size="lg" onClick={() => navigate({ search: (current) => ({ ...current, alert: undefined, new: true }) })}>
+			<PlusIcon data-icon="inline-start" />
+			Nouvelle alerte
+		</Button>
+	);
+}
+
+/** L'alerte en cours de création, en tête de liste tant qu'elle n'est pas enregistrée. */
+function UnsavedCard() {
+	return (
+		<div
+			aria-current="true"
+			className="flex w-full flex-col gap-2 rounded-lg border border-[#B9CDF3] bg-[#F7F9FE] px-4 py-3.5 shadow-[inset_3px_0_0_#1D56C8]"
+		>
+			<span className="flex flex-wrap items-center gap-1.5">
+				<StatusPill tone="inverse">Brouillon</StatusPill>
+				<StatusPill tone="neutral">Personnalisée</StatusPill>
+			</span>
+			<span className="text-[15px] font-semibold text-foreground">Nouvelle alerte</span>
+			<span className="text-xs text-muted-foreground">Non enregistrée : la quitter l'abandonne.</span>
+		</div>
+	);
+}
+
 function AlertCard({ alert, selected }: { alert: AlertDto; selected: boolean }) {
 	const publication = ALERT_PUBLICATIONS[alert.publication];
 	const phase = ALERT_PHASES[alert.phase];
 	return (
 		<Link
 			from="/alerts"
-			search={(current) => ({ ...current, alert: alert.alertNumber, all: undefined })}
+			search={(current) => ({ ...current, alert: alert.alertNumber, new: undefined, all: undefined })}
 			aria-current={selected ? "true" : undefined}
 			className={cn(
 				"flex w-full flex-col gap-2 rounded-lg border bg-card px-4 py-3.5 text-left text-foreground! no-underline",
 				selected ? "border-[#B9CDF3] bg-[#F7F9FE] shadow-[inset_3px_0_0_#1D56C8]" : "hover:border-input",
-				alert.checkedAt !== null && !selected && "bg-muted opacity-75",
+				!alert.custom && alert.checkedAt !== null && !selected && "bg-muted opacity-75",
 			)}
 		>
 			<span className="flex w-full items-center gap-2">
@@ -234,6 +277,7 @@ function AlertCard({ alert, selected }: { alert: AlertDto; selected: boolean }) 
 			<span className="flex flex-wrap items-center gap-1.5">
 				<StatusPill tone={phase.tone}>{phase.label}</StatusPill>
 				<StatusPill tone={publication.tone}>{publication.label}</StatusPill>
+				{alert.custom ? <StatusPill tone="neutral">Personnalisée</StatusPill> : null}
 			</span>
 			<span className="text-[15px] font-semibold text-foreground">{alert.published.headerText}</span>
 			<span className="flex flex-wrap items-center gap-1.5">

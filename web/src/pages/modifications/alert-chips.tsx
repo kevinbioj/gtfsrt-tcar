@@ -13,7 +13,7 @@ import { useAlert } from "@/lib/queries";
 
 /**
  * Les alertes auxquelles une modification est rattachée, par leur seul numéro. Un clic ouvre le détail
- * de l'une d'elles : une alerte sortie du flux ou masquée n'active rien, et se lit en retrait.
+ * de l'une d'elles : une alerte sortie du flux ou dépubliée n'active rien, et se lit en retrait.
  */
 export function AlertChips({ alerts }: { alerts: AlertLinkDto[] }) {
 	// La dernière ouverte reste affichée le temps que la fenêtre se referme.
@@ -36,7 +36,7 @@ export function AlertChips({ alerts }: { alerts: AlertLinkDto[] }) {
 						className={cn(
 							"rounded-sm border px-1.5 py-0.5 font-mono text-xs font-semibold hover:border-input hover:bg-muted",
 							alert.active ? "border-[#B9CDF3] bg-[#F7F9FE] text-accent-foreground" : "bg-card text-strong",
-							(!alert.inFeed || alert.hidden) && "text-muted-foreground line-through",
+							((!alert.inFeed && !alert.custom) || alert.hidden) && "text-muted-foreground line-through",
 						)}
 					>
 						#{alert.alertNumber}

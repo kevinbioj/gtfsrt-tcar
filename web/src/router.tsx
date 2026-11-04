@@ -43,6 +43,8 @@ export const alertsRoute = createRoute({
 	): {
 		/** L'alerte ouverte ; à défaut, la première de la liste. */
 		alert?: string;
+		/** Une alerte à créer s'ouvre, que rien n'enregistre encore. */
+		new?: true;
 		todo?: true;
 		status?: AlertStatus;
 		cause?: string;
@@ -53,6 +55,7 @@ export const alertsRoute = createRoute({
 	} =>
 		defined({
 			alert: text(search.alert),
+			new: flag(search.new),
 			todo: flag(search.todo),
 			status: Object.hasOwn(STATUSES, String(search.status)) ? (search.status as AlertStatus) : undefined,
 			cause: text(search.cause),

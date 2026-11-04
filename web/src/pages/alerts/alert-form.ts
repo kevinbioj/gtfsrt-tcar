@@ -9,6 +9,10 @@ export type AlertForm = {
 	descriptionText: string;
 	cause: string | null;
 	effect: string | null;
+	/** Le lien, l'image et son texte alternatif publiés ; `""` : aucun. */
+	url: string;
+	imageUrl: string;
+	imageAlternativeText: string;
 	/** `null` : les périodes de l'analyse. */
 	periods: PeriodForm[] | null;
 	/** « routeId|directionId|stopId » → supprimé (vrai) ou desservi (faux), contre l'avis de l'analyse. */
@@ -27,6 +31,52 @@ export const scopeOf = (group: { routeId: string; directionId: number }) => `${g
 export const stopKey = (group: { routeId: string; directionId: number }, stopId: string) =>
 	`${scopeOf(group)}|${stopId}`;
 
+/**
+ * L'alerte qu'ouvre « Nouvelle alerte », avant tout enregistrement : créée à la main, vide, en
+ * brouillon. Son numéro vide dit qu'elle n'existe pas encore — le premier enregistrement la crée.
+ */
+export function blankAlert(): AlertDto {
+	const empty = {
+		headerText: "",
+		descriptionText: "",
+		cause: null,
+		effect: null,
+		url: null,
+		imageUrl: null,
+		imageAlternativeText: null,
+	};
+	return {
+		alertNumber: "",
+		inFeed: false,
+		custom: true,
+		publishedAt: null,
+		hidden: true,
+		active: false,
+		publication: "draft",
+		phase: "current",
+		phaseDetail: "",
+		received: { ...empty, descriptionHtml: "" },
+		published: empty,
+		overrides: empty,
+		periods: [],
+		analysisPeriods: [],
+		periodsOverridden: true,
+		feedPeriods: { received: [], communication: [], impact: [] },
+		lines: [],
+		stopGroups: [],
+		tripSets: [],
+		modifications: [],
+		modificationPeriods: {},
+		warnings: [],
+		firstSeenAt: 0,
+		checkedAt: null,
+		impact: { received: [], published: [], overridden: false },
+	};
+}
+
+/** L'alerte n'est-elle pas encore créée (cf. {@link blankAlert}) ? */
+export const isUnsaved = (alert: AlertDto) => alert.alertNumber === "";
+
 export function formOf(alert: AlertDto): AlertForm {
 	const overrides: Record<string, boolean> = {};
 	for (const group of alert.stopGroups) {
@@ -37,7 +87,11 @@ export function formOf(alert: AlertDto): AlertForm {
 		descriptionText: alert.published.descriptionText,
 		cause: alert.published.cause,
 		effect: alert.published.effect,
-		periods: alert.periodsOverridden ? alert.periods.map(periodForm) : null,
+		url: alert.published.url ?? "",
+		imageUrl: alert.published.imageUrl ?? "",
+		imageAlternativeText: alert.published.imageAlternativeText ?? "",
+		// Créée à la main, elle n'a d'autres périodes que les siennes, fût-ce aucune.
+		periods: alert.custom || alert.periodsOverridden ? alert.periods.map(periodForm) : null,
 		overrides,
 		ignored: alert.stopGroups.filter((group) => group.ignored).map(scopeOf),
 		tripSets: alert.tripSets.map((set) => ({ ...set, key: tripSetKey() })),
@@ -49,7 +103,10 @@ export function formOf(alert: AlertDto): AlertForm {
 	};
 }
 
-/** Ce que l'API reçoit : une réécriture identique au texte reçu n'en est pas une. */
+/**
+ * Ce que l'API reçoit : une réécriture identique au texte reçu n'en est pas une. Un lien, une image
+ * ou un texte alternatif vidés alors que le flux en porte partent à vide : ils le retirent.
+ */
 export function inputOf(form: AlertForm, alert: AlertDto): AlertInputDto {
 	const differs = <T>(value: T, received: T) => (value === received ? null : value);
 	return {
@@ -58,6 +115,9 @@ export function inputOf(form: AlertForm, alert: AlertDto): AlertInputDto {
 			descriptionText: differs(form.descriptionText.trim(), alert.received.descriptionText.trim()),
 			cause: differs(form.cause, alert.received.cause),
 			effect: differs(form.effect, alert.received.effect),
+			url: differs(form.url.trim(), alert.received.url ?? ""),
+			imageUrl: differs(form.imageUrl.trim(), alert.received.imageUrl ?? ""),
+			imageAlternativeText: differs(form.imageAlternativeText.trim(), alert.received.imageAlternativeText ?? ""),
 		},
 		periods: form.periods === null ? null : form.periods.map(periodInput),
 		skipStops: Object.entries(form.overrides).map(([key, removed]) => {

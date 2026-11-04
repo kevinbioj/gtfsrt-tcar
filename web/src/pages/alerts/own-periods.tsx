@@ -74,7 +74,7 @@ export function OwnPeriods({
 						<DialogTitle>Périodes de {label}</DialogTitle>
 						<DialogDescription>
 							Quand cette modification s'applique au titre de l'alerte. Quelles que soient ses périodes, elle cesse dès
-							que l'alerte sort du flux ou est masquée.
+							que l'alerte sort du flux ou est dépubliée.
 						</DialogDescription>
 					</DialogHeader>
 
