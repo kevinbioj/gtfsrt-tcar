@@ -70,8 +70,15 @@ export type AiSkip = {
 	replacedBy: number[];
 };
 
-/** Une info trafic associée, telle qu'une modification la cite. */
-export type AlertLink = Pick<ResolvedAlert, "alertNumber" | "headerText" | "inFeed" | "hidden" | "active">;
+/**
+ * Une info trafic associée, telle qu'une modification la cite. `active` : effective, et l'une des
+ * périodes de la modification à son titre — les siennes propres, sinon celles de l'info trafic —
+ * couvre l'instant de l'indexation.
+ */
+export type AlertLink = Pick<ResolvedAlert, "alertNumber" | "headerText" | "inFeed" | "hidden" | "active"> & {
+	/** La modification a, au titre de cette info trafic, ses périodes propres. */
+	periodsOverridden: boolean;
+};
 
 /**
  * Une modification telle que tout le reste la voit : ce qui a été saisi, et ce que ses infos trafic
@@ -94,8 +101,9 @@ export type ResolvedModification = {
 	 */
 	alertId: string | null;
 	/**
-	 * Aucune, donc sans fin, pour une modification activée à la main ; sinon la réunion des périodes de
-	 * ses infos trafic effectives — sans fin dès que l'une n'en a pas.
+	 * Aucune, donc sans fin, pour une modification activée à la main ; sinon la réunion, sur ses infos
+	 * trafic effectives, de ses périodes propres à chacune ou à défaut des périodes de celle-ci — sans
+	 * fin dès que l'une de ces listes est vide.
 	 */
 	periods: AlertPeriod[];
 	/** Vrai lorsqu'elle vaut à l'instant de l'indexation. */
@@ -252,11 +260,14 @@ function indexModifications(
 		});
 		const effective = linked.filter((alert) => alert.effective);
 		const silent = !record.manual && effective.length === 0;
-		// Une info trafic sans période vaut tant qu'elle est au flux : la réunion n'a alors plus de borne.
+		// Au titre d'une info trafic, ses périodes propres si elle en a, sinon celles de l'info trafic. Les
+		// unes comme les autres ne valent que tant que l'info trafic est effective.
+		const periodsFor = (alert: ResolvedAlert): AlertPeriod[] =>
+			record.alertPeriods.get(alert.alertNumber) ?? alert.periods;
+		const linkActive = (alert: ResolvedAlert) => alert.effective && isActive(periodsFor(alert), now);
+		// Une liste sans période vaut tant que l'info trafic est au flux : la réunion n'a alors plus de borne.
 		const periods =
-			record.manual || effective.some((alert) => alert.periods.length === 0)
-				? []
-				: effective.flatMap((alert) => alert.periods);
+			record.manual || effective.some((alert) => periodsFor(alert).length === 0) ? [] : effective.flatMap(periodsFor);
 		const end = lastPeriodEnd(periods);
 
 		modifications.set(record.uid, {
@@ -266,14 +277,15 @@ function indexModifications(
 			directionId: record.directionId,
 			patternIds: record.patternIds,
 			manual: record.manual,
-			alerts: linked.map(({ alertNumber, headerText, inFeed, hidden, active }) => ({
-				alertNumber,
-				headerText,
-				inFeed,
-				hidden,
-				active,
+			alerts: linked.map((alert) => ({
+				alertNumber: alert.alertNumber,
+				headerText: alert.headerText,
+				inFeed: alert.inFeed,
+				hidden: alert.hidden,
+				active: linkActive(alert),
+				periodsOverridden: record.alertPeriods.has(alert.alertNumber),
 			})),
-			alertId: (effective.find((alert) => alert.active) ?? effective[0])?.alertId ?? null,
+			alertId: (effective.find(linkActive) ?? effective[0])?.alertId ?? null,
 			periods,
 			active: !silent && isActive(periods, now),
 			silent,

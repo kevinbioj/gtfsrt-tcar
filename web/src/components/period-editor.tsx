@@ -59,6 +59,20 @@ export function periodInput(period: PeriodForm): PeriodInput {
 	};
 }
 
+/** La période telle qu'on la relit, de quoi la dire en clair (cf. `describePeriods`). */
+export function periodDto(period: PeriodForm): PeriodDto {
+	return {
+		start: period.start || null,
+		end: period.open || !period.end ? null : period.end,
+		dailyWindow: period.hours,
+	};
+}
+
+/** Une copie de la période, à éditer à part. */
+export function copyPeriod(period: PeriodForm): PeriodForm {
+	return { ...period, id: nextId(), hours: period.hours ? { ...period.hours } : null };
+}
+
 /**
  * Les périodes d'application d'une alerte : chacune un début, une fin ou « à nouvel avis », et au
  * besoin une tranche horaire répétée chaque jour — les dates se saisissent alors à la journée.

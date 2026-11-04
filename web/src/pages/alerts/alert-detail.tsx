@@ -15,7 +15,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { LineBadge } from "@/components/line-badge";
-import { PeriodEditor, periodForm } from "@/components/period-editor";
+import { copyPeriod, PeriodEditor, type PeriodForm, periodDto, periodForm } from "@/components/period-editor";
 import { SectionCard, SpecName } from "@/components/section-card";
 import {
 	ALERT_PHASES,
@@ -66,6 +66,7 @@ import {
 } from "./alert-form";
 import { ImpactEditor } from "./impact-editor";
 import { ModificationPicker } from "./modification-picker";
+import { OwnPeriods } from "./own-periods";
 
 /** Ce qu'on s'apprête à créer : la modification d'un sens suggéré, ou une page blanche. */
 type Creation = { routeId: string; directionId: number } | "blank";
@@ -117,6 +118,14 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 	});
 
 	const patch = (change: Partial<AlertForm>) => setForm((current) => ({ ...current, ...change }));
+	/** Les périodes propres d'une modification associée ; `null` : elle reprend celles de l'alerte. */
+	const setOwnPeriods = (uid: number, periods: PeriodForm[] | null) =>
+		setForm((current) => {
+			const { [uid]: _, ...rest } = current.modificationPeriods;
+			return { ...current, modificationPeriods: periods === null ? rest : { ...rest, [uid]: periods } };
+		});
+	// Celles que reprend une modification sans périodes propres : celles de l'alerte, telles qu'en cours de saisie.
+	const inheritedPeriods = form.periods === null ? alert.analysisPeriods : form.periods.map(periodDto);
 	const publication = ALERT_PUBLICATIONS[alert.publication];
 	const phase = ALERT_PHASES[alert.phase];
 	const byUid = new Map(modifications.map((entry) => [entry.uid, entry]));
@@ -510,6 +519,15 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 							<span className="min-w-0 flex-[1_1_220px]">
 								{entry ? `→ ${entry.headsigns.join(" / ")}${entry.description ? ` · ${entry.description}` : ""}` : "…"}
 							</span>
+							<OwnPeriods
+								label={modificationId(uid)}
+								own={form.modificationPeriods[uid]}
+								inherited={inheritedPeriods}
+								seed={() =>
+									form.periods === null ? alert.analysisPeriods.map(periodForm) : form.periods.map(copyPeriod)
+								}
+								onChange={(periods) => setOwnPeriods(uid, periods)}
+							/>
 							{state && alert.modifications.includes(uid) ? (
 								<StatusPill tone={state.tone}>{state.label}</StatusPill>
 							) : null}
@@ -521,7 +539,10 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 								variant="ghost"
 								size="icon-lg"
 								aria-label={`Dissocier ${modificationId(uid)}`}
-								onClick={() => patch({ modifications: form.modifications.filter((other) => other !== uid) })}
+								onClick={() => {
+									const { [uid]: _, ...modificationPeriods } = form.modificationPeriods;
+									patch({ modifications: form.modifications.filter((other) => other !== uid), modificationPeriods });
+								}}
 							>
 								<XIcon />
 							</Button>

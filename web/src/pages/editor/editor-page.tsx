@@ -253,6 +253,7 @@ function Editor({ detail, alert }: { detail: ModificationDetailDto; alert: strin
 										<Link to="/alerts" search={{ alert: alert.alertNumber }}>
 											{alert.headerText}
 										</Link>
+										{alert.periodsOverridden ? " (périodes propres)" : null}
 									</span>
 								))}{" "}
 								· {detail.stateDetail}

@@ -67,7 +67,10 @@ export type AlertLinkDto = {
 	headerText: string;
 	inFeed: boolean;
 	hidden: boolean;
+	/** Effective, et la modification vaut en ce moment à son titre. */
 	active: boolean;
+	/** La modification a, au titre de cette info trafic, ses périodes propres. */
+	periodsOverridden: boolean;
 };
 
 /** Une étiquette, pour classer les modifications. `color` : « #RRGGBB ». */
@@ -304,6 +307,11 @@ export type AlertDto = {
 	stopGroups: StopGroupDto[];
 	tripSets: TripSetDto[];
 	modifications: number[];
+	/**
+	 * Les périodes propres des modifications associées qui en ont, par uid : elles y valent au lieu des
+	 * périodes de l'alerte — tant que l'alerte est effective.
+	 */
+	modificationPeriods: Record<number, PeriodDto[]>;
 	warnings: string[];
 	firstSeenAt: number;
 	/** Marquée traitée, et quand ; `null` : à traiter. */
@@ -320,6 +328,8 @@ export type AlertInputDto = {
 	ignoredScopes: { routeId: string; directionId: number }[];
 	tripSets: { routeId: string; directionId: number; enabled: boolean; selection: TripSelectionDto }[];
 	modificationUids: number[];
+	/** Les périodes propres, par uid ; sans entrée, la modification reprend celles de l'alerte. */
+	modificationPeriods: Record<number, PeriodInput[]>;
 	/** `null` : l'impact reçu. */
 	impact: ImpactEntityDto[] | null;
 };

@@ -1197,6 +1197,12 @@ function summarizeAlert(alert: ResolvedAlert, deps: AdminDependencies, now: Temp
 		stopGroups,
 		tripSets,
 		modifications: alert.modificationUids,
+		modificationPeriods: Object.fromEntries(
+			associated.flatMap((modification) => {
+				const periods = modification.record.alertPeriods.get(alert.alertNumber);
+				return periods === undefined ? [] : [[modification.uid, periods]];
+			}),
+		),
 		warnings: alertWarnings(published, stopGroups, tripSets, associated.length),
 		firstSeenAt: alert.firstSeenAt,
 		checkedAt: deps.store.alertSettings(alert.alertNumber).checked?.at ?? null,
@@ -1969,6 +1975,20 @@ function parseAlertInput(
 	const unknown = modificationUids.find((uid) => !deps.modificationIndex.modifications.has(uid));
 	if (unknown !== undefined) return { message: `Modification ${unknown} inconnue.` };
 
+	// Celles d'une modification qu'on dissocie n'ont plus de quoi s'appliquer : elles s'ignorent.
+	const rawOwn = payload.modificationPeriods ?? {};
+	if (typeof rawOwn !== "object" || rawOwn === null || Array.isArray(rawOwn)) {
+		return { message: "Objet « modificationPeriods » attendu." };
+	}
+	const modificationPeriods = new Map<number, SavedPeriod[]>();
+	for (const [key, raw] of Object.entries(rawOwn)) {
+		const uid = Number(key);
+		if (!modificationUids.includes(uid)) continue;
+		const parsed = parsePeriods(raw);
+		if ("message" in parsed) return { message: `Modification MOD-${String(uid).padStart(4, "0")} : ${parsed.message}` };
+		modificationPeriods.set(uid, parsed.periods);
+	}
+
 	let impact: AlertInput["impact"] = null;
 	if (payload.impact !== null && payload.impact !== undefined) {
 		const parsed = parseImpact(payload.impact, deps);
@@ -1978,7 +1998,9 @@ function parseAlertInput(
 		if (impactKey(parsed.entities) !== basis) impact = { entities: parsed.entities, basis };
 	}
 
-	return { input: { overrides, periods, skipStops, ignoredScopes, tripSets, modificationUids, impact } };
+	return {
+		input: { overrides, periods, skipStops, ignoredScopes, tripSets, modificationUids, modificationPeriods, impact },
+	};
 }
 
 /**

@@ -302,6 +302,27 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 			update.run(JSON.stringify(periodsBasis(decodeAlert(row.snapshot))), row.alert_number);
 		}
 	},
+	`
+	-- 1 : au titre de cette info trafic, la modification vaut pendant les périodes de
+	-- modification_alert_periods, fût-ce aucune — et non pendant celles de l'info trafic. Celle-ci doit
+	-- rester effective : sortie du flux ou masquée, elle n'active plus rien, quoi qu'en disent ces périodes.
+	ALTER TABLE modification_alerts ADD COLUMN periods_overridden INTEGER NOT NULL DEFAULT 0;
+
+	-- Les périodes propres d'une association, quand periods_overridden vaut 1 — comme alert_periods.
+	CREATE TABLE modification_alert_periods (
+		uid          INTEGER NOT NULL,
+		alert_number TEXT    NOT NULL,
+		position     INTEGER NOT NULL,
+		start_date   TEXT    NOT NULL,
+		start_time   TEXT,
+		end_date     TEXT,
+		end_time     TEXT,
+		daily_from   TEXT,
+		daily_to     TEXT,
+		PRIMARY KEY (uid, alert_number, position),
+		FOREIGN KEY (uid, alert_number) REFERENCES modification_alerts (uid, alert_number) ON DELETE CASCADE
+	) STRICT;
+	`,
 ];
 
 /** Une étiquette, pour classer les modifications dans la liste. */
@@ -439,6 +460,12 @@ export type Modification = {
 	manual: boolean;
 	/** Les infos trafic auxquelles elle est associée, par numéro. */
 	alertNumbers: string[];
+	/**
+	 * Ses périodes propres, par info trafic associée : elle vaut alors pendant celles-ci, et non
+	 * pendant celles de l'info trafic — tant que celle-ci est effective. Sans entrée : celles de l'info
+	 * trafic. Une liste vide vaut tant que l'info trafic est au flux.
+	 */
+	alertPeriods: Map<string, SavedPeriod[]>;
 	/** Ses étiquettes (cf. `Label`), par identifiant. Rien n'en est publié. */
 	labelIds: number[];
 	/**
@@ -673,6 +700,11 @@ export type AlertInput = {
 	ignoredScopes: { routeId: string; directionId: number }[];
 	tripSets: TripSetInput[];
 	modificationUids: number[];
+	/**
+	 * Les périodes propres des modifications associées, par uid (cf. `Modification.alertPeriods`). Sans
+	 * entrée : celles de l'info trafic.
+	 */
+	modificationPeriods: Map<number, SavedPeriod[]>;
 	impact: ImpactOverride | null;
 };
 
@@ -798,12 +830,7 @@ export function useDetourStore(path: string) {
 		for (const row of db
 			.prepare("SELECT * FROM alert_periods ORDER BY alert_number, position")
 			.all() as AlertPeriodRow[]) {
-			settings.get(row.alert_number)?.periods?.push({
-				start: joinBound(row.start_date, row.start_time),
-				end: row.end_date === null ? null : joinBound(row.end_date, row.end_time),
-				dailyWindow:
-					row.daily_from === null || row.daily_to === null ? null : { from: row.daily_from, to: row.daily_to },
-			});
+			settings.get(row.alert_number)?.periods?.push(savedPeriodOf(row));
 		}
 
 		for (const row of db.prepare("SELECT * FROM modifications ORDER BY uid").all() as ModificationRow[]) {
@@ -816,6 +843,7 @@ export function useDetourStore(path: string) {
 				removedStopIds: [],
 				manual: row.manual === 1,
 				alertNumbers: [],
+				alertPeriods: new Map(),
 				labelIds: [],
 				priority: row.priority,
 				createdAt: row.created_at,
@@ -828,7 +856,15 @@ export function useDetourStore(path: string) {
 		for (const row of db
 			.prepare("SELECT * FROM modification_alerts ORDER BY uid, alert_number")
 			.all() as AssociationRow[]) {
-			modifications.get(row.uid)?.alertNumbers.push(row.alert_number);
+			const modification = modifications.get(row.uid);
+			modification?.alertNumbers.push(row.alert_number);
+			if (row.periods_overridden === 1) modification?.alertPeriods.set(row.alert_number, []);
+		}
+
+		for (const row of db
+			.prepare("SELECT * FROM modification_alert_periods ORDER BY uid, alert_number, position")
+			.all() as AssociationPeriodRow[]) {
+			modifications.get(row.uid)?.alertPeriods.get(row.alert_number)?.push(savedPeriodOf(row));
 		}
 
 		// Dans l'ordre des noms, accents compris — ce que SQLite ne sait pas faire seul.
@@ -1402,8 +1438,8 @@ export function useDetourStore(path: string) {
 		 * jamais à moitié réécrite. Seule une info trafic déjà relevée se règle — il lui faut une ligne où
 		 * le retenir ; renvoie faux sinon.
 		 *
-		 * Les modifications qui entrent dans l'association ou en sortent sont réhorodatées : l'info trafic
-		 * qu'elles citent, et les périodes où elles valent, viennent de changer.
+		 * Les modifications qui entrent dans l'association ou en sortent, ou dont les périodes propres changent,
+		 * sont réhorodatées : l'info trafic qu'elles citent, ou les périodes où elles valent, viennent de changer.
 		 */
 		saveAlert(alertNumber: string, input: AlertInput, nowSeconds: number): boolean {
 			if (!firstSeen.has(alertNumber)) return false;
@@ -1416,6 +1452,15 @@ export function useDetourStore(path: string) {
 			);
 			const added = [...wanted].filter((uid) => !current.has(uid));
 			const removed = [...current].filter((uid) => !wanted.has(uid));
+			const ownPeriods = (uid: number) => input.modificationPeriods.get(uid) ?? null;
+			// Celles qui restent associées mais dont les périodes propres changent : elles ne valent plus
+			// aux mêmes moments.
+			const reperiodized = [...wanted].filter(
+				(uid) =>
+					current.has(uid) &&
+					JSON.stringify(modifications.get(uid)?.alertPeriods.get(alertNumber) ?? null) !==
+						JSON.stringify(ownPeriods(uid)),
+			);
 
 			// Le texte réécrit l'est sur le dernier texte relevé : c'est de lui qu'il ne doit pas s'écarter.
 			const { headerText, descriptionText, cause, effect } = input.overrides;
@@ -1506,8 +1551,28 @@ export function useDetourStore(path: string) {
 				const remove = db.prepare("DELETE FROM modification_alerts WHERE uid = ? AND alert_number = ?");
 				const touch = db.prepare("UPDATE modifications SET updated_at = ? WHERE uid = ?");
 				for (const uid of added) insert.run(uid, alertNumber);
+				// Leurs périodes propres suivent, par cascade.
 				for (const uid of removed) remove.run(uid, alertNumber);
-				for (const uid of [...added, ...removed]) touch.run(nowSeconds, uid);
+
+				// Les périodes propres se réécrivent en entier, comme celles de l'info trafic.
+				db.prepare("DELETE FROM modification_alert_periods WHERE alert_number = ?").run(alertNumber);
+				const flag = db.prepare(
+					"UPDATE modification_alerts SET periods_overridden = ? WHERE uid = ? AND alert_number = ?",
+				);
+				const insertOwnPeriod = db.prepare(
+					`INSERT INTO modification_alert_periods
+						(uid, alert_number, position, start_date, start_time, end_date, end_time, daily_from, daily_to)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				);
+				for (const uid of wanted) {
+					const periods = ownPeriods(uid);
+					flag.run(periods === null ? 0 : 1, uid, alertNumber);
+					(periods ?? []).forEach((period, position) => {
+						insertOwnPeriod.run(uid, alertNumber, position, ...periodColumns(period));
+					});
+				}
+
+				for (const uid of [...added, ...removed, ...reperiodized]) touch.run(nowSeconds, uid);
 			});
 			return true;
 		},
@@ -1690,11 +1755,9 @@ type ModificationRow = {
 	updated_at: number;
 };
 
-type AssociationRow = { uid: number; alert_number: string };
+type AssociationRow = { uid: number; alert_number: string; periods_overridden: number };
 
-type AlertPeriodRow = {
-	alert_number: string;
-	position: number;
+type PeriodRow = {
 	start_date: string;
 	start_time: string | null;
 	end_date: string | null;
@@ -1702,6 +1765,19 @@ type AlertPeriodRow = {
 	daily_from: string | null;
 	daily_to: string | null;
 };
+
+type AlertPeriodRow = PeriodRow & { alert_number: string; position: number };
+
+type AssociationPeriodRow = PeriodRow & { uid: number; alert_number: string; position: number };
+
+/** Une période telle que la base la range, relue. */
+function savedPeriodOf(row: PeriodRow): SavedPeriod {
+	return {
+		start: joinBound(row.start_date, row.start_time),
+		end: row.end_date === null ? null : joinBound(row.end_date, row.end_time),
+		dailyWindow: row.daily_from === null || row.daily_to === null ? null : { from: row.daily_from, to: row.daily_to },
+	};
+}
 
 type PatternRow = { uid: number; pattern_id: string };
 

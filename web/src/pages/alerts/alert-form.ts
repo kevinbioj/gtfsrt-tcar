@@ -17,6 +17,8 @@ export type AlertForm = {
 	ignored: string[];
 	tripSets: TripSetForm[];
 	modifications: number[];
+	/** Les périodes propres des modifications associées, par uid ; sans entrée, celles de l'alerte. */
+	modificationPeriods: Record<number, PeriodForm[]>;
 	/** `null` : l'impact reçu. */
 	impact: ImpactEntityDto[] | null;
 };
@@ -40,6 +42,9 @@ export function formOf(alert: AlertDto): AlertForm {
 		ignored: alert.stopGroups.filter((group) => group.ignored).map(scopeOf),
 		tripSets: alert.tripSets.map((set) => ({ ...set, key: tripSetKey() })),
 		modifications: [...alert.modifications],
+		modificationPeriods: Object.fromEntries(
+			Object.entries(alert.modificationPeriods).map(([uid, periods]) => [uid, periods.map(periodForm)]),
+		),
 		impact: alert.impact.overridden ? alert.impact.published.map((entity) => ({ ...entity })) : null,
 	};
 }
@@ -70,6 +75,13 @@ export function inputOf(form: AlertForm, alert: AlertDto): AlertInputDto {
 			selection,
 		})),
 		modificationUids: form.modifications,
+		// Celles d'une modification dissociée ne partent pas.
+		modificationPeriods: Object.fromEntries(
+			form.modifications.flatMap((uid) => {
+				const periods = form.modificationPeriods[uid];
+				return periods === undefined ? [] : [[uid, periods.map(periodInput)]];
+			}),
+		),
 		impact: form.impact,
 	};
 }
