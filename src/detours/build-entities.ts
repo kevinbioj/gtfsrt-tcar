@@ -46,8 +46,11 @@ type Candidate = {
 	 * bornes pendant l'une d'elles (cf. `passesDuring`).
 	 */
 	periods: AlertPeriod[];
-	/** Les tracés sur lesquels un tronçon plus prioritaire l'écrase (cf. `resolveOverrides`). */
-	overriddenOn: ReadonlySet<string>;
+	/**
+	 * La priorité de sa modification : sur une course, il cède la place à tout tronçon plus prioritaire
+	 * qui s'y applique et en recouvre la plage (cf. `yieldToPriority`).
+	 */
+	priority: number;
 	startStopId: string;
 	/** `null` : la plage court jusqu'au dernier arrêt de chaque course, et le tronçon ne supprime rien. */
 	endStopId: string | null;
@@ -215,12 +218,15 @@ export function buildDetourEntities(
 				const placed = matchOnTrip(applicable, schedule, gtfs.tripPatterns.get(tripId));
 				for (const entry of placed) served.add(entry.candidate.label);
 				const departsAt = Temporal.Instant.fromEpochMilliseconds((day.midnight + departure) * 1000);
-				const matched = placed.filter((entry) =>
-					passesDuring(
-						entry.candidate.periods,
-						day.midnight,
-						[(schedule[entry.startIndex] as TripStop).arrival, (schedule[entry.endIndex] as TripStop).arrival],
-						departsAt,
+				// Ce n'est qu'entre les tronçons qui valent pour cette course que la priorité départage.
+				const matched = yieldToPriority(
+					placed.filter((entry) =>
+						passesDuring(
+							entry.candidate.periods,
+							day.midnight,
+							[(schedule[entry.startIndex] as TripStop).arrival, (schedule[entry.endIndex] as TripStop).arrival],
+							departsAt,
+						),
 					),
 				);
 				if (matched.length === 0) continue;
@@ -347,10 +353,10 @@ export function buildDetourEntities(
 	// Un tronçon dont aucune course ne relève ne laisse rien dans le feed, pas même ses arrêts. C'est le
 	// cas à surveiller — des bornes qui ne figurent pas sur l'horaire théorique des courses, parce
 	// qu'elles ont été prises sur une autre branche ou que le GTFS a renuméroté ses quais.
-	// Un tronçon écrasé sur l'un de ses tracés n'a pas à s'y appliquer : son silence est voulu.
+	// Un tronçon écrasé partout par un plus prioritaire reste servi : ses bornes, elles, sont bonnes.
 	for (const list of candidates.values()) {
 		for (const candidate of list) {
-			if (served.has(candidate.label) || candidate.overriddenOn.size > 0) continue;
+			if (served.has(candidate.label)) continue;
 			problems.add(
 				`${candidate.label} — aucune course de ${lineOf(gtfs, candidate.routeId)} sens ${candidate.directionId} ` +
 					(candidate.patternIds === null ? "" : `sur ${[...candidate.patternIds].join(", ")} `) +
@@ -538,7 +544,7 @@ function collectCandidates(
 				routeId: record.routeId,
 				directionId: record.directionId,
 				patternIds: record.patternIds.length === 0 ? null : new Set(record.patternIds),
-				overriddenOn: modification.overridden.get(rank) ?? new Set(),
+				priority: record.priority,
 				startStopId,
 				endStopId,
 				propagatedDelay: segment.propagatedDelay,
@@ -561,8 +567,7 @@ function collectCandidates(
  * Un tronçon n'est retenu que si l'horaire porte ses DEUX bornes, dans l'ordre : c'est ce qui écarte
  * les branches et les services partiels qui ne passent pas par le segment dévié, sans avoir à les
  * deviner. Sans borne aval, la course n'a qu'à desservir la borne amont : la plage va jusqu'à son
- * dernier arrêt. S'il nomme des tracés, la course doit en plus emprunter l'un d'eux — et ne pas être de
- * ceux où un tronçon plus prioritaire l'écrase.
+ * dernier arrêt. S'il nomme des tracés, la course doit en plus emprunter l'un d'eux.
  */
 function matchOnTrip(
 	candidates: readonly Candidate[],
@@ -573,12 +578,41 @@ function matchOnTrip(
 
 	for (const candidate of candidates) {
 		if (candidate.patternIds !== null && (patternId === undefined || !candidate.patternIds.has(patternId))) continue;
-		if (patternId !== undefined && candidate.overriddenOn.has(patternId)) continue;
 		const range = rangeOn(schedule, candidate);
 		if (range !== undefined) matched.push({ candidate, startIndex: range.start, endIndex: range.end });
 	}
 
-	return matched.sort((a, b) => a.startIndex - b.startIndex || a.endIndex - b.endIndex);
+	return byPosition(matched);
+}
+
+/**
+ * Tranche, sur cette course, entre les tronçons qui s'y appliquent et se recouvrent : le plus
+ * prioritaire reste, l'autre s'efface ; à priorité égale, ils restent tous deux, et `mergeOverlaps`
+ * les replie. Seul un tronçon qui reste peut en écraser un autre — comme `resolveOverrides`.
+ *
+ * C'est course par course que cela se juge, et non une fois pour toutes à l'instant de l'indexation :
+ * une modification prioritaire le temps d'une manifestation ne vaut que pour les courses qui passent
+ * pendant ses périodes. Jugée à l'instant, elle n'écraserait rien tant qu'elle n'a pas commencé — les
+ * deux se replieraient alors l'une dans l'autre sur les courses à venir —, puis écraserait l'autre
+ * jusque sur les courses d'après sa fin.
+ */
+function yieldToPriority(matched: readonly Applicable[]): Applicable[] {
+	const kept: Applicable[] = [];
+	for (const entry of [...matched].sort((a, b) => b.candidate.priority - a.candidate.priority)) {
+		const beaten = kept.some(
+			(other) =>
+				other.candidate.priority > entry.candidate.priority &&
+				other.startIndex <= entry.endIndex &&
+				entry.startIndex <= other.endIndex,
+		);
+		if (!beaten) kept.push(entry);
+	}
+	return byPosition(kept);
+}
+
+/** Dans l'ordre où la course les rencontre : c'est celui que `mergeOverlaps` attend. */
+function byPosition(entries: Applicable[]): Applicable[] {
+	return entries.sort((a, b) => a.startIndex - b.startIndex || a.endIndex - b.endIndex);
 }
 
 /**

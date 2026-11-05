@@ -197,6 +197,10 @@ export function useModificationIndex(
  * en recouvre une autre le temps d'un chantier l'emporte, sans que les deux se replient l'une dans
  * l'autre. Le reste de la modification écrasée — ses autres tronçons, ses arrêts supprimés ailleurs, ses
  * courses annulées — continue de s'appliquer.
+ *
+ * Ce départage-ci se fait à l'instant de l'indexation : il dit à l'interface ce qui est écrasé en ce
+ * moment, et borne les arrêts sautés des trip updates. Les trip modifications, publiées des jours à
+ * l'avance, le refont course par course (cf. `yieldToPriority`).
  */
 function indexModifications(
 	current: readonly AnalyzedAlert[],
