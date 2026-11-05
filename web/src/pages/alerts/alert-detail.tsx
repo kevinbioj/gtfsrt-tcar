@@ -212,95 +212,99 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 	return (
 		<div className="flex min-w-0 flex-col gap-4">
 			<div className="flex flex-col gap-4 rounded-lg border bg-card px-5 py-4">
-				<div className="flex flex-wrap items-center gap-2.5">
-					<span className="font-mono text-xs text-muted-foreground">
-						{unsaved
-							? "Nouvelle alerte · non enregistrée"
-							: `N° ${alert.alertNumber} · ${custom ? "créée" : "reçue"} le ${formatInstant(alert.firstSeenAt)}${
-									custom && alert.publishedAt !== null ? ` · publiée le ${formatInstant(alert.publishedAt)}` : ""
-								}`}
-					</span>
-					{unsaved ? null : <StatusPill tone={phase.tone}>{phase.label}</StatusPill>}
-					<StatusPill tone={publication.tone}>{publication.label}</StatusPill>
-					{custom ? <StatusPill tone="neutral">Personnalisée</StatusPill> : null}
-					{dirty && !unsaved ? <Badge variant="outline">Modifications non enregistrées</Badge> : null}
-					<span className="flex-1" />
-					{custom ? null : (
-						<Button
-							variant="outline"
-							size="lg"
-							aria-pressed={alert.checkedAt !== null}
-							className={cn(alert.checkedAt !== null && "border-success text-success hover:text-success")}
-							disabled={setChecked.isPending}
-							onClick={() => setChecked.mutate(alert.checkedAt === null)}
-						>
-							<CircleCheckIcon data-icon="inline-start" />
-							{alert.checkedAt === null ? "Marquer traitée" : `Traitée le ${formatInstant(alert.checkedAt)}`}
-						</Button>
-					)}
-					<Tooltip>
-						<TooltipTrigger asChild>
-							<span className="inline-flex">
-								<Button
-									variant="outline"
-									size="lg"
-									aria-pressed={published}
-									disabled={setHidden.isPending || unsaved || (!alert.inFeed && !custom) || (!published && dirty)}
-									onClick={() => setHidden.mutate(published)}
-								>
-									{published ? <UndoIcon data-icon="inline-start" /> : <SendIcon data-icon="inline-start" />}
-									{published ? "Dépublier" : "Publier"}
-								</Button>
-							</span>
-						</TooltipTrigger>
-						{unsaved ? (
-							<TooltipContent>Enregistrer d'abord l'alerte.</TooltipContent>
-						) : !published && dirty ? (
-							<TooltipContent>Enregistrer d'abord les modifications.</TooltipContent>
-						) : null}
-					</Tooltip>
-					{alert.inFeed ? (
-						// Un bouton désactivé ne reçoit pas le survol : c'est son enveloppe qui porte l'infobulle.
+				<div className="flex flex-wrap items-center gap-x-4 gap-y-2.5">
+					{/* L'en-tête se replie dans son coin plutôt que de renvoyer les actions à la ligne. */}
+					<div className="flex min-w-0 grow basis-72 flex-wrap items-center gap-2.5">
+						<span className="font-mono text-xs text-muted-foreground">
+							{unsaved
+								? "Nouvelle alerte · non enregistrée"
+								: `N° ${alert.alertNumber} · ${custom ? "créée" : "reçue"} le ${formatInstant(alert.firstSeenAt)}${
+										custom && alert.publishedAt !== null ? ` · publiée le ${formatInstant(alert.publishedAt)}` : ""
+									}`}
+						</span>
+						{unsaved ? null : <StatusPill tone={phase.tone}>{phase.label}</StatusPill>}
+						<StatusPill tone={publication.tone}>{publication.label}</StatusPill>
+						{custom ? <StatusPill tone="neutral">Personnalisée</StatusPill> : null}
+						{dirty && !unsaved ? <Badge variant="outline">Modifications non enregistrées</Badge> : null}
+					</div>
+					<div className="ml-auto flex shrink-0 flex-wrap items-center gap-2.5">
+						{custom ? null : (
+							<Button
+								variant="outline"
+								size="lg"
+								aria-pressed={alert.checkedAt !== null}
+								className={cn(alert.checkedAt !== null && "border-success text-success hover:text-success")}
+								disabled={setChecked.isPending}
+								onClick={() => setChecked.mutate(alert.checkedAt === null)}
+							>
+								<CircleCheckIcon data-icon="inline-start" />
+								{alert.checkedAt === null ? "Marquer traitée" : `Traitée le ${formatInstant(alert.checkedAt)}`}
+							</Button>
+						)}
 						<Tooltip>
 							<TooltipTrigger asChild>
 								<span className="inline-flex">
-									<Button variant="outline" size="lg" disabled aria-label="Supprimer l'alerte">
-										<Trash2Icon />
+									<Button
+										variant="outline"
+										size="lg"
+										aria-pressed={published}
+										disabled={setHidden.isPending || unsaved || (!alert.inFeed && !custom) || (!published && dirty)}
+										onClick={() => setHidden.mutate(published)}
+									>
+										{published ? <UndoIcon data-icon="inline-start" /> : <SendIcon data-icon="inline-start" />}
+										{published ? "Dépublier" : "Publier"}
 									</Button>
 								</span>
 							</TooltipTrigger>
-							<TooltipContent>
-								Encore au flux, elle reviendrait au prochain relevé : la dépublier plutôt.
-							</TooltipContent>
+							{unsaved ? (
+								<TooltipContent>Enregistrer d'abord l'alerte.</TooltipContent>
+							) : !published && dirty ? (
+								<TooltipContent>Enregistrer d'abord les modifications.</TooltipContent>
+							) : null}
 						</Tooltip>
-					) : unsaved ? null : (
-						<Button
-							variant="outline"
-							size="lg"
-							aria-label="Supprimer l'alerte"
-							className="text-destructive hover:text-destructive"
-							disabled={remove.isPending}
-							onClick={() => setConfirmDelete(true)}
-						>
-							<Trash2Icon />
+						{alert.inFeed ? (
+							// Un bouton désactivé ne reçoit pas le survol : c'est son enveloppe qui porte l'infobulle.
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<span className="inline-flex">
+										<Button variant="outline" size="lg" disabled aria-label="Supprimer l'alerte">
+											<Trash2Icon />
+										</Button>
+									</span>
+								</TooltipTrigger>
+								<TooltipContent>
+									Encore au flux, elle reviendrait au prochain relevé : la dépublier plutôt.
+								</TooltipContent>
+							</Tooltip>
+						) : unsaved ? null : (
+							<Button
+								variant="outline"
+								size="lg"
+								aria-label="Supprimer l'alerte"
+								className="text-destructive hover:text-destructive"
+								disabled={remove.isPending}
+								onClick={() => setConfirmDelete(true)}
+							>
+								<Trash2Icon />
+							</Button>
+						)}
+						{unsaved ? (
+							<Button
+								variant="outline"
+								size="lg"
+								onClick={() => navigate({ to: "/alerts", search: (current) => ({ ...current, new: undefined }) })}
+							>
+								Abandonner
+							</Button>
+						) : (
+							<Button variant="outline" size="lg" disabled={!dirty} onClick={() => setForm(formOf(alert))}>
+								Annuler
+							</Button>
+						)}
+						<Button size="lg" disabled={!savable || save.isPending} onClick={() => submit()}>
+							{unsaved ? "Créer" : "Enregistrer"}
 						</Button>
-					)}
-					{unsaved ? (
-						<Button
-							variant="outline"
-							size="lg"
-							onClick={() => navigate({ to: "/alerts", search: (current) => ({ ...current, new: undefined }) })}
-						>
-							Abandonner
-						</Button>
-					) : (
-						<Button variant="outline" size="lg" disabled={!dirty} onClick={() => setForm(formOf(alert))}>
-							Annuler
-						</Button>
-					)}
-					<Button size="lg" disabled={!savable || save.isPending} onClick={() => submit()}>
-						{unsaved ? "Créer" : "Enregistrer"}
-					</Button>
+					</div>
 				</div>
 				{custom ? (
 					// Créée à la main, son titre se saisit en tête : c'est lui qui la nomme.
