@@ -14,6 +14,14 @@ import {
 import type { Coordinates } from "../utils/geometry.js";
 
 /**
+ * L'empreinte d'une info trafic traitée sous une version précédente d'`alertSourceKey` : elle prend
+ * celle du prochain relevé, au lieu de redevenir à traiter (cf. `dropStaleChecks`). Le relevé qui a
+ * précédé la mise à jour la comparait encore à l'ancienne : elle n'avait pas changé depuis. Jamais une
+ * vraie empreinte, un SHA-1 en base64 ne portant pas de « ? ».
+ */
+const REBASED_CHECK = "?";
+
+/**
  * Le schéma, dans l'ordre où il s'applique. Chaque entrée fait passer la base de la version qu'elle
  * occupe à la suivante, et `PRAGMA user_version` retient où l'on en est : une base déjà à jour ne
  * rejoue rien. C'est tout ce qu'il faut de migration ici — la base n'a qu'un écrivain, et son
@@ -340,6 +348,13 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 	ALTER TABLE alert_first_seen ADD COLUMN url_override TEXT;
 	ALTER TABLE alert_first_seen ADD COLUMN image_override TEXT;
 	ALTER TABLE alert_first_seen ADD COLUMN image_alt_override TEXT;
+	`,
+	`
+	-- L'empreinte d'une alerte ne retient plus sa période de communication (cf. alertSourceKey) : les
+	-- infos trafic traitées prennent celle du prochain relevé, plutôt que de toutes redevenir à traiter.
+	-- Celles traitées hors du flux ('') attendent toujours d'y reparaître.
+	UPDATE alert_first_seen SET checked_basis = '${REBASED_CHECK}'
+	WHERE checked_at IS NOT NULL AND checked_basis <> '';
 	`,
 ];
 
@@ -1564,6 +1579,14 @@ export function useDetourStore(path: string) {
 		 * `received` : numéro → empreinte de l'alerte reçue, pour celles du flux. Rend les numéros touchés.
 		 */
 		dropStaleChecks(received: ReadonlyMap<string, string>): string[] {
+			const rebase = db.prepare("UPDATE alert_first_seen SET checked_basis = ? WHERE alert_number = ?");
+			for (const [alertNumber, entry] of settings) {
+				const key = received.get(alertNumber);
+				if (entry.checked?.basis !== REBASED_CHECK || key === undefined) continue;
+				rebase.run(key, alertNumber);
+				entry.checked = { at: entry.checked.at, basis: key };
+			}
+
 			const stale = [...settings].filter(([alertNumber, { checked }]) => {
 				const key = received.get(alertNumber);
 				return checked !== null && key !== undefined && key !== checked.basis;

@@ -982,8 +982,9 @@ function plainDate(value: string): Temporal.PlainDate | null {
 
 /**
  * L'empreinte d'une alerte telle que le flux la donne : son texte, sa cause et son effet, son impact,
- * sa période de communication, son lien et sa gravité. Pas sa période d'impact, qui vient de l'analyse
- * et se recalcule avec l'heure. Deux relevés de même empreinte disent la même chose.
+ * son lien et sa gravité. Pas sa période d'impact, qui vient de l'analyse et se recalcule avec l'heure,
+ * ni sa période de communication, qui ne dit rien de la perturbation elle-même. Deux relevés de même
+ * empreinte disent la même chose.
  */
 export function alertSourceKey(alert: GtfsRealtime.transit_realtime.IAlert): string {
 	const translations = (text: GtfsRealtime.transit_realtime.ITranslatedString | null | undefined) =>
@@ -1001,7 +1002,6 @@ export function alertSourceKey(alert: GtfsRealtime.transit_realtime.IAlert): str
 					entity.directionId ?? null,
 					entity.stopId || null,
 				]),
-				(alert.communicationPeriod ?? []).map((period) => [String(period.start ?? ""), String(period.end ?? "")]),
 				translations(alert.url),
 				alert.severityLevel ?? null,
 			]),
