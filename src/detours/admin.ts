@@ -437,6 +437,10 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		const parsed = parseAlertInput(payload, "", deps);
 		if ("message" in parsed) return c.json({ code: 400, message: parsed.message }, 400);
 		if (parsed.input.overrides.headerText === null) return c.json({ code: 400, message: "Titre attendu." }, 400);
+		const scheduling =
+			openEndedProblem(parsed.input.unpublishAt, parsed.input.periods ?? []) ??
+			unpublishAtProblem(parsed.input.unpublishAt);
+		if (scheduling !== null) return c.json({ code: 400, message: scheduling }, 400);
 
 		const alertNumber = deps.store.createCustomAlert(parsed.input, nowSeconds());
 		refresh();
@@ -477,6 +481,17 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 					400,
 				);
 			}
+			const openEnded = openEndedProblem(parsed.input.unpublishAt, parsed.input.periods);
+			if (openEnded !== null) return c.json({ code: 400, message: openEnded }, 400);
+			// Une échéance déjà enregistrée, et passée depuis l'ouverture du formulaire, a fait son office : la
+			// dépublication l'a oubliée (cf. `unpublishDue`).
+			if (parsed.input.unpublishAt !== alert.unpublishAt) {
+				const scheduling = unpublishAtProblem(parsed.input.unpublishAt);
+				if (scheduling !== null) return c.json({ code: 400, message: scheduling }, 400);
+			}
+		} else {
+			// Celles du flux suivent sa période de communication.
+			parsed.input.unpublishAt = null;
 		}
 
 		if (!deps.store.saveAlert(alert.alertNumber, parsed.input, nowSeconds())) {
@@ -964,7 +979,7 @@ function feedPeriodsOf(
 			end: range.end ? Number(range.end) : null,
 		}));
 	if (alert.custom) {
-		const published = customPublishedPeriods(alert.periods, alert.publishedAt ?? 0, now);
+		const published = customPublishedPeriods(alert.periods, alert.publishedAt ?? 0, alert.unpublishAt, now);
 		return {
 			received: [],
 			communication: alert.publishedAt === null ? [] : ranges(published.communicationPeriod),
@@ -1274,6 +1289,7 @@ function summarizeAlert(alert: ResolvedAlert, deps: AdminDependencies, now: Temp
 		inFeed: alert.inFeed,
 		custom: alert.custom,
 		publishedAt: alert.publishedAt,
+		unpublishAt: alert.unpublishAt,
 		hidden: alert.hidden,
 		active: alert.active,
 		publication: alertPublicationOf(alert),
@@ -2133,9 +2149,43 @@ function parseAlertInput(
 		if (impactKey(parsed.entities) !== basis) impact = { entities: parsed.entities, basis };
 	}
 
+	const rawUnpublishAt = payload.unpublishAt ?? null;
+	if (rawUnpublishAt !== null && !(typeof rawUnpublishAt === "number" && Number.isInteger(rawUnpublishAt))) {
+		return { message: "Dépublication automatique : un instant en secondes epoch, ou null, attendu." };
+	}
+	const unpublishAt = rawUnpublishAt as number | null;
+
 	return {
-		input: { overrides, periods, skipStops, ignoredScopes, tripSets, modificationUids, modificationPeriods, impact },
+		input: {
+			overrides,
+			periods,
+			skipStops,
+			ignoredScopes,
+			tripSets,
+			modificationUids,
+			modificationPeriods,
+			impact,
+			unpublishAt,
+		},
 	};
+}
+
+/**
+ * Ce qui ne va pas dans une dépublication programmée, ou `null`. Elle doit être à venir : échue, elle
+ * dépublierait l'alerte à l'instant — c'est le bouton « Dépublier » qui fait cela.
+ */
+function unpublishAtProblem(unpublishAt: number | null): string | null {
+	if (unpublishAt === null || unpublishAt > nowSeconds()) return null;
+	return "La dépublication automatique doit être programmée dans le futur.";
+}
+
+/**
+ * Une alerte dont une période court « à nouvel avis » ne se dépublie pas d'elle-même : rien ne dit
+ * quand la perturbation finit, et c'est à la main qu'on la retirera.
+ */
+function openEndedProblem(unpublishAt: number | null, periods: readonly SavedPeriod[]): string | null {
+	if (unpublishAt === null || !periods.some((period) => period.end === null)) return null;
+	return "Une période court à nouvel avis : la dépublication automatique n'est pas possible.";
 }
 
 /**

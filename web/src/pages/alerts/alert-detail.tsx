@@ -58,13 +58,16 @@ import {
 import {
 	type AlertForm,
 	clearGroup,
+	epochOfLocal,
 	formOf,
 	inputOf,
 	isRemoved,
 	isUnsaved,
+	lastPeriodEnd,
 	scopeOf,
 	suggestionsOf,
 	toggleStop,
+	unpublishValue,
 } from "./alert-form";
 import { ImpactEditor } from "./impact-editor";
 import { LinkEditor } from "./link-editor";
@@ -220,6 +223,10 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 								? "Nouvelle alerte · non enregistrée"
 								: `N° ${alert.alertNumber} · ${custom ? "créée" : "reçue"} le ${formatInstant(alert.firstSeenAt)}${
 										custom && alert.publishedAt !== null ? ` · publiée le ${formatInstant(alert.publishedAt)}` : ""
+									}${
+										custom && alert.publishedAt !== null && alert.unpublishAt !== null
+											? ` · dépubliée le ${formatInstant(alert.unpublishAt)}`
+											: ""
 									}`}
 						</span>
 						{unsaved ? null : <StatusPill tone={phase.tone}>{phase.label}</StatusPill>}
@@ -518,6 +525,7 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 						<PeriodEditor periods={form.periods} onChange={(periods) => patch({ periods })} />
 					</>
 				)}
+				{custom ? <UnpublishField form={form} onChange={patch} /> : null}
 				{alert.feedPeriods !== null ? (
 					<dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-t border-divider pt-3.5 text-[13px]">
 						{custom ? null : (
@@ -533,7 +541,9 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 						</dt>
 						<dd className="m-0 text-strong">
 							{custom && alert.publishedAt === null
-								? "Dès sa publication, tant qu'elle reste publiée"
+								? alert.unpublishAt === null
+									? "Dès sa publication, tant qu'elle reste publiée"
+									: `Dès sa publication, jusqu'au ${formatInstant(alert.unpublishAt)}`
 								: describeRanges(alert.feedPeriods.communication)}
 						</dd>
 						<dt className="text-muted-foreground">
@@ -822,6 +832,65 @@ function StopGroup({
 				) : null}
 			</div>
 			<StopStrip stops={stops} color={group.line.color} onToggle={onToggle} />
+		</div>
+	);
+}
+
+/**
+ * La dépublication programmée d'une alerte créée à la main, parmi ses périodes : à l'échéance, elle sort
+ * du flux et repasse en brouillon, comme dépubliée à la main — c'est la fin de sa communication. Elle
+ * suit la fin de la dernière période tant qu'on n'en saisit pas une autre, et n'est pas permise quand
+ * une période court à nouvel avis (cf. `unpublishValue`). Elle s'enregistre avec le reste, et peut se
+ * programmer dès le brouillon : elle ne vaudra qu'une fois l'alerte publiée.
+ */
+function UnpublishField({ form, onChange }: { form: AlertForm; onChange: (change: Partial<AlertForm>) => void }) {
+	const end = lastPeriodEnd(form.periods ?? []);
+	const open = end === "open";
+	const value = unpublishValue(form);
+	const at = epochOfLocal(value);
+	const past = at !== null && at * 1000 <= Date.now();
+	const follows = form.unpublishFollows && value !== "";
+	return (
+		<div className="flex flex-wrap items-end gap-x-4 gap-y-3 border-t border-divider pt-3.5">
+			<label className="flex flex-col gap-1.5 text-[13px] font-medium text-strong">
+				<span>
+					Dépublication automatique <SpecName>communication_period.end</SpecName>
+				</span>
+				<Input
+					type="datetime-local"
+					className="h-10 w-auto"
+					value={value}
+					disabled={open}
+					aria-invalid={past || undefined}
+					onChange={(event) => onChange({ unpublishAt: event.target.value, unpublishFollows: false })}
+				/>
+			</label>
+			<p
+				className={cn(
+					"m-0 flex-1 basis-60 self-center text-[13px]",
+					past ? "text-destructive" : "text-muted-foreground",
+				)}
+			>
+				{open
+					? "Une période court à nouvel avis : pas de dépublication automatique."
+					: past
+						? "Cette date est passée : la dépublication doit être programmée dans le futur."
+						: value === ""
+							? "Facultative. Sans date, l'alerte reste au flux jusqu'à ce qu'on la dépublie."
+							: follows
+								? "La fin de la dernière période : l'alerte sort alors du flux et repasse en brouillon."
+								: "À cette date, l'alerte sort du flux et repasse en brouillon."}
+			</p>
+			{!open && !form.unpublishFollows && end !== null && end !== value ? (
+				<Button variant="outline" size="lg" onClick={() => onChange({ unpublishFollows: true })}>
+					Fin des périodes
+				</Button>
+			) : null}
+			{value === "" ? null : (
+				<Button variant="outline" size="lg" onClick={() => onChange({ unpublishAt: "", unpublishFollows: false })}>
+					Ne pas dépublier
+				</Button>
+			)}
 		</div>
 	);
 }

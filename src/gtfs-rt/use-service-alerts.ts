@@ -726,20 +726,22 @@ export function publishedPeriods(
 /**
  * Les périodes d'une info trafic créée à la main, telles qu'elles se publient. Elle s'affiche tant
  * qu'elle est publiée : la communication — et la période active, qui la suit (cf. `publishedPeriods`) —
- * part de sa publication, sans fin. Ses périodes saisies ne disent que l'impact, rogné sur rien : la
- * perturbation peut avoir commencé avant qu'on ne la publie. Sans période saisie, le champ est absent —
- * elle a cours tout le temps qu'elle s'affiche.
+ * part de sa publication, et finit à sa dépublication programmée s'il y en a une, sans fin sinon : les
+ * consommateurs la retirent d'eux-mêmes à l'échéance. Ses périodes saisies ne disent que l'impact,
+ * rogné sur rien : la perturbation peut avoir commencé avant qu'on ne la publie. Sans période saisie, le
+ * champ est absent — elle a cours tout le temps qu'elle s'affiche.
  */
 export function customPublishedPeriods(
 	periods: AlertPeriod[],
 	publishedAt: number,
+	unpublishAt: number | null,
 	now: Temporal.Instant,
 ): {
 	activePeriod: GtfsRealtime.transit_realtime.ITimeRange[];
 	communicationPeriod: GtfsRealtime.transit_realtime.ITimeRange[];
 	impactPeriod: GtfsRealtime.transit_realtime.ITimeRange[];
 } {
-	const communicationPeriod = [{ start: publishedAt }];
+	const communicationPeriod = [{ start: publishedAt, ...(unpublishAt !== null && { end: unpublishAt }) }];
 	return { activePeriod: communicationPeriod, communicationPeriod, impactPeriod: impactPeriods(periods, [], now) };
 }
 

@@ -25,7 +25,64 @@ export type AlertForm = {
 	modificationPeriods: Record<number, PeriodForm[]>;
 	/** `null` : l'impact reçu. */
 	impact: ImpactEntityDto[] | null;
+	/**
+	 * Quand une alerte créée à la main se dépubliera d'elle-même, telle que saisie à la main, à l'heure
+	 * locale (« AAAA-MM-JJTHH:MM », comme le veut un champ `datetime-local`) ; `""` : jamais. Sans
+	 * objet tant qu'elle suit les périodes (cf. {@link unpublishValue}).
+	 */
+	unpublishAt: string;
+	/** La dépublication suit la fin de la dernière période : on n'en a pas saisi d'autre. */
+	unpublishFollows: boolean;
 };
+
+const pad = (value: number) => String(value).padStart(2, "0");
+
+/** Un instant epoch en secondes, tel qu'un champ `datetime-local` l'affiche : à l'heure locale. */
+export function localDateTime(seconds: number): string {
+	const date = new Date(seconds * 1000);
+	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** La valeur d'un champ `datetime-local`, lue à l'heure locale, en secondes epoch ; `null` si vide ou illisible. */
+export function epochOfLocal(value: string): number | null {
+	if (value === "") return null;
+	const time = new Date(value).getTime();
+	return Number.isNaN(time) ? null : Math.floor(time / 1000);
+}
+
+/** « AAAA-MM-JJ » plus un jour. */
+function nextDay(date: string): string {
+	const [year, month, day] = date.split("-").map(Number);
+	return new Date(Date.UTC(year ?? 0, (month ?? 1) - 1, (day ?? 1) + 1)).toISOString().slice(0, 10);
+}
+
+/**
+ * La fin de la dernière période, exclue, à l'heure locale « AAAA-MM-JJTHH:MM » — comme la calcule le
+ * serveur (cf. `lastPeriodEnd`) : une fin à la journée couvre tout ce jour, jusqu'au lendemain matin
+ * pour une tranche de nuit. `"open"` : l'une court à nouvel avis ; `null` : aucune période.
+ */
+export function lastPeriodEnd(periods: readonly PeriodForm[]): string | "open" | null {
+	let last: string | null = null;
+	for (const period of periods) {
+		if (period.open || period.end === "") return "open";
+		const end = period.end.includes("T")
+			? period.end
+			: `${nextDay(period.end)}T${period.hours !== null && period.hours.to <= period.hours.from ? period.hours.to : "00:00"}`;
+		if (last === null || end > last) last = end;
+	}
+	return last;
+}
+
+/**
+ * La dépublication automatique telle qu'elle s'enregistre, à l'heure locale ; `""` : aucune. Jamais
+ * quand une période court à nouvel avis ; sinon la fin de la dernière période, sauf à en avoir saisi
+ * une autre.
+ */
+export function unpublishValue(form: AlertForm): string {
+	const end = lastPeriodEnd(form.periods ?? []);
+	if (end === "open") return "";
+	return form.unpublishFollows ? (end ?? "") : form.unpublishAt;
+}
 
 export const scopeOf = (group: { routeId: string; directionId: number }) => `${group.routeId}|${group.directionId}`;
 export const stopKey = (group: { routeId: string; directionId: number }, stopId: string) =>
@@ -50,6 +107,7 @@ export function blankAlert(): AlertDto {
 		inFeed: false,
 		custom: true,
 		publishedAt: null,
+		unpublishAt: null,
 		hidden: true,
 		active: false,
 		publication: "draft",
@@ -82,6 +140,12 @@ export function formOf(alert: AlertDto): AlertForm {
 	for (const group of alert.stopGroups) {
 		for (const stop of group.stops) if (stop.overridden) overrides[stopKey(group, stop.stopId)] = stop.removed;
 	}
+	// Créée à la main, elle n'a d'autres périodes que les siennes, fût-ce aucune.
+	const periods = alert.custom || alert.periodsOverridden ? alert.periods.map(periodForm) : null;
+	// Une dépublication enregistrée qui tombe à la fin des périodes les suit ; une autre a été saisie. Rien
+	// n'a pu l'être tant qu'une période courait à nouvel avis.
+	const unpublishAt = alert.unpublishAt === null ? "" : localDateTime(alert.unpublishAt);
+	const end = lastPeriodEnd(periods ?? []);
 	return {
 		headerText: alert.published.headerText,
 		descriptionText: alert.published.descriptionText,
@@ -90,8 +154,7 @@ export function formOf(alert: AlertDto): AlertForm {
 		url: alert.published.url ?? "",
 		imageUrl: alert.published.imageUrl ?? "",
 		imageAlternativeText: alert.published.imageAlternativeText ?? "",
-		// Créée à la main, elle n'a d'autres périodes que les siennes, fût-ce aucune.
-		periods: alert.custom || alert.periodsOverridden ? alert.periods.map(periodForm) : null,
+		periods,
 		overrides,
 		ignored: alert.stopGroups.filter((group) => group.ignored).map(scopeOf),
 		tripSets: alert.tripSets.map((set) => ({ ...set, key: tripSetKey() })),
@@ -100,6 +163,8 @@ export function formOf(alert: AlertDto): AlertForm {
 			Object.entries(alert.modificationPeriods).map(([uid, periods]) => [uid, periods.map(periodForm)]),
 		),
 		impact: alert.impact.overridden ? alert.impact.published.map((entity) => ({ ...entity })) : null,
+		unpublishAt,
+		unpublishFollows: end === "open" ? unpublishAt === "" : (end ?? "") === unpublishAt,
 	};
 }
 
@@ -143,6 +208,7 @@ export function inputOf(form: AlertForm, alert: AlertDto): AlertInputDto {
 			}),
 		),
 		impact: form.impact,
+		unpublishAt: alert.custom ? epochOfLocal(unpublishValue(form)) : null,
 	};
 }
 

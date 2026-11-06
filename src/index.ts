@@ -223,6 +223,8 @@ if (ADMIN_USERNAME && ADMIN_PASSWORD) {
 				stampTripUpdates();
 				// Publier ou dépublier une info trafic, ou en saisir les périodes, change aussi ce que le flux d'alertes republie.
 				stampAlerts();
+				// Une dépublication programmée a pu être saisie, déplacée ou retirée.
+				scheduleUnpublication();
 			},
 		}),
 	);
@@ -337,17 +339,22 @@ function republished({ alertNumber, entity, periods }: AlertEntity): GtfsRealtim
  * Les infos trafic créées à la main et publiées, telles qu'elles sortent : tout ce qu'elles disent a
  * été saisi, et elles restent au feed tant qu'elles sont publiées (cf. `customPublishedPeriods`). Une
  * sans impact ne sort pas : GTFS-RT veut au moins une entité touchée — la publication l'exige déjà.
+ * Une dont la dépublication programmée est échue ne sort plus, même dans l'instant qui précède celui où
+ * elle se dépublie (cf. `scheduleUnpublication`).
  */
 function customAlertEntities(): { alertNumber: string; entity: GtfsRealtime.transit_realtime.IFeedEntity }[] {
 	const now = Temporal.Now.instant();
+	const nowSeconds = Math.floor(now.epochMilliseconds / 1000);
 	return [...modificationIndex.alerts.values()].flatMap((resolved) => {
 		if (!resolved.custom || resolved.hidden || resolved.publishedAt === null) return [];
+		if (resolved.unpublishAt !== null && resolved.unpublishAt <= nowSeconds) return [];
 		const settings = detourStore.alertSettings(resolved.alertNumber);
 		if (settings.impact === null || settings.impact.entities.length === 0) return [];
 
 		const alert: GtfsRealtime.transit_realtime.IAlert = customPublishedPeriods(
 			resolved.periods,
 			resolved.publishedAt,
+			resolved.unpublishAt,
 			now,
 		);
 		applySettings(alert, settings, []);
@@ -1197,6 +1204,42 @@ function dropStaleImpacts() {
 	modificationIndex.reindex();
 }
 
+let unpublicationTimer: NodeJS.Timeout | undefined;
+
+/**
+ * Arme la dépublication programmée la plus proche des infos trafic créées à la main : à l'échéance, elle
+ * sort du flux et repasse en brouillon (cf. `unpublishDue`), et ce qu'elle activait cesse. Une minuterie
+ * à la seconde plutôt qu'une ronde : un client qui interroge avec If-Modified-Since doit voir le flux
+ * changer dès l'échéance. `setTimeout` ne tient pas plus de 24,8 jours : au-delà, elle se réarme en route.
+ */
+function scheduleUnpublication() {
+	clearTimeout(unpublicationTimer);
+	const pending = [...detourStore.customAlerts.values()].flatMap(({ unpublishAt }) =>
+		unpublishAt === null ? [] : [unpublishAt],
+	);
+	if (pending.length === 0) return;
+
+	const delay = Math.max(0, Math.min(Math.min(...pending) * 1000 - Date.now(), 2 ** 31 - 1));
+	unpublicationTimer = setTimeout(() => {
+		try {
+			const unpublished = detourStore.unpublishDue(Math.floor(Date.now() / 1000));
+			if (unpublished.length > 0) {
+				console.log(`➔ Alerts ${unpublished.join(", ")}: scheduled unpublication reached, unpublished.`);
+				modificationIndex.reindex();
+				rebuildDetourEntities();
+				stampTripUpdates();
+				stampAlerts();
+			}
+		} catch (cause) {
+			// L'échéance reste due : se réarmer tout de suite tournerait en boucle.
+			console.error("✘ Scheduled unpublication failed, retrying in a minute:", cause);
+			unpublicationTimer = setTimeout(scheduleUnpublication, 60_000);
+			return;
+		}
+		scheduleUnpublication();
+	}, delay);
+}
+
 /**
  * Réassemble les entités des déviations déclarées. Appelée à chaque relevé — les journées de service
  * tournent, les courses finissent de circuler — et juste après un enregistrement depuis l'interface,
@@ -1388,5 +1431,7 @@ function announcedDeparture(tripUpdate: GtfsRealtime.transit_realtime.ITripUpdat
 
 setInterval(poll, VEHICLE_POSITIONS_INTERVAL);
 setInterval(pollTripUpdates, TRIP_UPDATES_INTERVAL);
+// Une échéance passée pendant que le service était arrêté se rattrape aussitôt.
+scheduleUnpublication();
 await poll();
 await pollTripUpdates();

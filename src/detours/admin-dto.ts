@@ -308,6 +308,8 @@ export type AlertDto = {
 	custom: boolean;
 	/** Depuis quand une alerte créée à la main est publiée ; `null` : brouillon, ou reçue du flux. */
 	publishedAt: number | null;
+	/** Quand une alerte créée à la main se dépubliera d'elle-même ; `null` : jamais, ou reçue du flux. */
+	unpublishAt: number | null;
 	hidden: boolean;
 	active: boolean;
 	publication: AlertPublication;
@@ -355,6 +357,11 @@ export type AlertInputDto = {
 	modificationPeriods: Record<number, PeriodInput[]>;
 	/** `null` : l'impact reçu. */
 	impact: ImpactEntityDto[] | null;
+	/**
+	 * Quand une alerte créée à la main se dépubliera d'elle-même, en secondes epoch, à venir ; `null` ou
+	 * absent : jamais. Ignoré pour celles du flux.
+	 */
+	unpublishAt?: number | null;
 };
 
 export type DepartureDto = {

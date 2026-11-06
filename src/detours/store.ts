@@ -356,16 +356,22 @@ const MIGRATIONS: readonly (string | ((db: DatabaseSync) => void))[] = [
 	UPDATE alert_first_seen SET checked_basis = '${REBASED_CHECK}'
 	WHERE checked_at IS NOT NULL AND checked_basis <> '';
 	`,
+	`
+	-- Quand une info trafic créée à la main se dépublie d'elle-même (cf. unpublishDue) ; NULL : jamais,
+	-- elle reste au feed tant qu'on ne la dépublie pas.
+	ALTER TABLE custom_alerts ADD COLUMN unpublish_at INTEGER;
+	`,
 ];
 
 /** Une étiquette, pour classer les modifications dans la liste. */
 export type Label = { labelId: number; name: string; color: string };
 
 /**
- * Une info trafic créée à la main : quand, et depuis quand elle est publiée (`null` : brouillon, ou
- * dépubliée). Elle reste au feed tant qu'elle est publiée.
+ * Une info trafic créée à la main : quand, depuis quand elle est publiée (`null` : brouillon, ou
+ * dépubliée), et quand elle se dépubliera d'elle-même (`null` : jamais). Elle reste au feed tant
+ * qu'elle est publiée.
  */
-export type CustomAlert = { createdAt: number; publishedAt: number | null };
+export type CustomAlert = { createdAt: number; publishedAt: number | null; unpublishAt: number | null };
 
 /** Un arrêt provisoire : un point de report qui n'existe dans aucun GTFS, et que l'on publie. */
 export type ProvisionalStop = {
@@ -753,6 +759,11 @@ export type AlertInput = {
 	 */
 	modificationPeriods: Map<number, SavedPeriod[]>;
 	impact: ImpactOverride | null;
+	/**
+	 * Quand une info trafic créée à la main se dépubliera d'elle-même, en secondes epoch ; `null` :
+	 * jamais. Sans objet pour celles du flux.
+	 */
+	unpublishAt: number | null;
 };
 
 export type DetourStore = ReturnType<typeof useDetourStore>;
@@ -858,6 +869,7 @@ export function useDetourStore(path: string) {
 			customAlerts.set(customAlertNumber(row.custom_id), {
 				createdAt: row.created_at,
 				publishedAt: row.published_at,
+				unpublishAt: row.unpublish_at,
 			});
 		}
 
@@ -1278,6 +1290,11 @@ export function useDetourStore(path: string) {
 		}
 
 		for (const uid of [...added, ...removed, ...reperiodized]) touch.run(nowSeconds, uid);
+
+		const customId = customAlertId(alertNumber);
+		if (customId !== undefined) {
+			db.prepare("UPDATE custom_alerts SET unpublish_at = ? WHERE custom_id = ?").run(input.unpublishAt, customId);
+		}
 	};
 
 	reload();
@@ -1646,6 +1663,29 @@ export function useDetourStore(path: string) {
 		},
 
 		/**
+		 * Dépublie les infos trafic créées à la main dont la dépublication programmée est échue, comme on
+		 * le ferait à la main (cf. `setAlertHidden`) : elles repassent en brouillon. L'échéance s'oublie,
+		 * brouillon ou non : passée, elle dépublierait aussitôt toute republication. Rend les numéros des
+		 * infos trafic dépubliées.
+		 */
+		unpublishDue(nowSeconds: number): string[] {
+			const due = [...customAlerts].filter(([, { unpublishAt }]) => unpublishAt !== null && unpublishAt <= nowSeconds);
+			if (due.length === 0) return [];
+			return transaction(() => {
+				const unpublished: string[] = [];
+				for (const [alertNumber, { publishedAt }] of due) {
+					const customId = customAlertId(alertNumber) as number;
+					db.prepare("UPDATE custom_alerts SET unpublish_at = NULL WHERE custom_id = ?").run(customId);
+					if (publishedAt === null) continue;
+					db.prepare("UPDATE alert_first_seen SET hidden = 1 WHERE alert_number = ?").run(alertNumber);
+					db.prepare("UPDATE custom_alerts SET published_at = NULL WHERE custom_id = ?").run(customId);
+					unpublished.push(alertNumber);
+				}
+				return unpublished;
+			});
+		},
+
+		/**
 		 * Efface une info trafic, et tout ce qui s'en était réglé : ses périodes, ses arrêts corrigés, ses
 		 * sens ignorés, ses courses annulées, ses associations. Les modifications qu'elle activait restent —
 		 * détachées, et réhorodatées comme toute modification qui sort d'une association. Renvoie faux pour
@@ -1914,7 +1954,12 @@ type PatternRow = { uid: number; pattern_id: string };
 
 type LabelRow = { label_id: number; name: string; color: string; created_at: number };
 
-type CustomAlertRow = { custom_id: number; created_at: number; published_at: number | null };
+type CustomAlertRow = {
+	custom_id: number;
+	created_at: number;
+	published_at: number | null;
+	unpublish_at: number | null;
+};
 
 type ModificationLabelRow = { uid: number; label_id: number };
 

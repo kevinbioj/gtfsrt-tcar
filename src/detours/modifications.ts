@@ -35,6 +35,8 @@ export type ResolvedAlert = {
 	custom: boolean;
 	/** Depuis quand une info trafic créée à la main est publiée ; `null` : brouillon, ou pas créée à la main. */
 	publishedAt: number | null;
+	/** Quand une info trafic créée à la main se dépubliera d'elle-même ; `null` : jamais, ou pas créée à la main. */
+	unpublishAt: number | null;
 	/** Dépubliée (brouillon, pour une info trafic créée à la main) : sans aucun effet, et plus republiée. */
 	hidden: boolean;
 	/** Au flux ou créée à la main, et publiée : ses périodes, et elles seules, décident de ce qu'elle active. */
@@ -280,6 +282,7 @@ function indexModifications(
 			inFeed,
 			custom,
 			publishedAt: store.customAlerts.get(alert.alertNumber)?.publishedAt ?? null,
+			unpublishAt: store.customAlerts.get(alert.alertNumber)?.unpublishAt ?? null,
 			hidden: settings.hidden,
 			effective,
 			periods,
