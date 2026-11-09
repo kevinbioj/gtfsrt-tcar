@@ -142,7 +142,7 @@ export type AdminDependencies = {
  */
 export function adminRoutes(deps: AdminDependencies): Hono {
 	const admin = new Hono();
-	admin.use(basicAuth({ username: deps.username, password: deps.password }));
+	admin.use(basicAuth({ username: deps.username, password: deps.password, realm: "Administration TCAR" }));
 
 	/** Après une saisie : l'index se rebâtit, puis le feed, qui le lit. */
 	const refresh = () => {
