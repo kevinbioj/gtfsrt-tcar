@@ -6,7 +6,7 @@ import { type Context, Hono } from "hono";
 import { basicAuth } from "hono/basic-auth";
 
 import type { AlertPeriod, DailyWindow } from "../ai/analyze-alert.js";
-import { ADMIN_UI_DIR, ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SMOOTHING_TOLERANCE, ROAD_SNAP_RADIUS } from "../config.js";
+import { ADMIN_UI_DIR, ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SNAP_RADIUS } from "../config.js";
 import { serviceDay } from "../gtfs-rt/scheduled-trips.js";
 import {
 	alertSourceKey,
@@ -780,7 +780,6 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		const route = routeOnRoad(graph, from, to, {
 			snapRadius: ROAD_SNAP_RADIUS,
 			maxExpansions: ROAD_ROUTING_MAX_EXPANSIONS,
-			smoothingTolerance: ROAD_SMOOTHING_TOLERANCE,
 		});
 
 		if ("failure" in route) {
