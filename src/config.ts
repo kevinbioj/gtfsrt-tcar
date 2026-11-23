@@ -408,6 +408,12 @@ export const TRIP_UPDATES_HORIZON = Temporal.Duration.from({ hours: 24 }).total(
 /** Même fenêtre glissante pour les modifications de course, sur les sept jours à venir. */
 export const TRIP_MODIFICATIONS_HORIZON = Temporal.Duration.from({ hours: 7 * 24 }).total("seconds");
 /**
+ * Sel de l'empreinte des modifications de course : il entre dans l'identifiant de chaque entité
+ * `TM:` et de chaque tracé dévié qu'elle cite. Le changer renouvelle d'un coup tous ces identifiants,
+ * sans rien changer d'autre — de quoi forcer un consommateur à oublier ce qu'il en a mis en cache.
+ */
+export const TRIP_MODIFICATIONS_ID_SALT = "2026-11-23";
+/**
  * Durée pendant laquelle une course arrivée à son terminus garde, dans les deux fenêtres, ses arrêts
  * supprimés, son annulation et sa modification : le consommateur qui relit le feed juste après la fin
  * de la course doit encore y trouver ce qui l'a touchée.

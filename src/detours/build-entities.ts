@@ -3,7 +3,12 @@ import { createHash } from "node:crypto";
 import type GtfsRealtime from "gtfs-realtime-bindings";
 
 import type { AlertPeriod } from "../ai/analyze-alert.js";
-import { FINISHED_TRIP_RETENTION, MAX_DETOUR_JUNCTION_OFFSET, TRIP_MODIFICATIONS_HORIZON } from "../config.js";
+import {
+	FINISHED_TRIP_RETENTION,
+	MAX_DETOUR_JUNCTION_OFFSET,
+	TRIP_MODIFICATIONS_HORIZON,
+	TRIP_MODIFICATIONS_ID_SALT,
+} from "../config.js";
 import { serviceDaysBetween } from "../gtfs-rt/scheduled-trips.js";
 import {
 	type CancelIndex,
@@ -269,7 +274,10 @@ export function buildDetourEntities(
 			// Les mêmes tronçons ne donnent pas forcément la même chose sur deux branches : des horaires
 			// différents les replient différemment. L'empreinte de la signature tranche, et reste la même
 			// d'un relevé à l'autre tant que la déclaration ne bouge pas.
-			const fingerprint = createHash("sha1").update(signature).digest("hex").slice(0, 8);
+			const fingerprint = createHash("sha1")
+				.update(`${TRIP_MODIFICATIONS_ID_SALT}|${signature}`)
+				.digest("hex")
+				.slice(0, 8);
 			const spliced = resolveShape(gtfs, shapes, splicedShapes, problems, parts, fingerprint, group);
 			const shapeId = spliced?.shapeId ?? null;
 
