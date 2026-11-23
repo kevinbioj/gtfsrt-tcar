@@ -11,7 +11,7 @@ import {
 	UndoIcon,
 	XIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { LineBadge } from "@/components/line-badge";
@@ -107,18 +107,30 @@ export function AlertDetail({ alert, modifications }: { alert: AlertDto; modific
 	const navigate = useNavigate();
 	const [confirming, setConfirming] = useState<Creation | null>(null);
 
+	// L'alerte se relit toutes les minutes. Tant qu'on n'y a rien touché, le formulaire la suit en entier.
+	// Le titre et la description, eux, la suivent tant qu'on n'a pas touché à ces deux-là, quoi qu'on ait
+	// saisi par ailleurs ; le reste de la saisie demeure. Qu'on y ait touché se juge contre l'alerte dont
+	// le formulaire est issu : contre la nouvelle, un texte reçu qui a changé ferait passer l'ancien,
+	// resté dans le formulaire, pour une réécriture. Ajusté au rendu même, pour qu'aucun ne la voie
+	// modifiée entre-temps.
+	const [source, setSource] = useState(alert);
+	if (source !== alert) {
+		const untouched = JSON.stringify(inputOf(form, source)) === JSON.stringify(inputOf(formOf(source), source));
+		const textUntouched =
+			form.headerText === source.published.headerText && form.descriptionText === source.published.descriptionText;
+		setSource(alert);
+		if (untouched) setForm(formOf(alert));
+		else if (textUntouched)
+			setForm((current) => ({
+				...current,
+				headerText: alert.published.headerText,
+				descriptionText: alert.published.descriptionText,
+			}));
+	}
+
 	const baseline = useMemo(() => JSON.stringify(inputOf(formOf(alert), alert)), [alert]);
 	const current = JSON.stringify(inputOf(form, alert));
 	const dirty = current !== baseline;
-
-	// L'alerte se relit toutes les minutes. Tant qu'on n'y a rien touché, le formulaire la suit ; dès
-	// qu'on l'a modifié, il garde la saisie.
-	const previous = useRef(baseline);
-	useEffect(() => {
-		if (previous.current === baseline) return;
-		if (current === previous.current) setForm(formOf(alert));
-		previous.current = baseline;
-	}, [baseline, current, alert]);
 	// Une alerte qu'on modifie devient celle de l'URL : changer de filtre ne la quitte plus. Seul ce
 	// qui en ouvre une autre, ou quitte la page, demande alors confirmation.
 	// Celle qu'on crée n'a pas encore de numéro où se fixer, et s'abandonne sans rien demander.
