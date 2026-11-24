@@ -1,7 +1,7 @@
 import type { LineDto, MissedDirectionDto, MissedReason, MissedTripDto, MissedTripsDto, RouteDto } from "@dto";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { cn } from "cn";
-import { BusFrontIcon, Undo2Icon } from "lucide-react";
+import { BusFrontIcon, DownloadIcon, Undo2Icon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { LineBadge, LineOption, serviceOf } from "@/components/line-badge";
@@ -113,7 +113,12 @@ export function MissedTripsPage() {
 			<PageHeader
 				title="Courses supp."
 				description="Courses du jour parties depuis plus de 5 min sans véhicule ni avance-retard, ou absentes du SAE : elles sont publiées supprimées. Un rétablissement ne vaut que pour aujourd'hui."
-			/>
+			>
+				<Button variant="outline" size="lg" disabled={groups.length === 0} onClick={() => downloadCsv(groups)}>
+					<DownloadIcon data-icon="inline-start" />
+					Exporter en CSV
+				</Button>
+			</PageHeader>
 
 			<FilterBar>
 				<Tabs
@@ -420,4 +425,61 @@ function useColumnWidths(groups: MissedTripsDto["lines"]): React.CSSProperties {
 			"--reference-width": padded(reference),
 		} as React.CSSProperties;
 	}, [groups, fontsLoaded]);
+}
+
+/** Les colonnes de l'export, dans l'ordre. */
+const CSV_HEADER = [
+	"Ligne",
+	"Direction",
+	"ID course",
+	"Terminus de départ",
+	"Départ",
+	"Arrivée",
+	"Terminus d'arrivée",
+	"Arrêt de référence",
+	"Heure de référence",
+	"Motif",
+	"Constatée à",
+	"État",
+	"Rétablie à",
+	"Terminée",
+];
+
+/**
+ * Toutes les courses non honorées de la journée en CSV — quels que soient l'onglet, la ligne et la
+ * case des courses terminées —, telles que la page les a reçues. Le point-virgule et la marque d'ordre
+ * UTF-8 sont ce qu'attend un tableur réglé en français : les colonnes s'y séparent, les accents s'y
+ * lisent. Les heures de course sont celles du GTFS (« 25:10 »), celles des constats à l'heure locale.
+ */
+function downloadCsv(groups: MissedTripsDto["lines"]) {
+	const rows = groups.flatMap((group) =>
+		group.directions.flatMap((direction) =>
+			direction.trips.map((trip) => [
+				group.line.line,
+				direction.headsigns.join(" / "),
+				trip.tripId.split(":").at(-1) ?? trip.tripId,
+				trip.origin,
+				formatGtfsTime(trip.departure),
+				formatGtfsTime(trip.arrival),
+				trip.destination,
+				trip.reference.name,
+				formatGtfsTime(trip.reference.time),
+				REASONS[trip.reason],
+				formatClock(trip.detectedAt),
+				trip.restoredAt === null ? "Supprimée" : "Rétablie",
+				trip.restoredAt === null ? "" : formatClock(trip.restoredAt),
+				trip.finished ? "oui" : "non",
+			]),
+		),
+	);
+	const field = (value: string) => (/[";\n\r]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value);
+	const csv = [CSV_HEADER, ...rows].map((row) => row.map(field).join(";")).join("\r\n");
+
+	const url = URL.createObjectURL(new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" }));
+	const link = document.createElement("a");
+	link.href = url;
+	link.download = `courses-non-honorees-${new Date().toLocaleDateString("sv-SE")}.csv`;
+	link.click();
+	// Le téléchargement part du clic, mais certains navigateurs lisent l'adresse un instant après.
+	setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
