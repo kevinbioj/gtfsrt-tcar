@@ -7,7 +7,8 @@ import { basicAuth } from "hono/basic-auth";
 
 import type { AlertPeriod, DailyWindow } from "../ai/analyze-alert.js";
 import { ADMIN_UI_DIR, ROAD_ROUTING_MAX_EXPANSIONS, ROAD_SNAP_RADIUS } from "../config.js";
-import { serviceDay } from "../gtfs-rt/scheduled-trips.js";
+import { serviceDay, serviceDays } from "../gtfs-rt/scheduled-trips.js";
+import { type MissedTrips, splitRun } from "../gtfs-rt/use-missed-trips.js";
 import {
 	alertSourceKey,
 	customPublishedPeriods,
@@ -33,6 +34,8 @@ import type {
 	FeedClock,
 	LabelDto,
 	LineDto,
+	MissedTripDto,
+	MissedTripsDto,
 	ModificationDetailDto,
 	ModificationState,
 	ModificationSummaryDto,
@@ -129,12 +132,16 @@ export type AdminDependencies = {
 	};
 	/** Réassemble les entités du feed, pour qu'un enregistrement se voie sans attendre le relevé suivant. */
 	rebuild: () => void;
+	/** Les courses TCAR non honorées faute de matériel, et leur rétablissement (cf. `useMissedTrips`). */
+	missedTrips: MissedTrips;
+	/** Relève les trip updates sans attendre la ronde : un rétablissement s'y voit aussitôt. */
+	refreshTripUpdates: () => void;
 };
 
 /**
- * L'interface de gestion des modifications, et l'API qu'elle consomme. Trois sections : les infos
+ * L'interface de gestion des modifications, et l'API qu'elle consomme. Quatre sections : les infos
  * trafic — ce qu'on en republie, ce qu'elles suppriment et activent —, les modifications elles-mêmes —
- * les déviations —, et la base des arrêts provisoires.
+ * les déviations —, la base des arrêts provisoires, et les courses non honorées faute de matériel.
  *
  * Le sous-routeur est monté sous `/admin` et s'ouvre par son authentification : tout ce qui suit est
  * en accès restreint, y compris l'interface elle-même — elle porte les textes des infos trafic et la
@@ -170,6 +177,8 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 				).length,
 				modifications: deps.modificationIndex.modifications.size,
 				provisionalStops: deps.store.provisionalStops.size,
+				// Celles qui sont supprimées en ce moment : une course arrivée à son terminus ne compte plus.
+				missedTrips: deps.missedTrips.counts(nowSeconds()).ongoing,
 			},
 			roadRouting: deps.roadGraph.available,
 		} satisfies StatusDto);
@@ -290,6 +299,107 @@ export function adminRoutes(deps: AdminDependencies): Hono {
 		deps.store.remove([modification.uid]);
 		refresh();
 		return c.json({ code: 200, message: "Modification supprimée." });
+	});
+
+	/**
+	 * Les courses non honorées de la journée, ligne par ligne puis sens par sens : celles publiées
+	 * supprimées comme celles que l'exploitant a rétablies. Une course qui a fini par rouler — un
+	 * véhicule rattaché en retard — n'y figure plus.
+	 */
+	admin.get("/api/missed-trips", (c) => {
+		const gtfs = deps.gtfs.data;
+		const now = nowSeconds();
+		const days = serviceDays(gtfs, [-1, 0]);
+		/** routeId → directionId → courses. */
+		const byLine = new Map<string, Map<number, MissedTripDto[]>>();
+
+		// La veille d'abord — ses courses d'après minuit sont parties avant celles du jour —, puis par départ.
+		const missed = deps.missedTrips
+			.list()
+			.sort(
+				(a, b) =>
+					a.date.localeCompare(b.date) ||
+					(gtfs.tripDepartures.get(a.tripId) ?? 0) - (gtfs.tripDepartures.get(b.tripId) ?? 0),
+			);
+		for (const trip of missed) {
+			const meta = gtfs.trips.get(trip.tripId);
+			const departure = gtfs.tripDepartures.get(trip.tripId);
+			const arrival = gtfs.tripArrivals.get(trip.tripId);
+			// Une course que le GTFS rechargé ne décrit plus n'a plus rien à montrer.
+			if (meta === undefined || departure === undefined || arrival === undefined) continue;
+
+			const schedule = gtfs.tripStopSequences.get(trip.tripId) ?? [];
+			const stopName = (stopId: string | undefined) =>
+				stopId === undefined ? "?" : (gtfs.stopNames.get(stopId) ?? stopId);
+
+			// Le dernier arrêt dont l'heure théorique est passée : la course est partie (cf.
+			// `MISSED_TRIP_GRACE`), son premier arrêt l'est donc toujours.
+			const midnight = days.find(({ date }) => date === trip.date)?.midnight ?? 0;
+			const passed = schedule.findLast(({ arrival }) => midnight + arrival <= now) ?? schedule[0];
+
+			const directions = byLine.get(meta.routeId) ?? new Map<number, MissedTripDto[]>();
+			const trips = directions.get(meta.directionId) ?? [];
+			trips.push({
+				run: trip.run,
+				tripId: trip.tripId,
+				directionId: meta.directionId,
+				origin: stopName(schedule?.[0]?.stopId),
+				destination: stopName(schedule?.at(-1)?.stopId),
+				departure,
+				arrival,
+				reference: { name: stopName(passed?.stopId), time: passed?.arrival ?? departure },
+				finished: midnight + arrival < now,
+				reason: trip.reason,
+				detectedAt: trip.detectedAt,
+				restoredAt: trip.restoredAt,
+			});
+			directions.set(meta.directionId, trips);
+			byLine.set(meta.routeId, directions);
+		}
+
+		const lines = [...byLine]
+			.sort(([a], [b]) => compareLines(gtfs, a, b))
+			.map(([routeId, directions]) => ({
+				line: lineOf(gtfs, routeId),
+				directions: [...directions]
+					.sort(([a], [b]) => a - b)
+					.map(([directionId, trips]) => ({
+						directionId,
+						headsigns: headsignsOf(gtfs, routeId, directionId),
+						trips,
+					})),
+			}));
+		return c.json({ lines } satisfies MissedTripsDto);
+	});
+
+	/**
+	 * Rétablit une course non honorée — elle repart de ce que publie le GTFS-RT source, pour la journée —, ou la
+	 * supprime à nouveau. Le feed suit sans attendre la ronde. Une course terminée — arrivée théorique
+	 * passée — ne se rétablit ni ne se supprime plus : elle n'a plus rien à annoncer.
+	 */
+	admin.put("/api/missed-trips/:run/restored", async (c) => {
+		const payload = await readObject(c);
+		if ("message" in payload) return c.json({ code: 400, message: payload.message }, 400);
+		if (typeof payload.restored !== "boolean")
+			return c.json({ code: 400, message: "Booléen « restored » attendu." }, 400);
+
+		const run = c.req.param("run");
+		const { tripId, date } = splitRun(run);
+		const midnight = serviceDays(deps.gtfs.data, [-1, 0]).find((day) => day.date === date)?.midnight;
+		const arrival = deps.gtfs.data.tripArrivals.get(tripId);
+		if (midnight !== undefined && arrival !== undefined && midnight + arrival < nowSeconds())
+			return c.json({ code: 409, message: "Cette course est terminée : il n'y a plus rien à rétablir." }, 409);
+
+		if (!deps.missedTrips.setRestored(run, payload.restored, nowSeconds()))
+			return c.json({ code: 404, message: "Cette course n'est pas, ou plus, constatée non honorée." }, 404);
+
+		deps.refreshTripUpdates();
+		return c.json({
+			code: 200,
+			message: payload.restored
+				? "Course rétablie pour aujourd'hui : elle repart de ce que publie le GTFS-RT source."
+				: "Course de nouveau publiée supprimée.",
+		});
 	});
 
 	/**

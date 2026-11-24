@@ -3,6 +3,7 @@ import { createRootRoute, createRoute, createRouter, redirect } from "@tanstack/
 import { AppShell } from "@/components/app-shell";
 import { type AlertStatus, AlertsPage, STATUSES } from "@/pages/alerts/alerts-page";
 import { ModificationEditorPage } from "@/pages/editor/editor-page";
+import { TABS as MISSED_TRIP_TABS, MissedTripsPage, type MissedTripTab } from "@/pages/missed-trips/missed-trips-page";
 import { ModificationsPage, type ModificationTab, TABS } from "@/pages/modifications/modifications-page";
 import { StopEditorPage } from "@/pages/stops/stop-editor-page";
 import { StopsPage } from "@/pages/stops/stops-page";
@@ -138,6 +139,27 @@ export const stopRoute = createRoute({
 	},
 });
 
+export const missedTripsRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/missed-trips",
+	validateSearch: (
+		search: Record<string, unknown>,
+	): {
+		tab?: MissedTripTab;
+		line?: string;
+		/** Les courses dont l'heure d'arrivée est passée s'affichent aussi. */
+		finished?: true;
+	} =>
+		defined({
+			tab: MISSED_TRIP_TABS.some((entry) => entry.value !== "cancelled" && entry.value === search.tab)
+				? (search.tab as MissedTripTab)
+				: undefined,
+			line: text(search.line),
+			finished: flag(search.finished),
+		}),
+	component: MissedTripsPage,
+});
+
 const routeTree = rootRoute.addChildren([
 	indexRoute,
 	alertsRoute,
@@ -147,6 +169,7 @@ const routeTree = rootRoute.addChildren([
 	stopsRoute,
 	newStopRoute,
 	stopRoute,
+	missedTripsRoute,
 ]);
 
 /** La racine de l'interface telle que le navigateur la voit — « /gtfs-rt/tcar/admin » derrière le proxy. */

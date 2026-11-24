@@ -236,7 +236,8 @@ export function tripRun(tripId: string, date: string): string {
  * sinon aucune course où s'annoncer. Il en va de même des réseaux relayés, dont le GTFS porte aussi
  * les courses : chacune sort sous son réseau (cf. `networkOf`).
  *
- * Une course annulée par une modification y figure toujours, annulée (cf. `isCancelled`).
+ * Une course annulée par une modification y figure toujours, annulée (cf. `isCancelled`), tout comme
+ * celle que `missed` dit non honorée faute de matériel (cf. `useMissedTrips`).
  *
  * Est retenue toute course qui part dans les vingt-quatre heures (cf. {@link TRIP_UPDATES_HORIZON})
  * et n'est pas arrivée à son terminus depuis plus d'une heure (cf. {@link FINISHED_TRIP_RETENTION}) :
@@ -261,6 +262,7 @@ export function scheduledTripUpdates(
 	skipIndex: SkipIndex,
 	cancelIndex: CancelIndex,
 	covered: ReadonlySet<string>,
+	missed: (tripId: string, date: string) => boolean,
 	nowSeconds: number,
 ): Map<string, GtfsRealtime.transit_realtime.ITripUpdate> {
 	const tripUpdates = new Map<string, GtfsRealtime.transit_realtime.ITripUpdate>();
@@ -280,9 +282,10 @@ export function scheduledTripUpdates(
 				if (departure === undefined || arrival === undefined) continue;
 				if (midnight + arrival < retainedSince || midnight + departure >= horizon) continue;
 
-				const tripUpdate = isCancelled(cancelIndex, gtfs, tripId, midnight)
-					? buildCancellation(gtfs, tripId, date, nowSeconds)
-					: buildTripUpdate(gtfs, skipIndex, tripId, date, midnight, departure, nowSeconds);
+				const tripUpdate =
+					isCancelled(cancelIndex, gtfs, tripId, midnight) || missed(tripId, date)
+						? buildCancellation(gtfs, tripId, date, nowSeconds)
+						: buildTripUpdate(gtfs, skipIndex, tripId, date, midnight, departure, nowSeconds);
 				if (tripUpdate === undefined) continue;
 
 				// L'identifiant porte la journée de service comme le descripteur, et pour la même raison :

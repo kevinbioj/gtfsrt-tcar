@@ -33,7 +33,17 @@ export type StatusDto = {
 	feeds: { serviceAlerts: FeedClock; tripModifications: FeedClock; tripUpdates: FeedClock };
 	/** Quand le GTFS en vigueur a été chargé, en secondes epoch. */
 	gtfsImportedAt: number;
-	counts: { alerts: number; uncheckedAlerts: number; modifications: number; provisionalStops: number };
+	counts: {
+		alerts: number;
+		uncheckedAlerts: number;
+		modifications: number;
+		provisionalStops: number;
+		/**
+		 * Courses non honorées publiées supprimées en ce moment : rétablies et terminées — arrivée
+		 * théorique passée — non comprises.
+		 */
+		missedTrips: number;
+	};
 	/** Le graphe routier est-il là ? Sans lui, pas d'accrochage aux rues. */
 	roadRouting: boolean;
 };
@@ -418,3 +428,45 @@ export type StopReferencesDto = {
 export type RouteLegDto = { path: [number, number][]; distance: number; fromOffset: number; toOffset: number };
 
 export type MessageDto = { code: number; message: string };
+
+// --- courses non honorées ---
+
+/**
+ * Pourquoi une course passe pour non honorée : absente du SAE (supprimée en amont), ou publiée sans
+ * avance ni retard et sans véhicule rattaché.
+ */
+export type MissedReason = "absent" | "ghost";
+
+export type MissedTripDto = {
+	/** Course et journée de service (« TCAR:9433:20261124 »), ce qui la désigne pour la rétablir. */
+	run: string;
+	tripId: string;
+	directionId: number;
+	/** Les terminus de départ et d'arrivée, tels que le GTFS les nomme. */
+	origin: string;
+	destination: string;
+	/**
+	 * Départ et arrivée théoriques, en secondes depuis le minuit de la journée de service — au-delà de
+	 * 24 h pour une course de la veille qui roule après minuit, comme le GTFS l'écrit.
+	 */
+	departure: number;
+	arrival: number;
+	/**
+	 * Le dernier arrêt que la course a dépassé selon l'horaire théorique, et son heure dans la même
+	 * unité que `departure` : là où elle devrait être. Son terminus, une fois l'heure d'arrivée passée.
+	 */
+	reference: { name: string; time: number };
+	/** Son heure d'arrivée théorique est passée. */
+	finished: boolean;
+	reason: MissedReason;
+	/** Quand le producteur l'a constatée, en secondes epoch. */
+	detectedAt: number;
+	/** Quand l'exploitant l'a rétablie, en secondes epoch ; `null` : elle est publiée supprimée. */
+	restoredAt: number | null;
+};
+
+/** Les courses non honorées d'un sens : ses destinations telles que le GTFS les affiche, et ses courses par départ. */
+export type MissedDirectionDto = { directionId: number; headsigns: string[]; trips: MissedTripDto[] };
+
+/** Les courses non honorées de la journée, ligne par ligne dans l'ordre du réseau, puis sens par sens. */
+export type MissedTripsDto = { lines: { line: LineDto; directions: MissedDirectionDto[] }[] };

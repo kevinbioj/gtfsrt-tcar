@@ -138,6 +138,7 @@ export function buildDetourEntities(
 	gtfs: StaticGtfs,
 	modifications: ReadonlyMap<number, ResolvedModification>,
 	cancelIndex: CancelIndex,
+	missed: (tripId: string, date: string) => boolean,
 	provisional: ReadonlyMap<string, ProvisionalStop>,
 	nowSeconds: number,
 ): {
@@ -210,8 +211,9 @@ export function buildDetourEntities(
 				if (departure === undefined || arrival === undefined) continue;
 				if (day.midnight + arrival < retainedSince || day.midnight + departure >= horizon) continue;
 
-				// Annulée, la course ne roule pas : elle n'a pas d'itinéraire à modifier.
-				if (isCancelled(cancelIndex, gtfs, tripId, day.midnight)) continue;
+				// Annulée, ou non honorée faute de matériel (cf. `useMissedTrips`), la course ne roule pas :
+				// elle n'a pas d'itinéraire à modifier.
+				if (isCancelled(cancelIndex, gtfs, tripId, day.midnight) || missed(tripId, day.date)) continue;
 
 				const schedule = gtfs.tripStopSequences.get(tripId);
 				if (schedule === undefined) continue;

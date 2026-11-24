@@ -1,14 +1,18 @@
 import type { AlertPhase, AlertPublication, ModificationState } from "@dto";
 import { cn } from "cn";
+import { type LucideIcon, XIcon } from "lucide-react";
 
-type Tone = "info" | "warning" | "neutral" | "inverse" | "solid";
+type Tone = "info" | "warning" | "neutral" | "inverse" | "solid" | "danger" | "caution";
 
-const TONES: Record<Tone, { pill: string; dot: string }> = {
+/** Les couleurs d'une pastille, et sa marque : un point, ou une icône quand elle en a une. */
+const TONES: Record<Tone, { pill: string; dot: string; icon?: LucideIcon }> = {
 	info: { pill: "bg-info text-info-foreground", dot: "bg-info-dot" },
 	warning: { pill: "bg-warning text-warning-foreground", dot: "bg-warning-dot" },
 	neutral: { pill: "bg-neutral text-neutral-foreground", dot: "bg-neutral-dot" },
 	inverse: { pill: "bg-inverse text-inverse-foreground", dot: "bg-white" },
 	solid: { pill: "bg-primary text-primary-foreground", dot: "bg-white" },
+	danger: { pill: "bg-destructive text-white", dot: "bg-white", icon: XIcon },
+	caution: { pill: "bg-caution text-caution-foreground", dot: "bg-caution-foreground" },
 };
 
 /** Une pastille d'état : un point de couleur et un libellé. */
@@ -21,6 +25,7 @@ export function StatusPill({
 	children: React.ReactNode;
 	className?: string;
 }) {
+	const Icon = TONES[tone].icon;
 	return (
 		<span
 			className={cn(
@@ -29,7 +34,11 @@ export function StatusPill({
 				className,
 			)}
 		>
-			<span aria-hidden="true" className={cn("size-1.5 rounded-full", TONES[tone].dot)} />
+			{Icon ? (
+				<Icon aria-hidden="true" className="-mx-0.5 size-3" strokeWidth={3} />
+			) : (
+				<span aria-hidden="true" className={cn("size-1.5 rounded-full", TONES[tone].dot)} />
+			)}
 			{children}
 		</span>
 	);
@@ -63,4 +72,6 @@ export const STATE_BANNERS: Record<Tone, string> = {
 	neutral: "bg-neutral text-neutral-foreground",
 	inverse: "bg-inverse text-inverse-foreground",
 	solid: "bg-primary text-primary-foreground",
+	danger: "bg-destructive text-white",
+	caution: "bg-caution text-caution-foreground",
 };

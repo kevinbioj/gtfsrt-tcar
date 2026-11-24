@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
+import { type MissedTrip, type MissedTripsState, SERVED_VERSION } from "./gtfs-rt/use-missed-trips.js";
 import type { TrackedVehicle } from "./gtfs-rt/use-movement-tracker.js";
 import type { RememberedRun } from "./gtfs-rt/use-stop-time-memory.js";
 import type { LocatedVehicle } from "./gtfs-rt/use-vehicle-locator.js";
@@ -8,7 +9,7 @@ import type { RegisteredVehicle } from "./gtfs-rt/use-vehicle-registry.js";
 /**
  * Tout ce que le producteur sait et que personne d'autre ne saurait lui redire : le mouvement qu'il
  * a constaté, ce qu'il a publié, où il a situé chaque véhicule, les horaires que les sources ont
- * retirés de leurs trip updates. Les instantanés qu'il tient des
+ * retirés de leurs trip updates, les courses qu'il a vues manquer. Les instantanés qu'il tient des
  * sources amont (vérification, girouettes, charge, trip updates) n'en sont pas : ceux-là se
  * rechargent d'eux-mêmes dès le démarrage, et les relire ne ferait que ressortir du périmé.
  */
@@ -25,6 +26,11 @@ export type ProducerState = {
 	locations: [string, LocatedVehicle][];
 	/** Le dernier horaire annoncé pour chaque arrêt de chaque course (cf. `useStopTimeMemory`). */
 	stopTimes: [string, RememberedRun][];
+	/**
+	 * Les courses vues rouler, celles vues manquer, et celles que l'exploitant a rétablies (cf.
+	 * `useMissedTrips`). Le module oublie lui-même les journées révolues.
+	 */
+	missedTrips: MissedTripsState;
 };
 
 /**
@@ -59,7 +65,14 @@ export function loadState(path: string, nowSeconds: number): ProducerState | und
 	// Fichier vierge : c'est le gabarit que le montage Docker met en place, pas un état.
 	if (raw.trim().length === 0) return undefined;
 
-	let parsed: { savedAt?: unknown; movements?: unknown; vehicles?: unknown; locations?: unknown; stopTimes?: unknown };
+	let parsed: {
+		savedAt?: unknown;
+		movements?: unknown;
+		vehicles?: unknown;
+		locations?: unknown;
+		stopTimes?: unknown;
+		missedTrips?: unknown;
+	};
 	try {
 		parsed = JSON.parse(raw);
 	} catch (cause) {
@@ -74,11 +87,12 @@ export function loadState(path: string, nowSeconds: number): ProducerState | und
 		vehicles: entriesOf(parsed.vehicles, isRegisteredVehicle),
 		locations: entriesOf(parsed.locations, isLocatedVehicle),
 		stopTimes: entriesOf(parsed.stopTimes, isRememberedRun),
+		missedTrips: missedTripsOf(parsed.missedTrips),
 	};
 
 	const age = savedAt ? `saved ${Math.round((nowSeconds - savedAt) / 60)} min ago` : "of unknown age";
 	console.log(
-		`✓ Restored state ${age} (${state.vehicles.length} vehicles, ${state.movements.length} tracked, ${state.locations.length} located, ${state.stopTimes.length} trips with remembered stop times).`,
+		`✓ Restored state ${age} (${state.vehicles.length} vehicles, ${state.movements.length} tracked, ${state.locations.length} located, ${state.stopTimes.length} trips with remembered stop times, ${state.missedTrips.missed.length} missed trips).`,
 	);
 
 	return state;
@@ -116,6 +130,19 @@ function entriesOf<T>(value: unknown, isValid: (payload: unknown) => payload is 
 	}
 
 	return entries;
+}
+
+/** Ce que le module des courses non honorées retenait, ce qui ne tient pas la route en moins. */
+function missedTripsOf(value: unknown): MissedTripsState {
+	if (!isObject(value)) return { servedVersion: SERVED_VERSION, served: [], missed: [], restored: [] };
+	// Des preuves d'une autre version ne prouvent rien (cf. `SERVED_VERSION`) : le premier relevé les refait.
+	const served = value.servedVersion === SERVED_VERSION && Array.isArray(value.served) ? value.served : [];
+	return {
+		servedVersion: SERVED_VERSION,
+		served: served.filter((run): run is string => typeof run === "string"),
+		missed: entriesOf(value.missed, isMissedTrip),
+		restored: entriesOf(value.restored, (payload): payload is number => typeof payload === "number"),
+	};
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -164,4 +191,10 @@ function isRememberedRun(payload: unknown): payload is RememberedRun {
 		if (stopTime.departure !== undefined && typeof stopTime.departure !== "number") return false;
 		return typeof stopTime.stopId === "string" && typeof stopTime.keepUntil === "number";
 	});
+}
+
+function isMissedTrip(payload: unknown): payload is MissedTrip {
+	if (!isObject(payload)) return false;
+	if (typeof payload.tripId !== "string" || typeof payload.date !== "string") return false;
+	return (payload.reason === "absent" || payload.reason === "ghost") && typeof payload.detectedAt === "number";
 }

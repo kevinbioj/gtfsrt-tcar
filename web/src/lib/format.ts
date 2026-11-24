@@ -33,6 +33,15 @@ export function formatSeconds(seconds: number): string {
 	return `${pad(Math.floor(minutes / 60) % 24)}:${pad(minutes % 60)}`;
 }
 
+/**
+ * Secondes depuis le minuit de la journée de service, telles que le GTFS les écrit : « 25:10 » pour une
+ * course qui roule après minuit, et non « 01:10 » — c'est sous cette heure-là que l'horaire la connaît.
+ */
+export function formatGtfsTime(seconds: number): string {
+	const minutes = Math.floor(seconds / 60);
+	return `${pad(Math.floor(minutes / 60))}:${pad(minutes % 60)}`;
+}
+
 /** « 06:30 » donne 23 400. */
 export function parseClock(value: string): number | null {
 	const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());

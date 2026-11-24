@@ -48,6 +48,9 @@
 	--color-neutral-dot: var(--neutral-dot);
 	--color-inverse: var(--inverse);
 	--color-inverse-foreground: var(--inverse-foreground);
+	/* Une course supprimée qu'on a rétablie à la main. */
+	--color-caution: var(--caution);
+	--color-caution-foreground: var(--caution-foreground);
 	--color-success: var(--success);
 	--color-map: var(--map);
 	--radius-sm: calc(var(--radius) * 0.6);
@@ -97,6 +100,8 @@
 	--neutral-dot: #8a9097;
 	--inverse: #3d434a;
 	--inverse-foreground: #ffffff;
+	--caution: #ffd400;
+	--caution-foreground: #1d1d1b;
 	--success: #1f8a4c;
 	--map: #eceee9;
 	--radius: 0.5rem;

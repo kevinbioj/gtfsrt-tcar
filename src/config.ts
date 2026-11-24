@@ -64,6 +64,13 @@ export const TRIP_UPDATES_URL =
 /** Rafraîchissement des trip updates, TCAR comme réseaux relayés. */
 export const TRIP_UPDATES_INTERVAL = Temporal.Duration.from({ seconds: 20 }).total("milliseconds");
 /**
+ * Délai au-delà duquel on renonce au relevé d'un flux source, réponse comprise. Un relevé de trip
+ * updates attend la fin du précédent (cf. `refreshTripUpdates`) : sans borne, une seule requête restée
+ * pendante figerait tout le flux — trip updates et courses non honorées — jusqu'au redémarrage. Moins
+ * que {@link TRIP_UPDATES_INTERVAL}, pour qu'un relevé en échec n'en retarde aucun autre.
+ */
+export const FEED_FETCH_TIMEOUT = Temporal.Duration.from({ seconds: 15 }).total("milliseconds");
+/**
  * L'ancien GTFS-RT du réseau. Il tranche la ligne et le sens du véhicule, mais il fournit aussi et
  * surtout la position qu'on publie : celle du flux SAE part parfois à l'autre bout du monde, quand
  * celle-ci reste juste (cf. {@link PREFERRED_POSITION_STALENESS}).
@@ -419,6 +426,20 @@ export const TRIP_MODIFICATIONS_ID_SALT = "2026-11-23";
  * de la course doit encore y trouver ce qui l'a touchée.
  */
 export const FINISHED_TRIP_RETENTION = Temporal.Duration.from({ hours: 1 }).total("seconds");
+
+/**
+ * Délai accordé à une course TCAR après son départ théorique avant de la tenir pour non honorée,
+ * faute de matériel (cf. `useMissedTrips`) : absente du SAE, ou publiée sans avance ni retard et sans
+ * véhicule rattaché. Rien ne se conclut avant — ni sur les courses à venir, ni sur celle dont le
+ * véhicule est rattaché avec une minute ou deux de retard, qu'on supprimerait puis rétablirait aussitôt.
+ */
+export const MISSED_TRIP_GRACE = Temporal.Duration.from({ minutes: 5 }).total("seconds");
+/**
+ * Âge au-delà duquel le relevé d'un flux SAE — trip updates ou positions, d'après son
+ * `header.timestamp` — ne permet plus de constater qu'une course manque : un flux figé n'annonce plus
+ * les courses qui roulent, et toutes passeraient pour absentes.
+ */
+export const MISSED_TRIP_FEED_STALENESS = Temporal.Duration.from({ minutes: 3 }).total("seconds");
 
 /**
  * Écart toléré entre l'instant d'un relevé et l'horaire théorique d'une course déviée pour que le

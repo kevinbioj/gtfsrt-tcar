@@ -1,7 +1,7 @@
 import type { FeedClock } from "@dto";
 import { Link, Outlet } from "@tanstack/react-router";
 import { cn } from "cn";
-import { MapPinnedIcon, RouteIcon, TriangleAlertIcon } from "lucide-react";
+import { BusFrontIcon, MapPinnedIcon, RouteIcon, TriangleAlertIcon } from "lucide-react";
 
 import transdevLogo from "@/assets/transdev.png";
 import { formatClock, formatDate } from "@/lib/format";
@@ -11,6 +11,7 @@ const NAV = [
 	{ to: "/alerts", label: "Alertes de service", icon: TriangleAlertIcon, count: "uncheckedAlerts" },
 	{ to: "/modifications", label: "Modifications", icon: RouteIcon, count: "modifications" },
 	{ to: "/stops", label: "Arrêts provisoires", icon: MapPinnedIcon, count: "provisionalStops" },
+	{ to: "/missed-trips", label: "Courses supp.", icon: BusFrontIcon, count: "missedTrips" },
 ] as const;
 
 /** Un flux et l'heure à laquelle il a été réassemblé pour la dernière fois. */

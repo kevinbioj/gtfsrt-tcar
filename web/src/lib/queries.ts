@@ -6,6 +6,7 @@ import type {
 	LabelAssignmentDto,
 	LabelDto,
 	MessageDto,
+	MissedTripsDto,
 	ModificationDetailDto,
 	ModificationInputDto,
 	ModificationSummaryDto,
@@ -37,6 +38,7 @@ export const keys = {
 	provisionalStops: ["provisional-stops"] as const,
 	stopReferences: ["stop-references"] as const,
 	allStops: ["stops", "all"] as const,
+	missedTrips: ["missed-trips"] as const,
 };
 
 export function useStatus() {
@@ -145,6 +147,15 @@ export function useStopReferences() {
 	});
 }
 
+/** Les courses non honorées de la journée : le producteur en constate de nouvelles à chaque relevé. */
+export function useMissedTrips() {
+	return useQuery({
+		queryKey: keys.missedTrips,
+		queryFn: () => api<MissedTripsDto>("/missed-trips"),
+		refetchInterval: 30_000,
+	});
+}
+
 export function useAllStops() {
 	return useQuery({ queryKey: keys.allStops, queryFn: () => api<AllStopsDto>("/stops/all"), staleTime: 5 * 60_000 });
 }
@@ -237,6 +248,23 @@ export function useSetManual() {
 		mutationFn: ({ uid, active }: { uid: number; active: boolean }) =>
 			api<MessageDto>(`/modifications/${uid}/manual`, { method: "PUT", body: { active } }),
 		onSuccess: () => invalidate(),
+		onError: reportError,
+	});
+}
+
+/** Rétablit une course non honorée pour la journée, ou la publie de nouveau supprimée. */
+export function useSetMissedTripRestored() {
+	const client = useQueryClient();
+	return useMutation({
+		mutationFn: ({ run, restored }: { run: string; restored: boolean }) =>
+			api<MessageDto>(`/missed-trips/${encodeURIComponent(run)}/restored`, { method: "PUT", body: { restored } }),
+		onSuccess: (result) => {
+			toast.success(result.message);
+			return Promise.all([
+				client.invalidateQueries({ queryKey: keys.missedTrips }),
+				client.invalidateQueries({ queryKey: keys.status }),
+			]);
+		},
 		onError: reportError,
 	});
 }

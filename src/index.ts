@@ -9,6 +9,7 @@ import {
 	ALERT_CACHE_PATH,
 	ALERTS_POLL_INTERVAL,
 	DETOURS_DB_PATH,
+	FEED_FETCH_TIMEOUT,
 	GTFS_CHECK_INTERVAL,
 	LEGACY_BACKFILLED_STOPS,
 	LEGACY_GTFS_URL,
@@ -16,6 +17,7 @@ import {
 	LEGACY_TRIP_UPDATES_URL,
 	LINE_CARTRIDGES_INTERVAL,
 	LINE_CARTRIDGES_URL,
+	MISSED_TRIP_FEED_STALENESS,
 	NON_REALTIME_DESTINATIONS,
 	PORT,
 	PREFERRED_POSITION_STALENESS,
@@ -62,6 +64,7 @@ import {
 } from "./gtfs-rt/scheduled-trips.js";
 import { useChangeTracker } from "./gtfs-rt/track-changes.js";
 import { legacyTripUpdate, matchLegacyTrip, useLegacyGtfs } from "./gtfs-rt/use-legacy-gtfs.js";
+import { deviatesFromSchedule, type MissedTrip, splitRun, useMissedTrips } from "./gtfs-rt/use-missed-trips.js";
 import { type Movement, useMovementTracker } from "./gtfs-rt/use-movement-tracker.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
 import { useRelayedNetworks } from "./gtfs-rt/use-relayed-networks.js";
@@ -164,6 +167,9 @@ const serviceAlerts = useServiceAlerts(SERVICE_ALERTS_URL, ALERTS_POLL_INTERVAL,
 	},
 });
 const modificationIndex = useModificationIndex(detourStore, staticGtfs, () => serviceAlerts.alerts);
+// Les courses TCAR qui ne circulent pas faute de matériel, publiées supprimées (cf. `useMissedTrips`).
+// Ce qu'il en savait au dernier arrêt lui revient : le SAE ne redira pas ce qu'il a cessé de publier.
+const missedTrips = useMissedTrips(staticGtfs, restored?.missedTrips);
 // Sa présence est constatée ici, ses octets ne seront lus qu'au premier accrochage.
 const roadGraph = useRoadGraph(ROAD_GRAPH_PATH);
 // Rien qu'une affaire d'affichage : on ne l'attend pas, l'interface s'en passe le temps qu'il arrive.
@@ -226,6 +232,8 @@ if (ADMIN_USERNAME && ADMIN_PASSWORD) {
 				// Une dépublication programmée a pu être saisie, déplacée ou retirée.
 				scheduleUnpublication();
 			},
+			missedTrips,
+			refreshTripUpdates: () => void refreshTripUpdates(),
 		}),
 	);
 	console.log("➔ Detour administration mounted on /admin.");
@@ -486,11 +494,13 @@ console.log(`➔ Listening on :${PORT}`);
 // ---
 
 async function poll() {
+	const fetched = await fetchFeed(VEHICLE_POSITIONS_URL, "Vehicle positions");
 	const feed =
-		(await fetchFeed(VEHICLE_POSITIONS_URL, "Vehicle positions")) ??
-		GtfsRealtime.transit_realtime.FeedMessage.create({ header: { gtfsRealtimeVersion: "2.0" }, entity: [] });
+		fetched ?? GtfsRealtime.transit_realtime.FeedMessage.create({ header: { gtfsRealtimeVersion: "2.0" }, entity: [] });
 
 	const nowSeconds = Math.floor(Date.now() / 1000);
+	// Une course sans véhicule ne prouve qu'elle manque que si le flux des positions a vraiment répondu.
+	if (isFreshFeed(fetched, nowSeconds)) missedTrips.vehicleFeedReceived(nowSeconds);
 	const forgotten = registry.prune(nowSeconds);
 
 	// Journées de service auxquelles une course annoncée peut appartenir, calculées une fois pour tout
@@ -720,6 +730,15 @@ async function poll() {
 		);
 	}
 
+	// Une course que le feed publie avec un véhicule roule (cf. `useMissedTrips`) : on la lit dans ce qui
+	// sort, toutes corrections faites — exemplaire du jour, ligne confirmée, mouvement constaté, retour au
+	// dépôt écarté —, et non dans ce que la source raconte, qui prête volontiers à un véhicule la course
+	// d'une autre ligne. Un véhicule dont seule la position est rafraîchie garde la course déjà publiée.
+	for (const { trip } of registry.publishable(nowSeconds).values()) {
+		if (trip?.tripId && trip.startDate)
+			missedTrips.observeVehicle({ tripId: trip.tripId, date: trip.startDate }, candidateDays, nowSeconds);
+	}
+
 	saveState(
 		STATE_CACHE_PATH,
 		{
@@ -727,6 +746,7 @@ async function poll() {
 			vehicles: registry.snapshot(),
 			locations: vehicleLocator.snapshot(),
 			stopTimes: stopTimeMemory.snapshot(),
+			missedTrips: missedTrips.snapshot(),
 		},
 		nowSeconds,
 	);
@@ -892,6 +912,13 @@ async function pollTripUpdates() {
 		const covered = new Set<string>();
 		/** Les courses déjà reprises de l'ancien GTFS-RT, pour qu'il ne serve pas deux fois la même. */
 		const legacyRuns = new Set<string>();
+		/**
+		 * Les courses TCAR à vrai temps réel que publient les sources, et si l'une d'elles y annonce un
+		 * écart à l'horaire — la preuve qu'elles roulent (cf. `useMissedTrips`).
+		 */
+		const presentRuns = new Map<string, boolean>();
+		/** L'entité sous laquelle chaque course TCAR des sources sort, pour la supprimer après coup. */
+		const homeEntityIds = new Map<string, string>();
 
 		// Passé le délai de reprise, ce que le SAE a publié d'une course n'empêche plus rien.
 		for (const [run, updatedAt] of sourceTripUpdatedAt)
@@ -1042,6 +1069,16 @@ async function pollTripUpdates() {
 			const midnight = candidateDays.find((day) => day.date === startDate)?.midnight;
 			if (network === HOME_NETWORK && realtime && resolvedTripId && startDate && midnight !== undefined) {
 				const run = tripRun(resolvedTripId, startDate);
+
+				// Ce que la course dit d'elle-même, avant que les arrêts rendus ne la complètent : un écart à
+				// l'horaire théorique prouve qu'elle roule, son absence la laisse suspecte (cf. `useMissedTrips`).
+				const deviates = deviatesFromSchedule(
+					entity.tripUpdate,
+					staticGtfs.data.tripStopSequences.get(resolvedTripId),
+					midnight,
+				);
+				presentRuns.set(run, (presentRuns.get(run) ?? false) || deviates);
+
 				const updatedAt = Number(entity.tripUpdate.timestamp ?? 0) || nowSeconds;
 				if (entity.legacy || nowSeconds - updatedAt <= LEGACY_TAKEOVER_DELAY)
 					rememberStopTimes(run, entity.tripUpdate, resolvedTripId, midnight);
@@ -1077,6 +1114,8 @@ async function pollTripUpdates() {
 			// première.
 			const tripEntityId = (resolvedTripId ?? entity.id).split(":").at(-1) ?? entity.id;
 			const entityId = `ET:${network}:${tripEntityId}${startDate ? `:${startDate}` : ""}`;
+			if (network === HOME_NETWORK && resolvedTripId && startDate)
+				homeEntityIds.set(tripRun(resolvedTripId, startDate), entityId);
 
 			// Annulée par une modification : ce que la source en dit ne tient plus, temps réel compris.
 			if (
@@ -1124,6 +1163,27 @@ async function pollTripUpdates() {
 			sourceTrips.set(network, (sourceTrips.get(network) ?? 0) + 1);
 		}
 
+		// Les courses qui ne circulent pas faute de matériel. Le constat ne se fait que sur un flux SAE
+		// qui a répondu ce tour-ci, frais et non vide : faute de quoi toutes passeraient pour absentes.
+		const { detected, paused } = missedTrips.evaluate({
+			present: presentRuns,
+			tripFeedHealthy: isFreshFeed(feed, nowSeconds),
+			judged: (tripId, midnight) =>
+				hasSourceRealtime(staticGtfs.data.trips.get(tripId)?.routeId.split(":").at(-1) ?? "", tripId) &&
+				!isCancelled(modificationIndex.cancelIndex, staticGtfs.data, tripId, midnight),
+			nowSeconds,
+		});
+		for (const trip of detected) console.log(`\t➔ ${describeMissedTrip(trip)}`);
+
+		// Celles que les sources publient encore sortent supprimées sous leur propre entité ; les absentes
+		// le sont parmi les courses reconstruites depuis l'horaire théorique.
+		for (const [run, entityId] of homeEntityIds) {
+			const tripUpdate = store.tripUpdates.get(entityId);
+			const { tripId, date } = splitRun(run);
+			if (tripUpdate === undefined || !missedTrips.isCancelled(tripId, date)) continue;
+			declareCancelled(tripUpdate);
+		}
+
 		// Toutes les autres courses des vingt-quatre heures à venir qui n'ont pas fini de circuler : le
 		// flux source les ignore, l'horaire théorique les connaît (cf. `scheduledTripUpdates`).
 		const scheduled = scheduledTripUpdates(
@@ -1131,12 +1191,14 @@ async function pollTripUpdates() {
 			modificationIndex.skipIndex,
 			modificationIndex.cancelIndex,
 			covered,
+			missedTrips.isCancelled,
 			nowSeconds,
 		);
 		for (const [id, tripUpdate] of scheduled) store.tripUpdates.set(id, tripUpdate);
 
+		const missedCounts = missedTrips.counts(nowSeconds);
 		console.log(
-			`✓ ${store.tripUpdates.size} trip updates (${[...sourceTrips].map(([network, count]) => `${count} ${network}`).join(", ")} from sources; ${realtimeTrips} realtime, ${scheduleOnly} source without realtime, ${cancelledTrips} source cancelled, ${scheduled.size} rebuilt from schedule, ${store.tripDepartures.size} departures announced, ${unresolvedTrips} unresolved trips, ${legacyTrips} relayed from the legacy feed, ${discardedLegacyTrips} legacy trips discarded).`,
+			`✓ ${store.tripUpdates.size} trip updates (${[...sourceTrips].map(([network, count]) => `${count} ${network}`).join(", ")} from sources; ${realtimeTrips} realtime, ${scheduleOnly} source without realtime, ${cancelledTrips} source cancelled, ${scheduled.size} rebuilt from schedule, ${store.tripDepartures.size} departures announced, ${unresolvedTrips} unresolved trips, ${legacyTrips} relayed from the legacy feed, ${discardedLegacyTrips} legacy trips discarded, ${missedCounts.cancelled} missed (${missedCounts.ongoing} in progress)${missedCounts.restored > 0 ? ` + ${missedCounts.restored} restored` : ""}${paused ? ", missed-trip detection paused" : ""}).`,
 		);
 
 		rebuildDetourEntities();
@@ -1255,6 +1317,7 @@ function rebuildDetourEntities() {
 			staticGtfs.data,
 			modificationIndex.modifications,
 			modificationIndex.cancelIndex,
+			missedTrips.isCancelled,
 			detourStore.provisionalStops,
 			Math.floor(Date.now() / 1000),
 		);
@@ -1266,10 +1329,35 @@ function rebuildDetourEntities() {
 	}
 }
 
-/** Le GTFS-RT publié à cette adresse, ou `undefined` s'il n'a pas pu être relevé. */
+/**
+ * Le relevé d'un flux SAE permet-il de constater qu'une course manque ? Il faut qu'il ait répondu,
+ * avec des entités, et que sa date ne soit pas figée (cf. {@link MISSED_TRIP_FEED_STALENESS}).
+ */
+function isFreshFeed(feed: GtfsRealtime.transit_realtime.FeedMessage | undefined, nowSeconds: number): boolean {
+	if (feed === undefined || feed.entity.length === 0) return false;
+	return nowSeconds - Number(feed.header?.timestamp ?? 0) <= MISSED_TRIP_FEED_STALENESS;
+}
+
+/** Une course non honorée, telle qu'elle s'écrit au journal. */
+function describeMissedTrip({ tripId, reason }: MissedTrip): string {
+	const meta = staticGtfs.data.trips.get(tripId);
+	const departure = staticGtfs.data.tripDepartures.get(tripId);
+	const clock =
+		departure === undefined
+			? "?"
+			: `${String(Math.floor(departure / 3600)).padStart(2, "0")}:${String(Math.floor((departure % 3600) / 60)).padStart(2, "0")}`;
+	const line = meta === undefined ? "?" : (staticGtfs.data.routeNames.get(meta.routeId) ?? meta.routeId);
+	const why = reason === "absent" ? "aucun trip update" : "trip update retard=0 + pas de véhicule rattaché";
+	return `${tripId} (${line} ${clock} → ${meta?.headsign ?? "?"}) non honorée : ${why}.`;
+}
+
+/**
+ * Le GTFS-RT publié à cette adresse, ou `undefined` s'il n'a pas pu être relevé — y compris dans les
+ * {@link FEED_FETCH_TIMEOUT} : la borne couvre la réponse entière, corps compris.
+ */
 async function fetchFeed(url: string, label: string): Promise<GtfsRealtime.transit_realtime.FeedMessage | undefined> {
 	try {
-		const response = await fetch(url);
+		const response = await fetch(url, { signal: AbortSignal.timeout(FEED_FETCH_TIMEOUT) });
 		if (!response.ok || response.status === 204) {
 			console.error(`✘ ${label} fetch failed (HTTP ${response.status}).`);
 			return undefined;
@@ -1429,9 +1517,22 @@ function announcedDeparture(tripUpdate: GtfsRealtime.transit_realtime.ITripUpdat
 	return departure === 0 ? undefined : departure;
 }
 
+let tripUpdatesPoll: Promise<void> | undefined;
+
+/**
+ * Relève les trip updates, ou rejoint le relevé en cours : la ronde et l'interface — un
+ * rétablissement doit se voir dans le feed sans attendre la ronde — ne se marchent pas dessus.
+ */
+function refreshTripUpdates(): Promise<void> {
+	tripUpdatesPoll ??= pollTripUpdates().finally(() => {
+		tripUpdatesPoll = undefined;
+	});
+	return tripUpdatesPoll;
+}
+
 setInterval(poll, VEHICLE_POSITIONS_INTERVAL);
-setInterval(pollTripUpdates, TRIP_UPDATES_INTERVAL);
+setInterval(refreshTripUpdates, TRIP_UPDATES_INTERVAL);
 // Une échéance passée pendant que le service était arrêté se rattrape aussitôt.
 scheduleUnpublication();
 await poll();
-await pollTripUpdates();
+await refreshTripUpdates();
