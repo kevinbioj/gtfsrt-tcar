@@ -64,6 +64,7 @@ import {
 } from "./gtfs-rt/scheduled-trips.js";
 import { useChangeTracker } from "./gtfs-rt/track-changes.js";
 import { legacyTripUpdate, matchLegacyTrip, useLegacyGtfs } from "./gtfs-rt/use-legacy-gtfs.js";
+import { useLineLocks } from "./gtfs-rt/use-line-locks.js";
 import { deviatesFromSchedule, type MissedTrip, splitRun, useMissedTrips } from "./gtfs-rt/use-missed-trips.js";
 import { type Movement, useMovementTracker } from "./gtfs-rt/use-movement-tracker.js";
 import { useRealtimeStore } from "./gtfs-rt/use-realtime-store.js";
@@ -138,6 +139,9 @@ const sourceTripUpdatedAt = new Map<string, number>();
 /** Les horaires que les sources ont annoncés, rendus aux arrêts qu'elles retirent (cf. `backfillStops`). */
 const stopTimeMemory = useStopTimeMemory(restored?.stopTimes);
 const registry = useVehicleRegistry(restored?.vehicles);
+// La ligne où chaque véhicule a été publié, et dont il ne bouge plus tant que sa girouette lui
+// appartient : la girouette seule ne départage pas deux lignes qui partagent une destination.
+const lineLocks = useLineLocks(restored?.lineLocks);
 const movementTracker = useMovementTracker(restored?.movements);
 const vehicleOccupancyStatuses = useVehicleOccupancyStatuses();
 const vehicleFleet = await useVehicleFleet(VEHICLES_URL, VEHICLES_INTERVAL);
@@ -502,6 +506,7 @@ async function poll() {
 	// Une course sans véhicule ne prouve qu'elle manque que si le flux des positions a vraiment répondu.
 	if (isFreshFeed(fetched, nowSeconds)) missedTrips.vehicleFeedReceived(nowSeconds);
 	const forgotten = registry.prune(nowSeconds);
+	lineLocks.prune(nowSeconds);
 
 	// Journées de service auxquelles une course annoncée peut appartenir, calculées une fois pour tout
 	// le relevé : le calendrier ne change pas d'un véhicule à l'autre.
@@ -519,6 +524,7 @@ async function poll() {
 	let deadheads = 0;
 	let unknownVehicles = 0;
 	let unlocated = 0;
+	let heldByLock = 0;
 
 	/** Situe le véhicule sur la course indiquée, en comptant les échecs pour la ligne de synthèse. */
 	const locateOn = (vehicleId: string, tripId: string, position: GtfsRealtime.transit_realtime.IPosition) => {
@@ -622,6 +628,11 @@ async function poll() {
 		const routeId = vehicle.trip.routeId ?? "";
 		const lineId = routeId.split(":").at(-1) ?? "";
 
+		// La girouette tient ou lève le verrou de ligne quoi que la source annonce : elle seule dit si le
+		// véhicule a quitté la ligne où on l'a laissé (cf. `useLineLocks`).
+		const destinationName = freshDestination(vehicleId, nowSeconds);
+		const lockedRouteId = lineLocks.observe(vehicleId, destinationName, nowSeconds);
+
 		// Ligne sans vrai temps réel : la source y rebadge l'horaire théorique, sa course ne vaut rien.
 		// Le véhicule n'est jamais publié de ce fait — tout au plus voit-il sa position rafraîchie s'il
 		// l'a déjà été depuis une ligne qui, elle, tient debout.
@@ -633,11 +644,10 @@ async function poll() {
 			continue;
 		}
 
-		const destinationName = freshDestination(vehicleId, nowSeconds);
-
 		// Haut-le-pied : le véhicule rentre au dépôt. On le publie parce qu'il roule, mais sans course —
 		// celle que le SAE continue de lui prêter ne dessert plus personne. La girouette porte alors le
-		// seul renseignement utile, on la republie.
+		// seul renseignement utile, on la republie. Elle n'appartient à aucune ligne : le verrou est déjà
+		// tombé, et le véhicule repartira sur la ligne que la vérification lui confirmera.
 		if (isDepotDestination(destinationName)) {
 			deadheads += 1;
 			registry.publish(
@@ -679,18 +689,29 @@ async function poll() {
 			{ routeId, lineId, directionId },
 			freshVerification(vehicleId, nowSeconds),
 			destinationName,
+			lockedRouteId,
 		);
 
-		// Ni le flux de vérification ni la girouette ne confirment la ligne annoncée : on ne relaie pas
-		// la course, mais on continue de rafraîchir la position sur la dernière course connue, sinon le
-		// véhicule se fige. Jamais publié, il n'a pas de course à conserver : on ne fait rien.
+		// Ni le flux de vérification ni la girouette ne confirment la ligne annoncée — ou la girouette la
+		// confirme, mais le véhicule est verrouillé sur une autre ligne qu'elle confirme tout autant : on
+		// ne relaie pas la course, mais on continue de rafraîchir la position sur la dernière course
+		// connue, sinon le véhicule se fige. Jamais publié, il n'a pas de course à conserver : on ne fait
+		// rien.
 		if (!check.valid) {
-			// La girouette est recopiée telle quelle : c'est la chaîne à reporter dans LINE_DESTINATIONS
-			// pour que la ligne cesse d'être écartée.
 			const verified = check.verified;
-			console.warn(
-				`\t✘ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} ${directionId} — flux "${verified ? `${verified.routeId}/${verified.directionId}` : "?"}", girouette "${check.destinationName || "?"}".`,
-			);
+			if (check.lockedRouteId !== undefined) {
+				heldByLock += 1;
+				console.warn(
+					`\t✘ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} ${directionId} — verrouillé sur ${check.lockedRouteId}, girouette "${check.destinationName}".`,
+				);
+			} else {
+				// La girouette, elle, dit vrai : si elle n'appartient pas à la ligne annoncée, c'est d'abord que
+				// la source se trompe de ligne. Elle est recopiée telle quelle pour le cas où la table serait
+				// incomplète : c'est alors la chaîne à reporter dans LINE_DESTINATIONS.
+				console.warn(
+					`\t✘ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} ${directionId} — flux "${verified ? `${verified.routeId}/${verified.directionId}` : "?"}", girouette "${check.destinationName || "?"}".`,
+				);
+			}
 
 			if (registry.refresh(vehicleId, movedPosition, timestamp, occupancyStatus, relocate(vehicleId, movedPosition)))
 				refreshed += 1;
@@ -724,6 +745,7 @@ async function poll() {
 			timestamp,
 			departsAt,
 		);
+		lineLocks.lock(vehicleId, routeId, nowSeconds);
 
 		console.log(
 			`\t⛛ ${vehicleId.padEnd(4, " ")}  ${routeId.padEnd(10, " ")} ${directionId} (${check.by}${describeStillness(movement, departsAt, nowSeconds)}) — ${describeLocation(location)}`,
@@ -744,6 +766,7 @@ async function poll() {
 		{
 			movements: movementTracker.snapshot(),
 			vehicles: registry.snapshot(),
+			lineLocks: lineLocks.snapshot(),
 			locations: vehicleLocator.snapshot(),
 			stopTimes: stopTimeMemory.snapshot(),
 			missedTrips: missedTrips.snapshot(),
@@ -752,7 +775,7 @@ async function poll() {
 	);
 
 	console.log(
-		`✓ ${registry.publishable(nowSeconds).size} positions (${published} verified, ${refreshed} position-only, ${deadheads} deadheading, ${preferredPositions} located by the legacy feed, ${legacyOnly.length} known only to it, ${unresolvedTrips} unresolved trips, ${staleRecords} stale records, ${unprovenVehicles} never moved, ${frozenVehicles} motionless, ${awaitedVehicles} awaiting departure, ${untrackedLines} on untracked lines, ${unknownVehicles} never published, ${unlocated} unlocated, ${forgotten} forgotten).`,
+		`✓ ${registry.publishable(nowSeconds).size} positions (${published} verified, ${refreshed} position-only, ${deadheads} deadheading, ${preferredPositions} located by the legacy feed, ${legacyOnly.length} known only to it, ${unresolvedTrips} unresolved trips, ${staleRecords} stale records, ${unprovenVehicles} never moved, ${frozenVehicles} motionless, ${awaitedVehicles} awaiting departure, ${untrackedLines} on untracked lines, ${unknownVehicles} never published, ${heldByLock} held by line lock, ${unlocated} unlocated, ${forgotten} forgotten).`,
 	);
 }
 

@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
+import type { LineLock } from "./gtfs-rt/use-line-locks.js";
 import { type MissedTrip, type MissedTripsState, SERVED_VERSION } from "./gtfs-rt/use-missed-trips.js";
 import type { TrackedVehicle } from "./gtfs-rt/use-movement-tracker.js";
 import type { RememberedRun } from "./gtfs-rt/use-stop-time-memory.js";
@@ -22,6 +23,11 @@ export type ProducerState = {
 	movements: [string, TrackedVehicle][];
 	/** Les entrées du feed, publiées ou en sursis (cf. `useVehicleRegistry`). */
 	vehicles: [string, RegisteredVehicle][];
+	/**
+	 * La ligne où chaque véhicule est verrouillé (cf. `useLineLocks`). Absente d'un état antérieur,
+	 * elle repart vide : chaque véhicule se reverrouille à sa première publication.
+	 */
+	lineLocks: [string, LineLock][];
 	/** Le dernier projeté de chaque véhicule sur sa course (cf. `useVehicleLocator`). */
 	locations: [string, LocatedVehicle][];
 	/** Le dernier horaire annoncé pour chaque arrêt de chaque course (cf. `useStopTimeMemory`). */
@@ -69,6 +75,7 @@ export function loadState(path: string, nowSeconds: number): ProducerState | und
 		savedAt?: unknown;
 		movements?: unknown;
 		vehicles?: unknown;
+		lineLocks?: unknown;
 		locations?: unknown;
 		stopTimes?: unknown;
 		missedTrips?: unknown;
@@ -85,6 +92,7 @@ export function loadState(path: string, nowSeconds: number): ProducerState | und
 	const state: ProducerState = {
 		movements: entriesOf(parsed.movements, isTrackedVehicle),
 		vehicles: entriesOf(parsed.vehicles, isRegisteredVehicle),
+		lineLocks: entriesOf(parsed.lineLocks, isLineLock),
 		locations: entriesOf(parsed.locations, isLocatedVehicle),
 		stopTimes: entriesOf(parsed.stopTimes, isRememberedRun),
 		missedTrips: missedTripsOf(parsed.missedTrips),
@@ -92,7 +100,7 @@ export function loadState(path: string, nowSeconds: number): ProducerState | und
 
 	const age = savedAt ? `saved ${Math.round((nowSeconds - savedAt) / 60)} min ago` : "of unknown age";
 	console.log(
-		`✓ Restored state ${age} (${state.vehicles.length} vehicles, ${state.movements.length} tracked, ${state.locations.length} located, ${state.stopTimes.length} trips with remembered stop times, ${state.missedTrips.missed.length} missed trips).`,
+		`✓ Restored state ${age} (${state.vehicles.length} vehicles, ${state.lineLocks.length} line locks, ${state.movements.length} tracked, ${state.locations.length} located, ${state.stopTimes.length} trips with remembered stop times, ${state.missedTrips.missed.length} missed trips).`,
 	);
 
 	return state;
@@ -168,6 +176,10 @@ function isRegisteredVehicle(payload: unknown): payload is RegisteredVehicle {
 	// JSON n'écrit pas `undefined`.
 	if (payload.departsAt !== undefined && typeof payload.departsAt !== "number") return false;
 	return isObject(payload.entity) && typeof payload.movedAt === "number";
+}
+
+function isLineLock(payload: unknown): payload is LineLock {
+	return isObject(payload) && typeof payload.routeId === "string" && typeof payload.confirmedAt === "number";
 }
 
 function isLocatedVehicle(payload: unknown): payload is LocatedVehicle {

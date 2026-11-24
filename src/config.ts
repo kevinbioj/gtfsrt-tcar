@@ -289,6 +289,9 @@ export const DEPOT_DESTINATIONS = ["Dépôt 2 Rivières", "Dépôt St-Julien"];
  * Une ligne déclarée doit donc porter **toutes** ses destinations, pas seulement celles qui posent
  * question, faute de quoi ses véhicules légitimes tombent dans le second cas.
  *
+ * Une destination que plusieurs lignes partagent (« Mont aux Malades », T1 et T5) se déclare sur
+ * chacune : elle ne les départage pas, c'est le verrou de ligne qui s'en charge (cf. `useLineLocks`).
+ *
  * ⚠ Table de départ récoltée sur un échantillon de sept minutes un samedi matin : elle est
  * incomplète. Le journal signale chaque girouette non déclarée avec la ligne et le terminus attendu —
  * de quoi la compléter au fil de l'eau.

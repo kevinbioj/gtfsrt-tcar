@@ -22,6 +22,11 @@ export type Verification =
 			verified: { routeId: string; directionId: number } | undefined;
 			/** La girouette relevée, chaîne vide si l'instantané SAE ignore le véhicule. */
 			destinationName: string;
+			/**
+			 * La ligne sur laquelle le véhicule est verrouillé, quand c'est le verrou seul qui écarte
+			 * l'annonce : la girouette, elle, l'aurait laissée passer (cf. `useLineLocks`).
+			 */
+			lockedRouteId?: string;
 	  };
 
 /**
@@ -46,6 +51,12 @@ export function isDepotDestination(destinationName: string): boolean {
  *     ou relevé périmé. Elle est confrontée aux destinations déclarées de la ligne annoncée : une
  *     destination qui lui appartient vaut confirmation, faute de mieux.
  *
+ *     Faute de mieux seulement : une destination que deux lignes partagent ne les départage pas
+ *     (« Mont aux Malades », T1 comme T5). Le **verrou de ligne** tranche alors : un véhicule
+ *     verrouillé sur une autre ligne que celle qu'annonce la source y reste, quand bien même la
+ *     girouette irait aux deux. Il n'est passé que verrou fait — c'est-à-dire tant que la girouette
+ *     appartient encore à la ligne verrouillée (cf. `useLineLocks`).
+ *
  * Sans aucune des deux, le véhicule n'est pas publiable : rien ne confirme ce que la source annonce.
  *
  * `verified` est `undefined` quand le flux ignore le véhicule ou que son relevé est périmé — les
@@ -56,6 +67,7 @@ export function verifyVehicle(
 	observed: ObservedVehicle,
 	verified: VerifiedVehicle | undefined,
 	destinationName: string,
+	lockedRouteId: string | undefined,
 ): Verification {
 	const destinationMatches = isDeclaredDestination(observed.lineId, destinationName);
 
@@ -74,18 +86,23 @@ export function verifyVehicle(
 	}
 
 	// Muet sur ce véhicule, il laisse la girouette décider.
-	if (destinationMatches) return { valid: true, by: "destination" };
+	if (!destinationMatches) return { valid: false, verified: undefined, destinationName };
 
-	return { valid: false, verified: undefined, destinationName };
+	// La girouette appartient aussi à la ligne verrouillée — le verrou serait tombé sinon : elle ne
+	// départage pas les deux lignes, et le véhicule reste sur celle où on l'a laissé.
+	if (lockedRouteId !== undefined && lockedRouteId !== observed.routeId) {
+		return { valid: false, verified: undefined, destinationName, lockedRouteId };
+	}
+
+	return { valid: true, by: "destination" };
 }
-
-// ---
 
 /**
  * Vrai si la girouette figure parmi les destinations déclarées de sa ligne. Une ligne absente de la
- * table n'en a aucune : rien n'y est reconnu.
+ * table n'en a aucune : rien n'y est reconnu. C'est aussi ce qui tient le verrou de ligne (cf.
+ * `useLineLocks`).
  */
-function isDeclaredDestination(lineId: string, destinationName: string): boolean {
+export function isDeclaredDestination(lineId: string, destinationName: string): boolean {
 	const destinations = LINE_DESTINATIONS.get(lineId);
 	if (destinations === undefined) return false;
 
