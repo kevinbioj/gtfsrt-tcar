@@ -10,7 +10,7 @@ import {
 	isCancelled,
 	type SkipIndex,
 } from "./use-service-alerts.js";
-import { SERVICE_ADDED, SERVICE_REMOVED, type StaticGtfs } from "./use-static-gtfs.js";
+import { SERVICE_ADDED, SERVICE_REMOVED, type StaticGtfs, startTimeOf } from "./use-static-gtfs.js";
 
 const TIME_ZONE = "Europe/Paris";
 
@@ -336,7 +336,13 @@ function buildCancellation(
 	if (meta === undefined) return undefined;
 
 	const tripUpdate: GtfsRealtime.transit_realtime.ITripUpdate = {
-		trip: { tripId, routeId: meta.routeId, directionId: meta.directionId, startDate },
+		trip: {
+			tripId,
+			routeId: meta.routeId,
+			directionId: meta.directionId,
+			startTime: startTimeOf(gtfs, tripId),
+			startDate,
+		},
 		timestamp: nowSeconds,
 	};
 	declareCancelled(tripUpdate);
@@ -369,6 +375,7 @@ function buildTripUpdate(
 			tripId,
 			routeId: meta.routeId,
 			directionId: meta.directionId,
+			startTime: startTimeOf(gtfs, tripId),
 			startDate,
 			scheduleRelationship: GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED,
 		},

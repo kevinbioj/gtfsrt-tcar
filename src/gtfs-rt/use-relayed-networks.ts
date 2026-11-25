@@ -30,6 +30,8 @@ export function useRelayedNetworks(
 	 * fusionnés ou éclatés y étant remplacés.
 	 */
 	canonicalStopId: (stopId: string, trip: GtfsRealtime.transit_realtime.ITripDescriptor | null | undefined) => string,
+	/** Le `start_time` théorique d'une course du GTFS, pour les positions (cf. `startTimeOf`). */
+	startTimeOf: (tripId: string) => string | undefined,
 ) {
 	const tripFeeds = new Map<string, Uint8Array>();
 	const vehiclePositions = new Map<string, Map<string, GtfsRealtime.transit_realtime.IVehiclePosition>>();
@@ -40,7 +42,10 @@ export function useRelayedNetworks(
 				const { provider, vehiclePositionsUrl } = network;
 				const vehicleFeed = await loadFeed(provider, "vehicle positions", vehiclePositionsUrl);
 				if (vehicleFeed !== undefined) {
-					vehiclePositions.set(provider, relayVehiclePositions(network, decode(vehicleFeed), canonicalStopId));
+					vehiclePositions.set(
+						provider,
+						relayVehiclePositions(network, decode(vehicleFeed), canonicalStopId, startTimeOf),
+					);
 				}
 
 				console.log(`✓ ${provider}: ${vehiclePositions.get(provider)?.size ?? 0} vehicle positions.`);
@@ -159,6 +164,7 @@ function relayVehiclePositions(
 	network: RelayedNetwork,
 	feed: GtfsRealtime.transit_realtime.FeedMessage,
 	canonicalStopId: (stopId: string, trip: GtfsRealtime.transit_realtime.ITripDescriptor | null | undefined) => string,
+	startTimeOf: (tripId: string) => string | undefined,
 ) {
 	const { provider } = network;
 	const relayed = new Map<string, GtfsRealtime.transit_realtime.IVehiclePosition>();
@@ -168,7 +174,10 @@ function relayVehiclePositions(
 		const number = vehicleNumber(network, vehicle?.vehicle);
 		if (!vehicle || number === undefined || !vehicle.position) continue;
 
-		if (vehicle.trip) prefixTrip(provider, vehicle.trip);
+		if (vehicle.trip) {
+			prefixTrip(provider, vehicle.trip);
+			if (vehicle.trip.tripId) vehicle.trip.startTime = startTimeOf(vehicle.trip.tripId) ?? vehicle.trip.startTime;
+		}
 		if (vehicle.stopId) vehicle.stopId = canonicalStopId(withPrefix(provider, vehicle.stopId), vehicle.trip);
 		vehicle.vehicle = { id: `${provider}:${number}` };
 

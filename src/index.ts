@@ -83,7 +83,7 @@ import {
 	republishedAlertId,
 	useServiceAlerts,
 } from "./gtfs-rt/use-service-alerts.js";
-import { canonicalStopId, normalizeStopName, useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
+import { canonicalStopId, normalizeStopName, startTimeOf, useStaticGtfs } from "./gtfs-rt/use-static-gtfs.js";
 import { type RememberedStopTime, useStopTimeMemory } from "./gtfs-rt/use-stop-time-memory.js";
 import { useVehicleFleet } from "./gtfs-rt/use-vehicle-fleet.js";
 import { useVehicleLocator, type VehicleLocation } from "./gtfs-rt/use-vehicle-locator.js";
@@ -181,15 +181,19 @@ const lineCartridges = useLineCartridges(LINE_CARTRIDGES_URL, LINE_CARTRIDGES_IN
 // TAE et TNI : relayés tels quels, sans rien de la vérification qui s'applique à TCAR.
 // La ligne et le sens d'une course se lisent dans le GTFS d'abord : la source ne donne pas toujours le sens,
 // dont dépend le quai d'un arrêt éclaté.
-const relayedNetworks = useRelayedNetworks(RELAYED_NETWORKS, (stopId, trip) => {
-	const meta = trip?.tripId ? staticGtfs.data.trips.get(trip.tripId) : undefined;
-	return canonicalStopId(
-		staticGtfs.data,
-		stopId,
-		meta?.routeId ?? trip?.routeId ?? undefined,
-		meta?.directionId ?? trip?.directionId ?? undefined,
-	);
-});
+const relayedNetworks = useRelayedNetworks(
+	RELAYED_NETWORKS,
+	(stopId, trip) => {
+		const meta = trip?.tripId ? staticGtfs.data.trips.get(trip.tripId) : undefined;
+		return canonicalStopId(
+			staticGtfs.data,
+			stopId,
+			meta?.routeId ?? trip?.routeId ?? undefined,
+			meta?.directionId ?? trip?.directionId ?? undefined,
+		);
+	},
+	(tripId) => startTimeOf(staticGtfs.data, tripId),
+);
 
 const hono = new Hono();
 
@@ -731,6 +735,7 @@ async function poll() {
 					tripId,
 					routeId,
 					directionId,
+					startTime: startTimeOf(staticGtfs.data, tripId),
 					startDate: run?.date,
 					scheduleRelationship: GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED,
 				},
@@ -1044,6 +1049,9 @@ async function pollTripUpdates() {
 				entity.tripUpdate.trip.scheduleRelationship =
 					GtfsRealtime.transit_realtime.TripDescriptor.ScheduleRelationship.SCHEDULED;
 				entity.tripUpdate.trip.tripId = resolvedTripId;
+				entity.tripUpdate.trip.startTime =
+					(resolvedTripId ? startTimeOf(staticGtfs.data, resolvedTripId) : undefined) ??
+					entity.tripUpdate.trip.startTime;
 				entity.tripUpdate.trip.startDate = startDate;
 				// Le flux ne renseigne jamais le sens : sans le GTFS statique, toute course passerait pour un
 				// aller et les suppressions déclarées au retour ne s'appliqueraient à rien.

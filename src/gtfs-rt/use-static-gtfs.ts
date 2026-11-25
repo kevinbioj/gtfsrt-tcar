@@ -1331,6 +1331,19 @@ export function parseServiceTime(value: string): number {
 }
 
 /**
+ * Le `start_time` d'une course pour son `TripDescriptor` : son premier départ de `stop_times.txt`,
+ * seule valeur admise pour une course hors `frequencies.txt` — et le GTFS n'en a pas. `undefined`
+ * pour une course qu'il ne connaît pas.
+ */
+export function startTimeOf(gtfs: StaticGtfs, tripId: string): string | undefined {
+	const departure = gtfs.tripDepartures.get(tripId);
+	if (departure === undefined || !Number.isFinite(departure)) return undefined;
+
+	const pad = (value: number) => String(value).padStart(2, "0");
+	return `${pad(Math.floor(departure / 3600))}:${pad(Math.floor(departure / 60) % 60)}:${pad(departure % 60)}`;
+}
+
+/**
  * L'identifiant d'un tracé emprunté : une empreinte de sa suite de quais. Elle ne dépend que des
  * arrêts, et survit donc à une régénération du GTFS qui ne les touche pas.
  */
