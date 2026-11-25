@@ -282,6 +282,8 @@ export function buildDetourEntities(
 				.slice(0, 8);
 			const spliced = resolveShape(gtfs, shapes, splicedShapes, problems, parts, fingerprint, group);
 			const shapeId = spliced?.shapeId ?? null;
+			// Sans tracé recousu, la `SelectedTrips` désigne une copie du tracé du GTFS (cf. `copyShape`).
+			const selectedShapeId = shapeId ?? copyShape(gtfs, shapes, problems, parts, group);
 
 			const original = gtfs.shapes.get(group.shapeId);
 			if (original !== undefined) {
@@ -319,7 +321,7 @@ export function buildDetourEntities(
 				entity: {
 					id: `TM:${group.network}:${parts}:${day.date}:${fingerprint}`,
 					tripModifications: {
-						selectedTrips: [{ tripIds: group.tripIds, shapeId: shapeId ?? undefined }],
+						selectedTrips: [{ tripIds: group.tripIds, shapeId: selectedShapeId ?? undefined }],
 						serviceDates: [day.date],
 						// `start_times` ne sert qu'à désigner un départ précis d'une course à fréquence. Les
 						// courses sont ici énumérées une à une : une liste non vide ne ferait que restreindre à
@@ -813,7 +815,7 @@ type SplicedShape = { shapeId: string; points: Coordinates[]; origins: (number |
 /**
  * Le tracé dévié correspondant à l'itinéraire d'origine de ces courses, en l'inscrivant au feed au
  * passage. `null` lorsqu'il n'y a rien à publier — aucun tracé dessiné, itinéraire inconnu, ou
- * recouture impossible : la `SelectedTrips` sort alors sans `shape_id`, le champ étant facultatif.
+ * recouture impossible : la `SelectedTrips` désigne alors une copie du tracé du GTFS (cf. `copyShape`).
  *
  * Mémoïsé par itinéraire ET par combinaison de tronçons : le même itinéraire ne se recoud pas de la
  * même façon selon ce qui s'y applique, et la même combinaison revient sur toutes les journées.
@@ -878,6 +880,41 @@ function buildShape(
 	const shapeId = `${group.network}:DEV:${parts}:${suffixOf(group.shapeId)}:${fingerprint}`;
 	shapes.set(shapeId, { shapeId, encodedPolyline: encodePolyline(outcome.points) });
 	return { shapeId, points: outcome.points, origins: outcome.origins };
+}
+
+/**
+ * Le tracé du GTFS de ces courses, recopié dans le feed lorsqu'aucun tracé recousu ne le remplace —
+ * aucun tronçon dessiné, ou recouture impossible. La `SelectedTrips` le désigne alors, et le feed se
+ * suffit à lui-même : un consommateur trouve dans chaque `TripModifications` le chemin des courses
+ * qu'elle sélectionne, sans aller le chercher dans le GTFS.
+ *
+ * La spécification veut un `shape_id` distinct de tous ceux de `shapes.txt` : la copie prend donc
+ * un identifiant à elle, « TCAR:GTFS:<tracé> ». Il ne dépend que du tracé d'origine — une même copie
+ * sert toutes les modifications et toutes les journées qui en ont besoin, et ne sort qu'une fois.
+ *
+ * `null` lorsque le GTFS ne connaît pas le tracé : il n'y a rien à copier.
+ */
+function copyShape(
+	gtfs: StaticGtfs,
+	shapes: Map<string, GtfsRealtime.transit_realtime.IShape>,
+	problems: Set<string>,
+	parts: string,
+	group: Group,
+): string | null {
+	const prefix = `${group.network}:`;
+	const local = group.shapeId.startsWith(prefix) ? group.shapeId.slice(prefix.length) : group.shapeId;
+	const shapeId = `${group.network}:GTFS:${local}`;
+	if (shapes.has(shapeId)) return shapeId;
+
+	const original = gtfs.shapes.get(group.shapeId);
+	if (original === undefined || original.length < 2) {
+		// Le même constat que `buildShape`, mot pour mot : le journal ne le lit qu'une fois.
+		problems.add(`${parts} — ${group.shapeId} absent du GTFS, tracé non publié pour ces courses.`);
+		return null;
+	}
+
+	shapes.set(shapeId, { shapeId, encodedPolyline: encodePolyline(original) });
+	return shapeId;
 }
 
 function report(
